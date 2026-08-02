@@ -30,8 +30,8 @@ ignore = ["S101"]  # assert được phép trong test
 python_version = "3.12"
 strict = true
 # mypy lỗi cứng nếu đường dẫn không tồn tại, nên danh sách này lớn dần theo repo:
-# Task 3 sẽ thêm "services/api/src". Trước Task 2 chưa có mã Python nào để kiểm.
-files = ["packages/core/src"]
+# Từ đây trở đi danh sách này không đổi nữa.
+files = ["packages/core/src", "services/api/src"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
