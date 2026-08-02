@@ -2,7 +2,13 @@
 
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_INSECURE_DEFAULTS = {
+    "session_secret": "dev-only-do-not-use-in-production",
+    "oidc_client_secret": "loom-dev-secret",
+}
 
 
 class Settings(BaseSettings):
@@ -11,6 +17,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        frozen=True,
     )
 
     environment: str = "local"
@@ -38,6 +45,20 @@ class Settings(BaseSettings):
     oidc_redirect_url: str = "http://loom.localhost/api/v1/auth/callback"
 
     public_base_url: str = "http://loom.localhost"
+
+    @model_validator(mode="after")
+    def _reject_default_secrets_outside_local(self) -> "Settings":
+        if self.environment == "local":
+            return self
+        still_default = [
+            name for name, insecure in _INSECURE_DEFAULTS.items() if getattr(self, name) == insecure
+        ]
+        if still_default:
+            raise ValueError(
+                f"phải đặt giá trị thật cho {', '.join(sorted(still_default))} "
+                f"khi LOOM_ENVIRONMENT={self.environment!r}"
+            )
+        return self
 
 
 @lru_cache
