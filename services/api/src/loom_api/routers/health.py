@@ -1,8 +1,7 @@
 from fastapi import APIRouter
 
+from loom_api import VERSION
 from loom_core.schemas import HealthStatus
-
-VERSION = "0.1.0"
 
 router = APIRouter(tags=["health"])
 

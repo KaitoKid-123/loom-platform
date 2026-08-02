@@ -17,5 +17,7 @@ def configure_logging(level: str = "INFO") -> None:
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
-        cache_logger_on_first_use=True,
+        # Phải tắt: create_app() cấu hình lại structlog mỗi lần gọi, mà cache
+        # khoá cứng cấu hình vào instance logger ngay lần dùng đầu tiên.
+        cache_logger_on_first_use=False,
     )
