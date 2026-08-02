@@ -1,0 +1,23 @@
+# Theo yêu cầu của chủ dự án: tài liệu thiết kế không vào repo
+docs/
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+node_modules/
+dist/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+kubeconfig
+*.log
+.tilt/

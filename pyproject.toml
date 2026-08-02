@@ -1,0 +1,45 @@
+[tool.uv.workspace]
+members = ["packages/*", "services/*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=6.0",
+    "httpx>=0.28",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "pydantic>=2.10",        # plugin mypy bên dưới cần nó có mặt ngay từ Task 1
+    "testcontainers[postgres]>=4.9",
+    "cryptography>=44.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["packages/core/src", "services/api/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "S", "RUF"]
+ignore = ["S101"]  # assert được phép trong test
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S105", "S106"]  # hằng số mật khẩu giả trong test
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+# mypy lỗi cứng nếu đường dẫn không tồn tại, nên danh sách này lớn dần theo repo:
+# Task 3 sẽ thêm "services/api/src". Trước Task 2 chưa có mã Python nào để kiểm.
+files = ["packages/core/src"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["testcontainers.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages", "services"]
+markers = ["integration: cần Docker (testcontainers)"]
+addopts = "-m 'not integration'"
