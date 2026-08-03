@@ -65,6 +65,6 @@ helm-validate:  ## helm lint + kubeconform cho cả ba môi trường
 		echo "→ $$env"; \
 		helm template loom deploy/helm/loom -n $(NS) \
 			-f deploy/envs/values-$$env.yaml \
-		| kubeconform -strict -summary -ignore-missing-schemas \
+		| kubeconform -strict -summary \
 			-kubernetes-version 1.32.0; \
 	done
