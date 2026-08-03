@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     db_name: str = "loom"
     db_user: str = "loom"
     db_password: str = "loom"  # noqa: S105 — giá trị mặc định cho dev, không phải secret thật
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
 
     # Session cookie
     session_secret: str = "dev-only-do-not-use-in-production"  # noqa: S105

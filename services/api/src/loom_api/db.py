@@ -27,9 +27,9 @@ def build_sqlalchemy_url(settings: Settings) -> str:
 
 
 class Database:
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, pool_size: int = 5, max_overflow: int = 5) -> None:
         self._engine: AsyncEngine = create_async_engine(
-            url, pool_pre_ping=True, pool_size=5, max_overflow=5
+            url, pool_pre_ping=True, pool_size=pool_size, max_overflow=max_overflow
         )
         self._sessionmaker = async_sessionmaker(self._engine, expire_on_commit=False)
 

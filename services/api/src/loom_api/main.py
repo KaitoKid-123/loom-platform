@@ -14,12 +14,18 @@ from loom_core.config import get_settings
 def create_app(database: Database | None = None) -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
-    db = database or Database(build_sqlalchemy_url(settings))
+    owns_db = database is None
+    db = database or Database(
+        build_sqlalchemy_url(settings),
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
-        await db.dispose()
+        if owns_db:
+            await db.dispose()
 
     app = FastAPI(
         title="Loom API",
