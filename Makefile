@@ -50,3 +50,10 @@ web-install:  ## Cài dependency web
 .PHONY: web-test
 web-test:  ## Test frontend
 	cd web && npm run test -- --run && npm run typecheck
+
+.PHONY: build-web
+build-web:  ## Build image loom-web
+	docker build -f web/Dockerfile -t loom/web:$(IMAGE_TAG) .
+
+.PHONY: build
+build: build-api build-web  ## Build cả hai image
