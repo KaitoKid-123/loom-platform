@@ -5,10 +5,14 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlencode
 
+import httpx
 import jwt
 import structlog
 from jwt import PyJWK
+
+from loom_core.config import Settings
 
 JWKSFetcher = Callable[[], Awaitable[dict[str, Any]]]
 
@@ -136,3 +140,118 @@ class OIDCVerifier:
             email=email,
             display_name=str(payload.get("name") or email or subject),
         )
+
+
+class TokenExchangeError(Exception):
+    """Nhà cung cấp OIDC từ chối đổi code lấy token."""
+
+
+@dataclass(frozen=True)
+class OIDCEndpoints:
+    authorization_endpoint: str  # địa chỉ công khai — trình duyệt dùng
+    token_endpoint: str  # địa chỉ nội bộ — pod dùng
+    jwks_uri: str  # địa chỉ nội bộ — pod dùng
+
+
+@dataclass(frozen=True)
+class TokenSet:
+    id_token: str
+    access_token: str | None
+    refresh_token: str | None
+
+
+SCOPES = "openid email profile offline_access"
+
+
+class OIDCClient:
+    """Nói chuyện với nhà cung cấp OIDC.
+
+    Trình duyệt và pod nhìn Dex ở hai địa chỉ khác nhau. Endpoint dành cho
+    trình duyệt giữ nguyên địa chỉ công khai; endpoint gọi từ server được
+    viết lại sang địa chỉ nội bộ trong cụm.
+    """
+
+    def __init__(self, settings: Settings, http: httpx.AsyncClient) -> None:
+        self._settings = settings
+        self._http = http
+        self._endpoints: OIDCEndpoints | None = None
+
+    def _to_internal(self, url: str) -> str:
+        internal = self._settings.oidc_internal_base
+        public = self._settings.public_base_url
+        if internal and url.startswith(public):
+            return internal + url[len(public) :]
+        return url
+
+    async def endpoints(self) -> OIDCEndpoints:
+        if self._endpoints is not None:
+            return self._endpoints
+
+        discovery_url = self._to_internal(
+            f"{self._settings.oidc_issuer}/.well-known/openid-configuration"
+        )
+        response = await self._http.get(discovery_url, timeout=10.0)
+        response.raise_for_status()
+        document = response.json()
+
+        self._endpoints = OIDCEndpoints(
+            authorization_endpoint=document["authorization_endpoint"],
+            token_endpoint=self._to_internal(document["token_endpoint"]),
+            jwks_uri=self._to_internal(document["jwks_uri"]),
+        )
+        return self._endpoints
+
+    async def authorization_url(self, state: str, code_challenge: str) -> str:
+        endpoints = await self.endpoints()
+        query = urlencode(
+            {
+                "response_type": "code",
+                "client_id": self._settings.oidc_client_id,
+                "redirect_uri": self._settings.oidc_redirect_url,
+                "scope": SCOPES,
+                "state": state,
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256",
+            }
+        )
+        return f"{endpoints.authorization_endpoint}?{query}"
+
+    async def exchange_code(self, code: str, code_verifier: str) -> TokenSet:
+        endpoints = await self.endpoints()
+        response = await self._http.post(
+            endpoints.token_endpoint,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": self._settings.oidc_redirect_url,
+                "client_id": self._settings.oidc_client_id,
+                "client_secret": self._settings.oidc_client_secret,
+                "code_verifier": code_verifier,
+            },
+            timeout=10.0,
+        )
+        if response.status_code != 200:
+            raise TokenExchangeError(f"nhà cung cấp trả về {response.status_code}")
+        payload = response.json()
+        if "id_token" not in payload:
+            raise TokenExchangeError("phản hồi thiếu id_token")
+        return TokenSet(
+            id_token=payload["id_token"],
+            access_token=payload.get("access_token"),
+            refresh_token=payload.get("refresh_token"),
+        )
+
+    async def fetch_jwks(self) -> dict[str, Any]:
+        endpoints = await self.endpoints()
+        try:
+            response = await self._http.get(endpoints.jwks_uri, timeout=10.0)
+            response.raise_for_status()
+            result: dict[str, Any] = response.json()
+        except Exception as exc:
+            # Task 6 đã bịt lỗi *entry* JWKS hỏng, nhưng lỗi *vận chuyển* (Dex
+            # không tới được, timeout, JSON rác) vẫn thoát nguyên si khỏi
+            # verify() và thành 500. Gói lại thành InvalidIdToken để handler
+            # của Task 8 bắt được và trả 401.
+            logger.warning("oidc.jwks_fetch_failed", error=type(exc).__name__)
+            raise InvalidIdToken("jwks_unavailable") from exc
+        return result
