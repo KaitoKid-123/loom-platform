@@ -3,6 +3,7 @@
 node_modules
 docs
 web/dist
+**/tests
 **/__pycache__
 **/.pytest_cache
 **/.mypy_cache
