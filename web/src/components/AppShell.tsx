@@ -27,7 +27,12 @@ export function AppShell({ user, onLogout, children }: AppShellProps) {
         <span className="font-semibold tracking-tight">Loom</span>
         <span className="text-sm text-dim">Chưa chọn workspace</span>
         <div className="flex-1" />
-        <kbd className="rounded border border-line px-2 py-0.5 text-xs text-dim">⌘K</kbd>
+        {/* aria-hidden: Giai đoạn 0 chưa có command palette. Để screen reader
+            đọc "⌘K" là hứa một tính năng chưa tồn tại. Bỏ aria-hidden khi
+            palette thật ra đời. */}
+        <kbd aria-hidden className="rounded border border-line px-2 py-0.5 text-xs text-dim">
+          ⌘K
+        </kbd>
         <span className="text-sm">{user.display_name}</span>
         <button
           type="button"
