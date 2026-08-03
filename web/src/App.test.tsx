@@ -12,8 +12,12 @@ vi.mock('./lib/navigate', () => ({ navigateTo: vi.fn() }))
 const USER = { subject: 'CgRsb25n', email: 'long@loom.local', display_name: 'Long' }
 
 function renderApp() {
+  // `retry` ở đây KHÔNG có hiệu lực: useCurrentUser truyền `retry` trực tiếp vào
+  // useQuery nên đè lên defaultOptions. `retryDelay: 0` thì có — nó cho 2 lần
+  // thử lại của lỗi khác 401 chạy tức thì, thay vì chờ backoff thật ~3 giây và
+  // làm findByRole hết hạn. Test này kiểm UI lỗi hiện ra, không kiểm backoff.
   const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+    defaultOptions: { queries: { retryDelay: 0 } },
   })
   return render(
     <QueryClientProvider client={queryClient}>
