@@ -63,7 +63,10 @@ async def test_context_does_not_leak_across_requests(client: AsyncClient) -> Non
     assert not leaked, f"workspace_id rò sang log của request sau: {leaked}"
 
 
-def test_request_context_middleware_is_outermost() -> None:
-    """Bảo vệ bất biến ở Change 2 — index 0 nghĩa là ngoài cùng."""
+async def test_request_context_middleware_is_outermost() -> None:
+    """Canh bất biến thứ tự đăng ký — index 0 nghĩa là ngoài cùng."""
     app = create_app()
-    assert app.user_middleware[0].cls is RequestContextMiddleware
+    # Chạy lifespan dù test này không gửi request nào: quy tắc là **mọi**
+    # create_app() phải có lifespan tương ứng, nếu không engine bị bỏ rơi.
+    async with app.router.lifespan_context(app):
+        assert app.user_middleware[0].cls is RequestContextMiddleware
