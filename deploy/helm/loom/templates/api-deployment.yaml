@@ -65,6 +65,14 @@ spec:
                 secretKeyRef:
                   name: {{ include "loom.appSecretName" . }}
                   key: session-secret
+          # Cold start đo được 1.8s khi rảnh nhưng tới 35s khi CPU bị tranh chấp
+          # (k3d + CNPG + Postgres + Dex + Tilt + docker build cùng chạy).
+          # startupProbe cho tới 60s, và livenessProbe chỉ chạy sau khi nó qua —
+          # nên liveness không cần bao cả pha khởi động.
+          startupProbe:
+            httpGet: { path: /api/v1/healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
           livenessProbe:
             httpGet: { path: /api/v1/healthz, port: http }
             initialDelaySeconds: 5

@@ -2,6 +2,10 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{/* Cố ý bỏ qua .Release.Name: mọi lần install đều ra loom-api/loom-web,
+   đúng thứ Tiltfile và bài kiểm thu ở Task 16/17 tham chiếu bằng tên cứng.
+   Cái giá là hai release không bao giờ có thể chung sống trong một namespace —
+   đừng "sửa" định nghĩa này để hỗ trợ nhiều release mà không tính đến điều đó. */}}
 {{- define "loom.fullname" -}}
 {{- printf "%s" (include "loom.name" .) -}}
 {{- end -}}

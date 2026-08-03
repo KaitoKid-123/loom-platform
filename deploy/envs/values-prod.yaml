@@ -9,6 +9,8 @@ web:
   replicas: 2
 ingress:
   host: loom.internal
+  # https:// ở dưới giả định TLS được chấm dứt phía trước Ingress này
+  # (load balancer/reverse proxy ngoài cụm) — ingress.yaml không có tls: stanza.
 app:
   environment: prod
   logLevel: INFO

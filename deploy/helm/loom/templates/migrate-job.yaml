@@ -21,6 +21,8 @@ spec:
       restartPolicy: Never
       securityContext:
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: alembic
           image: "{{ .Values.api.image }}:{{ .Values.api.tag }}"
@@ -32,4 +34,11 @@ spec:
           resources:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { memory: 256Mi }
+          # Kiểm chứng: `docker run --rm --read-only -w /app/services/api
+          # loom/api:dev alembic history` chạy sạch, exit 0 — alembic không
+          # cần ghi gì ra rootfs cho lệnh `upgrade head`.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
 {{- end }}
