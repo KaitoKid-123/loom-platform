@@ -2,6 +2,7 @@
 SHELL := /bin/bash
 CLUSTER := loom
 NS := loom
+IMAGE_TAG ?= dev
 
 .PHONY: help
 help:  ## Liệt kê các lệnh
@@ -37,6 +38,10 @@ migrate:  ## Chạy migration lên head
 .PHONY: migration
 migration:  ## Sinh migration mới: make migration m="mô tả"
 	cd services/api && uv run alembic revision -m "$(m)"
+
+.PHONY: build-api
+build-api:  ## Build image loom-api
+	docker build -f services/api/Dockerfile -t loom/api:$(IMAGE_TAG) .
 
 .PHONY: web-install
 web-install:  ## Cài dependency web

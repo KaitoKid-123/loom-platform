@@ -1,0 +1,10 @@
+.git
+.venv
+node_modules
+docs
+web/dist
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+.tilt
