@@ -18,3 +18,9 @@ async def test_openapi_is_served(client: AsyncClient) -> None:
     response = await client.get("/api/v1/openapi.json")
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "Loom API"
+
+
+async def test_readyz_reports_degraded_without_database(client: AsyncClient) -> None:
+    response = await client.get("/api/v1/readyz")
+    assert response.status_code == 503
+    assert response.json()["checks"]["database"].startswith("error")

@@ -12,6 +12,7 @@ dev = [
     "pydantic>=2.10",        # plugin mypy bên dưới cần nó có mặt ngay từ Task 1
     "testcontainers[postgres]>=4.9",
     "cryptography>=44.0",
+    "psycopg2-binary>=2.9",  # driver sync chỉ dùng để verify schema trong test_migrations.py
 ]
 
 [tool.ruff]

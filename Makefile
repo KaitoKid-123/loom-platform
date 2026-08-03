@@ -30,6 +30,14 @@ test:  ## Unit test (không cần Docker)
 test-int:  ## Integration test (cần Docker)
 	uv run pytest -m integration -o addopts=""
 
+.PHONY: migrate
+migrate:  ## Chạy migration lên head
+	cd services/api && uv run alembic upgrade head
+
+.PHONY: migration
+migration:  ## Sinh migration mới: make migration m="mô tả"
+	cd services/api && uv run alembic revision -m "$(m)"
+
 .PHONY: web-install
 web-install:  ## Cài dependency web
 	cd web && npm ci
