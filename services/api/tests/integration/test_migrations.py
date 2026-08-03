@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 API_DIR = Path(__file__).resolve().parents[2]
 
