@@ -1,9 +1,10 @@
 .git
-.venv
-node_modules
+**/.venv
+**/node_modules
 docs
 web/dist
 **/tests
+**/Dockerfile
 **/__pycache__
 **/.pytest_cache
 **/.mypy_cache

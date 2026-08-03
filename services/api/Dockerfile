@@ -1,4 +1,8 @@
 # syntax=docker/dockerfile:1
+
+# trixie chứ không bookworm: uv bỏ biến thể bookworm từ 0.11.2, chuyển sang
+# Debian 13 (trixie). Hai stage PHẢI cùng một bản Debian — .venv biên dịch ở
+# builder được copy sang runtime, lệch bản là lệch ABI glibc.
 FROM ghcr.io/astral-sh/uv:0.11.21-python3.12-trixie-slim AS builder
 
 WORKDIR /app
