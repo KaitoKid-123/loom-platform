@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _INSECURE_DEFAULTS = {
@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     oidc_redirect_url: str = "http://loom.localhost/api/v1/auth/callback"
 
     public_base_url: str = "http://loom.localhost"
+
+    @field_validator("public_base_url", "oidc_issuer", "oidc_internal_base")
+    @classmethod
+    def _strip_trailing_slash(cls, value: str | None) -> str | None:
+        """Một dấu / thừa ở cuối làm hỏng phép kiểm biên trong _to_internal:
+        `startswith(public + "/")` sẽ thành so sánh hai gạch chéo và không khớp
+        cả URL hợp lệ, tắt câm split-horizon mà không báo lỗi gì."""
+        return value.rstrip("/") if value else value
 
     @model_validator(mode="after")
     def _reject_default_secrets_outside_local(self) -> "Settings":

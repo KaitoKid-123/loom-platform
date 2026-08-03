@@ -34,6 +34,41 @@ def test_default_secrets_allowed_in_local() -> None:
     assert settings.session_secret == "dev-only-do-not-use-in-production"
 
 
+def test_public_base_url_trailing_slash_is_stripped() -> None:
+    settings = Settings(public_base_url="http://loom.localhost/")
+    assert settings.public_base_url == "http://loom.localhost"
+
+
+def test_public_base_url_without_trailing_slash_is_unchanged() -> None:
+    settings = Settings(public_base_url="http://loom.localhost")
+    assert settings.public_base_url == "http://loom.localhost"
+
+
+def test_oidc_issuer_trailing_slash_is_stripped() -> None:
+    settings = Settings(oidc_issuer="http://loom.localhost/dex/")
+    assert settings.oidc_issuer == "http://loom.localhost/dex"
+
+
+def test_oidc_issuer_without_trailing_slash_is_unchanged() -> None:
+    settings = Settings(oidc_issuer="http://loom.localhost/dex")
+    assert settings.oidc_issuer == "http://loom.localhost/dex"
+
+
+def test_oidc_internal_base_trailing_slash_is_stripped() -> None:
+    settings = Settings(oidc_internal_base="http://dex.loom.svc.cluster.local:5556/")
+    assert settings.oidc_internal_base == "http://dex.loom.svc.cluster.local:5556"
+
+
+def test_oidc_internal_base_without_trailing_slash_is_unchanged() -> None:
+    settings = Settings(oidc_internal_base="http://dex.loom.svc.cluster.local:5556")
+    assert settings.oidc_internal_base == "http://dex.loom.svc.cluster.local:5556"
+
+
+def test_oidc_internal_base_none_is_left_as_none() -> None:
+    settings = Settings(oidc_internal_base=None)
+    assert settings.oidc_internal_base is None
+
+
 def test_get_settings_is_cached(monkeypatch) -> None:
     get_settings.cache_clear()
     monkeypatch.setenv("LOOM_SESSION_SECRET", "real-secret")

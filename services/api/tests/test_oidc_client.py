@@ -58,6 +58,36 @@ async def test_no_rewrite_when_internal_base_is_unset() -> None:
     assert endpoints.token_endpoint == "http://loom.localhost/dex/token"
 
 
+async def test_trailing_slash_in_public_base_url_does_not_disable_rewrite() -> None:
+    """`_to_internal` so khớp biên bằng `startswith(public + "/")`.
+
+    Nếu `public_base_url` có dấu / thừa ở cuối ("http://loom.localhost/"),
+    phép so khớp đó sẽ thành hai gạch chéo liên tiếp và không khớp cả
+    token_endpoint hợp lệ ("http://loom.localhost/dex/token") — tắt câm
+    split-horizon mà không báo lỗi gì, vì pod sẽ dùng thẳng địa chỉ công khai
+    không phân giải được từ trong cụm. `Settings._strip_trailing_slash` phải
+    dọn dấu / này NGAY tại tầng cấu hình để mọi nơi dùng public_base_url đều
+    được lợi, không chỉ `_to_internal`.
+
+    Dùng `Settings(...)` (không phải `model_copy`) vì `model_copy(update=...)`
+    của pydantic KHÔNG chạy lại field_validator trên các trường được cập nhật.
+    """
+    settings = Settings(
+        oidc_issuer="http://loom.localhost/dex",
+        oidc_internal_base="http://dex.loom.svc.cluster.local:5556",
+        oidc_client_id="loom",
+        oidc_client_secret="loom-dev-secret",
+        oidc_redirect_url="http://loom.localhost/api/v1/auth/callback",
+        public_base_url="http://loom.localhost/",  # dấu / thừa ở cuối, cố ý
+    )
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=DISCOVERY))
+    client = OIDCClient(settings, httpx.AsyncClient(transport=transport))
+
+    endpoints = await client.endpoints()
+
+    assert endpoints.token_endpoint == "http://dex.loom.svc.cluster.local:5556/dex/token"
+
+
 async def test_discovery_is_cached() -> None:
     calls = 0
 
@@ -118,6 +148,48 @@ async def test_exchange_code_raises_on_provider_error() -> None:
     client = make_client(httpx.MockTransport(handle))
     with pytest.raises(TokenExchangeError):
         await client.exchange_code(code="bad", code_verifier="v")
+
+
+def _malformed_body_client(content: bytes) -> OIDCClient:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("openid-configuration"):
+            return httpx.Response(200, json=DISCOVERY)
+        return httpx.Response(200, content=content)
+
+    return make_client(httpx.MockTransport(handle))
+
+
+async def test_exchange_code_raises_on_non_json_body() -> None:
+    """Task 6 bịt lỗi này cho fetch_jwks() nhưng chưa từng áp cho exchange_code():
+    một body 200 không phải JSON trước đây thoát nguyên si thành
+    json.decoder.JSONDecodeError, không phải TokenExchangeError mà handler của
+    Task 8 biết bắt.
+    """
+    client = _malformed_body_client(b"not json at all")
+    with pytest.raises(TokenExchangeError):
+        await client.exchange_code(code="c", code_verifier="v")
+
+
+async def test_exchange_code_raises_on_json_array_body() -> None:
+    client = _malformed_body_client(b'["a", "b"]')
+    with pytest.raises(TokenExchangeError):
+        await client.exchange_code(code="c", code_verifier="v")
+
+
+async def test_exchange_code_raises_on_json_scalar_body() -> None:
+    """Trước bản vá: `"id_token" not in 42` ném TypeError trần, không phải
+    TokenExchangeError."""
+    client = _malformed_body_client(b"42")
+    with pytest.raises(TokenExchangeError):
+        await client.exchange_code(code="c", code_verifier="v")
+
+
+async def test_exchange_code_raises_on_json_null_body() -> None:
+    """Trước bản vá: `"id_token" not in None` ném TypeError trần, không phải
+    TokenExchangeError."""
+    client = _malformed_body_client(b"null")
+    with pytest.raises(TokenExchangeError):
+        await client.exchange_code(code="c", code_verifier="v")
 
 
 async def test_fetch_jwks_uses_internal_address() -> None:

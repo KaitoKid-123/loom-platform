@@ -242,8 +242,13 @@ class OIDCClient:
         )
         if response.status_code != 200:
             raise TokenExchangeError(f"nhà cung cấp trả về {response.status_code}")
-        payload = response.json()
-        if "id_token" not in payload:
+
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise TokenExchangeError("phản hồi không phải JSON hợp lệ") from exc
+
+        if not isinstance(payload, dict) or "id_token" not in payload:
             raise TokenExchangeError("phản hồi thiếu id_token")
         return TokenSet(
             id_token=payload["id_token"],
