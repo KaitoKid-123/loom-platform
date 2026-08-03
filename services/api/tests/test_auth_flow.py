@@ -5,7 +5,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from loom_api.main import create_app
-from loom_api.oidc_verifier import IdTokenClaims
+from loom_api.oidc_verifier import IdTokenClaims, InvalidIdToken
 
 DISCOVERY = {
     "issuer": "http://loom.localhost/dex",
@@ -37,6 +37,25 @@ class FakeUserStore:
         self.sessions.pop(session_id, None)
 
 
+class UnreconstructableSessionStore:
+    """load_session() không dựng lại được claims — mô phỏng hàng DB hỏng
+    (subject rỗng) mà PostgresUserStore.load_session() gặp khi đọc thẳng từ
+    DB, đi vòng qua verify(). Xem probe thực tế trên Postgres thật ở review
+    trước: __post_init__ của IdTokenClaims ném InvalidIdToken đúng trên
+    đường này."""
+
+    async def upsert_user_and_create_session(
+        self, claims: IdTokenClaims, refresh_token: str | None
+    ) -> str:
+        raise NotImplementedError
+
+    async def load_session(self, session_id: str) -> IdTokenClaims | None:
+        raise InvalidIdToken("empty_subject")
+
+    async def delete_session(self, session_id: str) -> None:
+        pass
+
+
 def oidc_transport() -> httpx.MockTransport:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("openid-configuration"):
@@ -63,10 +82,16 @@ async def app_client(store: FakeUserStore):
         oidc_http=httpx.AsyncClient(transport=oidc_transport()),
         verify_id_token=verify,
     )
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://loom.localhost"
-    ) as client:
-        yield client
+    # Mọi create_app() phải có lifespan tương ứng chạy (xem conftest.py's
+    # `client` fixture và ghi chú ở test_request_context_middleware_is_outermost):
+    # nếu không, engine/connection do create_app() dựng lên bị bỏ rơi. Fixture
+    # này trước đây bỏ qua lifespan — vô hại hôm nay chỉ vì oidc_http được tiêm
+    # (owns_http=False) và DB async engine không kết nối eager, nhưng đó chính
+    # là kiểu sai lệch quy tắc đã gây rò rỉ engine ở Task 5.
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://loom.localhost") as client:
+            yield client
 
 
 async def test_login_redirects_to_provider(app_client: AsyncClient) -> None:
@@ -143,6 +168,27 @@ async def test_me_returns_current_user_after_login(app_client: AsyncClient) -> N
         "email": "long@loom.local",
         "display_name": "Long",
     }
+
+
+async def test_me_returns_401_when_session_row_is_unreconstructable() -> None:
+    """load_session() có thể ném InvalidIdToken (hàng DB hỏng, ví dụ subject
+    rỗng, đi vòng qua verify()). Với client thì phiên đơn giản không dùng
+    được — phải là 401, không phải 500."""
+
+    async def verify(_id_token: str) -> IdTokenClaims:
+        return IdTokenClaims(subject="x", email="x@loom.local", display_name="X")
+
+    app = create_app(
+        user_store=UnreconstructableSessionStore(),
+        oidc_http=httpx.AsyncClient(transport=oidc_transport()),
+        verify_id_token=verify,
+    )
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://loom.localhost") as client:
+            client.cookies.set("loom_session", "whatever-session-id", domain="loom.localhost")
+            response = await client.get("/api/v1/me")
+            assert response.status_code == 401
 
 
 async def test_logout_clears_session(app_client: AsyncClient) -> None:
