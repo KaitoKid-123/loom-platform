@@ -18,6 +18,10 @@ def create_app() -> FastAPI:
         docs_url="/api/v1/docs",
     )
     app.state.settings = settings
+    # Phải là lệnh add_middleware() CUỐI CÙNG. Starlette bọc middleware theo thứ
+    # tự đăng ký đảo ngược, nên cái thêm sau cùng chạy ngoài cùng — vào trước
+    # (dọn sạch contextvars) và ra sau. Middleware nào cũng bind contextvars thì
+    # phải đăng ký TRƯỚC dòng này, không bao giờ sau.
     app.add_middleware(RequestContextMiddleware)
     app.include_router(health.router, prefix="/api/v1")
     return app
