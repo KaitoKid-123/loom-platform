@@ -1,7 +1,10 @@
+import asyncio
+
 import httpx
 import pytest
 
-from loom_api.oidc import InvalidIdToken, OIDCClient, TokenExchangeError
+from loom_api.oidc_client import OIDCClient, TokenExchangeError
+from loom_api.oidc_verifier import InvalidIdToken
 from loom_core.config import Settings
 
 DISCOVERY = {
@@ -99,6 +102,23 @@ async def test_discovery_is_cached() -> None:
     client = make_client(httpx.MockTransport(handle))
     await client.endpoints()
     await client.endpoints()
+    assert calls == 1
+
+
+async def test_concurrent_cold_callers_trigger_single_discovery_fetch() -> None:
+    calls = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=DISCOVERY)
+
+    async def sleepy_handle(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0)  # nhường điều khiển, mở cửa cho thundering herd
+        return handle(request)
+
+    client = make_client(httpx.MockTransport(sleepy_handle))
+    await asyncio.gather(*(client.endpoints() for _ in range(20)))
     assert calls == 1
 
 

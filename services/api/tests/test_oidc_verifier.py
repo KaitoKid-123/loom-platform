@@ -11,7 +11,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
-from loom_api.oidc import InvalidIdToken, OIDCVerifier
+from loom_api.oidc_verifier import InvalidIdToken, OIDCVerifier
 
 ISSUER = "http://loom.localhost/dex"
 CLIENT_ID = "loom"
