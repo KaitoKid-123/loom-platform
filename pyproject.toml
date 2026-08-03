@@ -32,7 +32,7 @@ python_version = "3.12"
 strict = true
 # mypy lỗi cứng nếu đường dẫn không tồn tại, nên danh sách này lớn dần theo repo:
 # Từ đây trở đi danh sách này không đổi nữa.
-files = ["packages/core/src", "services/api/src"]
+files = ["packages/core/src", "services/api/src", "services/api/migrations"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
