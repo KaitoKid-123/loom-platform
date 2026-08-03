@@ -113,19 +113,65 @@ async def test_login_sets_transaction_cookie(app_client: AsyncClient) -> None:
     assert "samesite=lax" in header
 
 
-async def test_callback_without_transaction_cookie_is_rejected(
-    app_client: AsyncClient,
+async def test_callback_without_transaction_cookie_redirects_with_error(
+    app_client: AsyncClient, store: FakeUserStore
 ) -> None:
+    """callback chỉ bao giờ được tới qua redirect toàn trang từ Dex — không có
+    caller lập trình nào. Cookie giao dịch hết hạn (khung 10 phút mà MFA hay
+    một IdP liên kết hoàn toàn có thể vượt quá) không được để người dùng kẹt
+    trên JSON thô; phải là một trang họ điều hướng được."""
     response = await app_client.get("/api/v1/auth/callback?code=x&state=y")
-    assert response.status_code == 400
+    assert response.status_code == 307
+    assert response.headers["location"] == "/?error=login_failed"
+    assert not store.upserts
+    assert not app_client.cookies.get("loom_session")
 
 
-async def test_callback_with_mismatched_state_is_rejected(
-    app_client: AsyncClient,
+async def test_callback_with_mismatched_state_redirects_with_error(
+    app_client: AsyncClient, store: FakeUserStore
 ) -> None:
     await app_client.get("/api/v1/auth/login")
     response = await app_client.get("/api/v1/auth/callback?code=x&state=wrong-state")
-    assert response.status_code == 400
+    assert response.status_code == 307
+    assert response.headers["location"] == "/?error=login_failed"
+    assert not store.upserts
+    assert not app_client.cookies.get("loom_session")
+
+
+async def test_callback_with_exchange_failure_redirects_with_error(
+    store: FakeUserStore,
+) -> None:
+    """Nhánh thứ ba callback có thể trả lỗi cho người dùng: exchange_code() bị
+    nhà cung cấp từ chối (TokenExchangeError). Trước đây đây cũng là 400/401
+    JSON thô; giờ phải redirect giống hai nhánh trên, và vẫn không tạo session."""
+
+    async def verify(_id_token: str) -> IdTokenClaims:
+        return IdTokenClaims(subject="CgRsb25n", email="long@loom.local", display_name="Long")
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("openid-configuration"):
+            return httpx.Response(200, json=DISCOVERY)
+        if request.url.path.endswith("/token"):
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        return httpx.Response(404)
+
+    app = create_app(
+        user_store=store,
+        oidc_http=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        verify_id_token=verify,
+    )
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://loom.localhost") as client:
+            login = await client.get("/api/v1/auth/login")
+            state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+
+            response = await client.get(f"/api/v1/auth/callback?code=bad&state={state}")
+
+            assert response.status_code == 307
+            assert response.headers["location"] == "/?error=login_failed"
+            assert not store.upserts
+            assert not client.cookies.get("loom_session")
 
 
 async def test_full_login_flow_creates_session(

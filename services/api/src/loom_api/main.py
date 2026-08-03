@@ -11,7 +11,7 @@ from loom_api.middleware import RequestContextMiddleware
 from loom_api.oidc_client import OIDCClient
 from loom_api.oidc_verifier import IdTokenClaims, OIDCVerifier
 from loom_api.routers import auth, health
-from loom_api.sessions import PostgresUserStore, UserStore
+from loom_api.user_store import PostgresUserStore, UserStore
 from loom_core.config import get_settings
 
 VerifyIdToken = Callable[[str], Awaitable[IdTokenClaims]]

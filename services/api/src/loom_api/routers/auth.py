@@ -46,19 +46,25 @@ async def login(request: Request) -> RedirectResponse:
 async def callback(request: Request, code: str = "", state: str = "") -> RedirectResponse:
     settings = request.app.state.settings
 
+    # callback chỉ bao giờ được tới qua redirect toàn trang từ Dex — không có
+    # caller lập trình nào. Vì vậy MỌI nhánh lỗi mà người dùng có thể chạm tới
+    # phải trả về một trang họ điều hướng được, không phải JSON thô không lối
+    # thoát. Chi tiết (reason) vẫn chỉ vào log — KHÔNG đưa vào query string vì
+    # cùng lý do oracle như str(exc): "?error=login_failed" cố ý chung một câu
+    # cho mọi giai đoạn thất bại.
     raw_tx = request.cookies.get(TX_COOKIE)
     if not raw_tx or not code or not state:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "phiên đăng nhập không hợp lệ")
+        return RedirectResponse("/?error=login_failed")
 
     try:
         transaction = _tx_signer(request).loads(raw_tx, max_age=TX_MAX_AGE)
     except Exception as exc:
         logger.warning("auth.tx_cookie_invalid", error=type(exc).__name__)
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "phiên đăng nhập không hợp lệ") from exc
+        return RedirectResponse("/?error=login_failed")
 
     if not secrets.compare_digest(str(transaction.get("state", "")), state):
         logger.warning("auth.state_mismatch")
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "phiên đăng nhập không hợp lệ")
+        return RedirectResponse("/?error=login_failed")
 
     try:
         tokens = await request.app.state.oidc_client.exchange_code(
@@ -74,7 +80,7 @@ async def callback(request: Request, code: str = "", state: str = "") -> Redirec
             error=type(exc).__name__,
             reason=getattr(exc, "reason", None),
         )
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "đăng nhập thất bại") from exc
+        return RedirectResponse("/?error=login_failed")
 
     session_id = await request.app.state.user_store.upsert_user_and_create_session(
         claims, tokens.refresh_token
