@@ -21,3 +21,7 @@ dist/
 kubeconfig
 *.log
 .tilt/
+
+# Credential Aiven cho local — commit chỉ file .example, không commit thứ này
+deploy/local/aiven.env
+deploy/local/aiven-ca.pem

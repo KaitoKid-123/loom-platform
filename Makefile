@@ -61,10 +61,30 @@ build: build-api build-web  ## Build cả hai image
 .PHONY: helm-validate
 helm-validate:  ## helm lint + kubeconform cho cả ba môi trường
 	helm lint deploy/helm/loom
-	@for env in local dev prod; do \
+	@# `set -e` là BẮT BUỘC: không có nó, exit status của cả vòng lặp là của
+	@# lần lặp CUỐI (prod), nên một lỗi chỉ xảy ra ở local sẽ không làm target đỏ.
+	@set -e; for env in local dev prod; do \
 		echo "→ $$env"; \
 		helm template loom deploy/helm/loom -n $(NS) \
 			-f deploy/envs/values-$$env.yaml \
 		| kubeconform -strict -summary \
 			-kubernetes-version 1.32.0; \
 	done
+
+.PHONY: infra-local-secret
+infra-local-secret:  ## CHỈ LOCAL: nạp Secret Aiven từ deploy/local/
+	@test -f deploy/local/aiven.env || { \
+		echo "Thiếu deploy/local/aiven.env — copy từ aiven.env.example rồi điền"; exit 1; }
+	@test -f deploy/local/aiven-ca.pem || { \
+		echo "Thiếu deploy/local/aiven-ca.pem — tải CA từ console Aiven"; exit 1; }
+	@# kubectl (>=1.30) từ chối kết hợp --from-env-file với --from-file trong
+	@# cùng một lệnh ("from-env-file cannot be combined with from-file or
+	@# from-literal") — đã kiểm chứng thật trên máy này. Vá bằng jq: dựng
+	@# Secret từ --from-env-file trước, rồi ghép khoá ca.pem vào bằng
+	@# --rawfile (đọc file trực tiếp, nội dung KHÔNG bao giờ thành một đối số
+	@# dòng lệnh nên không lộ qua `ps`).
+	kubectl -n $(NS) create secret generic loom-db-app \
+	  --from-env-file=deploy/local/aiven.env \
+	  --dry-run=client -o json \
+	| jq --rawfile ca deploy/local/aiven-ca.pem '.data["ca.pem"] = ($$ca | @base64)' \
+	| kubectl apply -f -

@@ -1,0 +1,20 @@
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: loom
+servers: 1
+agents: 0
+ports:
+  - port: 80:80
+    nodeFilters:
+      - loadbalancer
+options:
+  k3d:
+    wait: true
+    timeout: 120s
+  k3s:
+    extraArgs:
+      # metrics-server không cần cho Giai đoạn 0 và ngốn ~100 MB
+      - arg: --disable=metrics-server
+        nodeFilters:
+          - server:*
