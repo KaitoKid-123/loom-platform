@@ -1,0 +1,19 @@
+api:
+  tag: dev
+  replicas: 2
+web:
+  tag: dev
+  replicas: 2
+ingress:
+  host: loom-dev.internal
+app:
+  environment: dev
+  logLevel: INFO
+  cookieSecure: true
+  publicBaseUrl: https://loom-dev.internal
+oidc:
+  issuer: https://loom-dev.internal/dex
+  redirectUrl: https://loom-dev.internal/api/v1/auth/callback
+  # Dev là môi trường triển khai thật — không được kế thừa khoá ký công khai
+  # trong values.yaml. `Settings` sẽ từ chối khởi động nếu quên (xem Task 2).
+  existingSecret: loom-app-secrets

@@ -1,0 +1,58 @@
+nameOverride: ""
+imagePullPolicy: IfNotPresent
+
+api:
+  image: loom/api
+  tag: dev
+  replicas: 1
+  # Chỉ bật ở local: uvicorn --reload và cho phép ghi vào rootfs để Tilt sync mã nguồn
+  devReload: false
+  readOnlyRootFilesystem: true
+  resources:
+    requests: { cpu: 50m, memory: 192Mi }
+    limits: { memory: 512Mi }
+
+web:
+  image: loom/web
+  tag: dev
+  replicas: 1
+  # An toàn: nginx chỉ cần ghi vào /tmp, đã có emptyDir mount ở đó.
+  readOnlyRootFilesystem: true
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+ingress:
+  enabled: true
+  className: traefik
+  host: loom.localhost
+
+database:
+  host: loom-db-rw
+  port: 5432
+  name: loom
+  # CloudNativePG tự tạo secret <cluster>-app
+  existingSecret: loom-db-app
+  usernameKey: username
+  passwordKey: password
+
+oidc:
+  issuer: http://loom.localhost/dex
+  internalBase: http://dex.loom.svc.cluster.local:5556
+  clientId: loom
+  redirectUrl: http://loom.localhost/api/v1/auth/callback
+  # Để trống thì chart tự tạo Secret từ oidc.clientSecret bên dưới.
+  # Production đặt tên Secret do External Secrets Operator đồng bộ.
+  existingSecret: ""
+  clientSecret: loom-dev-secret
+
+app:
+  environment: local
+  logLevel: INFO
+  publicBaseUrl: http://loom.localhost
+  cookieSecure: false
+  sessionTtlHours: 12
+  sessionSecret: dev-only-do-not-use-in-production
+
+migration:
+  enabled: true

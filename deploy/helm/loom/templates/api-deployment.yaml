@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "loom.fullname" . }}-api
+  labels:
+    {{- include "loom.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "loom.name" . }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "loom.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: "{{ .Values.api.image }}:{{ .Values.api.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          {{- if .Values.api.devReload }}
+          command:
+            - uvicorn
+            - loom_api.main:create_app
+            - --factory
+            - --host=0.0.0.0
+            - --port=8000
+            - --reload
+            - --reload-dir=/app/services/api/src
+            - --reload-dir=/app/packages/core/src
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            {{- include "loom.apiEnv" . | nindent 12 }}
+            - name: LOOM_OIDC_ISSUER
+              value: {{ .Values.oidc.issuer | quote }}
+            - name: LOOM_OIDC_INTERNAL_BASE
+              value: {{ .Values.oidc.internalBase | quote }}
+            - name: LOOM_OIDC_CLIENT_ID
+              value: {{ .Values.oidc.clientId | quote }}
+            - name: LOOM_OIDC_REDIRECT_URL
+              value: {{ .Values.oidc.redirectUrl | quote }}
+            - name: LOOM_PUBLIC_BASE_URL
+              value: {{ .Values.app.publicBaseUrl | quote }}
+            - name: LOOM_COOKIE_SECURE
+              value: {{ .Values.app.cookieSecure | quote }}
+            - name: LOOM_SESSION_TTL_HOURS
+              value: {{ .Values.app.sessionTtlHours | quote }}
+            - name: LOOM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loom.appSecretName" . }}
+                  key: oidc-client-secret
+            - name: LOOM_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loom.appSecretName" . }}
+                  key: session-secret
+          livenessProbe:
+            httpGet: { path: /api/v1/healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /api/v1/readyz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: {{ .Values.api.readOnlyRootFilesystem }}
+            capabilities: { drop: ["ALL"] }

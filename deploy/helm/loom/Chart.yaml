@@ -1,0 +1,6 @@
+apiVersion: v2
+name: loom
+description: Nền tảng dữ liệu hợp nhất Loom
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

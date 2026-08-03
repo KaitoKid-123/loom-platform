@@ -1,0 +1,21 @@
+api:
+  tag: prod
+  replicas: 3
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 1Gi }
+web:
+  tag: prod
+  replicas: 2
+ingress:
+  host: loom.internal
+app:
+  environment: prod
+  logLevel: INFO
+  cookieSecure: true
+  publicBaseUrl: https://loom.internal
+oidc:
+  issuer: https://loom.internal/dex
+  redirectUrl: https://loom.internal/api/v1/auth/callback
+  # Production không bao giờ để secret trong values — ESO đồng bộ Secret này.
+  existingSecret: loom-app-secrets

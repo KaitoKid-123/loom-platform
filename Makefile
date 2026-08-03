@@ -57,3 +57,14 @@ build-web:  ## Build image loom-web
 
 .PHONY: build
 build: build-api build-web  ## Build cả hai image
+
+.PHONY: helm-validate
+helm-validate:  ## helm lint + kubeconform cho cả ba môi trường
+	helm lint deploy/helm/loom
+	@for env in local dev prod; do \
+		echo "→ $$env"; \
+		helm template loom deploy/helm/loom -n $(NS) \
+			-f deploy/envs/values-$$env.yaml \
+		| kubeconform -strict -summary -ignore-missing-schemas \
+			-kubernetes-version 1.32.0; \
+	done

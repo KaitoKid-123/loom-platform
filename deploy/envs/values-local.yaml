@@ -1,0 +1,13 @@
+api:
+  tag: dev
+  replicas: 1
+  # Tilt cần ghi vào rootfs để sync mã nguồn và chạy uvicorn --reload.
+  devReload: true
+  readOnlyRootFilesystem: false
+web:
+  tag: dev
+  replicas: 1
+app:
+  environment: local
+  logLevel: DEBUG
+  cookieSecure: false
