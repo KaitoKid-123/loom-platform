@@ -157,18 +157,25 @@ async def test_fetch_jwks_wraps_transport_failure() -> None:
     assert isinstance(caught.value.__cause__, httpx.ConnectError)
 
 
-async def test_prefix_collision_is_not_treated_as_internal_by_design() -> None:
-    """`_to_internal` dùng str.startswith() thô, không có biên giới sau tiền tố.
+async def test_prefix_collision_host_is_left_untouched() -> None:
+    """`_to_internal` phải kiểm biên, không chỉ str.startswith() trần.
 
     "http://loom.localhost" là tiền tố CHUỖI của
     "http://loom.localhost.evil.example" dù đây là hai gốc (origin) khác nhau
-    hoàn toàn. Ghi lại hành vi THẬT hiện tại: endpoint bị match nhầm và bị viết
-    đè bằng tiền tố nội bộ, tạo ra một endpoint hỏng cú pháp thay vì rò rỉ
-    sang host lạ — nhưng đây là tác dụng phụ may mắn của việc
-    oidc_internal_base hiện tại kết thúc bằng số cổng (":5556"), KHÔNG phải
-    một biên giới mà `_to_internal` chủ động kiểm tra. Nếu internal_base
-    không có cổng tường minh, phần đuôi ".evil.example" ghép vào sau sẽ tạo ra
-    một hostname hợp lệ mà kẻ tấn công kiểm soát được qua DNS.
+    hoàn toàn. Trước bản vá biên giới, `_to_internal` match nhầm chuỗi này và
+    viết đè thành "http://dex.loom.svc.cluster.local:5556.evil.example/token"
+    — vô hại hôm đó chỉ vì oidc_internal_base kết thúc bằng số cổng (":5556")
+    khiến httpx từ chối URL kết quả (cổng không còn là số), KHÔNG phải vì có
+    biên giới nào được kiểm. Đổi oidc_internal_base sang một hostname không
+    cổng (hoàn toàn hợp lý ở một triển khai thật) thì phần đuôi
+    ".evil.example" ghép ngay sau sẽ tạo ra một hostname hợp lệ mà kẻ tấn
+    công kiểm soát được qua DNS — và exchange_code() sẽ POST client_secret
+    thẳng sang đó.
+
+    Sau bản vá: so khớp bằng `==` hoặc `startswith(public + "/")`, nên domain
+    giả này không khớp gốc công khai thật — bị bỏ qua nguyên vẹn, xử lý giống
+    hệt một host hoàn toàn không liên quan (xem
+    test_endpoint_on_unrelated_host_is_left_untouched).
     """
     discovery = dict(DISCOVERY)
     discovery["token_endpoint"] = "http://loom.localhost.evil.example/token"
@@ -176,21 +183,18 @@ async def test_prefix_collision_is_not_treated_as_internal_by_design() -> None:
 
     endpoints = await client.endpoints()
 
-    # Bị match nhầm và viết đè — không giữ nguyên host lạ, nhưng cũng không
-    # phải là một sự viết đè "đúng nghĩa" tới địa chỉ nội bộ thật sự.
-    assert endpoints.token_endpoint == ("http://dex.loom.svc.cluster.local:5556.evil.example/token")
-    # Endpoint kết quả hỏng cú pháp (cổng không còn là số) — một request thật
-    # sẽ vỡ ngay ở tầng httpx trước khi kịp gửi client_secret đi đâu cả.
-    with pytest.raises(httpx.InvalidURL):
-        httpx.Request("GET", endpoints.token_endpoint)
+    # Không bị viết đè — domain của kẻ tấn công được giữ nguyên xi, không có
+    # rewrite nào âm thầm đưa client_secret đi sai chỗ.
+    assert endpoints.token_endpoint == "http://loom.localhost.evil.example/token"
 
 
 async def test_endpoint_on_unrelated_host_is_left_untouched() -> None:
     """Dex quảng cáo endpoint ở một host hoàn toàn khác public_base_url.
 
     Không có tiền tố chung nên `_to_internal` không viết đè — đúng, vì không
-    có cách nào đoán ra địa chỉ nội bộ tương ứng. Nhưng pod sẽ cố gọi ra
-    thẳng địa chỉ công khai này mà không có cảnh báo nào được log.
+    có cách nào đoán ra địa chỉ nội bộ tương ứng. Pod sẽ cố gọi ra thẳng địa
+    chỉ công khai này; nay có một dòng log INFO ("oidc.endpoint_not_rewritten")
+    ghi lại việc đó để không âm thầm mất dấu khi debug sự cố mạng trong cụm.
     """
     discovery = dict(DISCOVERY)
     discovery["token_endpoint"] = "https://accounts.example.com/token"

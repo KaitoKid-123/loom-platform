@@ -179,8 +179,15 @@ class OIDCClient:
     def _to_internal(self, url: str) -> str:
         internal = self._settings.oidc_internal_base
         public = self._settings.public_base_url
-        if internal and url.startswith(public):
+        if not internal:
+            return url
+        # Kiểm biên chứ không startswith trần: "http://loom.localhost" là tiền
+        # tố chuỗi của "http://loom.localhost.evil.example", nên startswith sẽ
+        # viết lại tên miền của kẻ tấn công thành địa chỉ nội bộ — và
+        # exchange_code sẽ POST client_secret sang đó.
+        if url == public or url.startswith(public + "/"):
             return internal + url[len(public) :]
+        logger.info("oidc.endpoint_not_rewritten", url=url, public_base=public)
         return url
 
     async def endpoints(self) -> OIDCEndpoints:
@@ -190,7 +197,10 @@ class OIDCClient:
         discovery_url = self._to_internal(
             f"{self._settings.oidc_issuer}/.well-known/openid-configuration"
         )
-        response = await self._http.get(discovery_url, timeout=10.0)
+        # 5s chứ không phải 10s: đây là đường đi của một redirect người dùng đang chờ.
+        # Dex sống thì mọi lời gọi này ở mức mili-giây; Dex chết thì hỏng nhanh tốt hơn
+        # treo lâu. Giai đoạn 0 chưa có circuit breaker.
+        response = await self._http.get(discovery_url, timeout=5.0)
         response.raise_for_status()
         document = response.json()
 
@@ -228,7 +238,7 @@ class OIDCClient:
                 "client_secret": self._settings.oidc_client_secret,
                 "code_verifier": code_verifier,
             },
-            timeout=10.0,
+            timeout=5.0,
         )
         if response.status_code != 200:
             raise TokenExchangeError(f"nhà cung cấp trả về {response.status_code}")
@@ -244,7 +254,7 @@ class OIDCClient:
     async def fetch_jwks(self) -> dict[str, Any]:
         endpoints = await self.endpoints()
         try:
-            response = await self._http.get(endpoints.jwks_uri, timeout=10.0)
+            response = await self._http.get(endpoints.jwks_uri, timeout=5.0)
             response.raise_for_status()
             result: dict[str, Any] = response.json()
         except Exception as exc:
