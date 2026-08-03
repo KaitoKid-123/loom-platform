@@ -18,6 +18,10 @@ def test_migration_creates_schema_and_seeds_tenant() -> None:
             "LOOM_DB_NAME": pg.dbname,
             "LOOM_DB_USER": pg.username,
             "LOOM_DB_PASSWORD": pg.password,
+            # Container testcontainers không cấu hình TLS; mặc định
+            # "verify-full" của LOOM_DB_SSLMODE nhắm cho Aiven thật, không
+            # cho container dùng một lần này. Xem ghi chú ở test_user_store.py.
+            "LOOM_DB_SSLMODE": "disable",
         }
         result = subprocess.run(
             ["uv", "run", "alembic", "upgrade", "head"],  # noqa: S607 — uv chạy qua PATH có chủ đích

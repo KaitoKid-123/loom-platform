@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     db_password: str = "loom"  # noqa: S105 — giá trị mặc định cho dev, không phải secret thật
     db_pool_size: int = 5
     db_max_overflow: int = 5
+    # asyncpg hiểu `ssl`, không phải `sslmode` (cách libpq/Aiven viết) — xem
+    # `_normalise_ssl_param` ở loom_api.db. `verify-full` là mặc định an toàn:
+    # kết nối managed Postgres qua Internet công cộng cần xác thực server,
+    # không chỉ mã hoá.
+    db_sslmode: str = "verify-full"
 
     # Session cookie
     session_secret: str = "dev-only-do-not-use-in-production"  # noqa: S105

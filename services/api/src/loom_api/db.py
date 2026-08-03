@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -15,7 +15,7 @@ from loom_core.config import Settings
 def build_sqlalchemy_url(settings: Settings) -> str:
     """URL rời rạc → chuỗi kết nối, escape đúng ký tự đặc biệt trong mật khẩu."""
     if settings.database_url:
-        return settings.database_url
+        return _normalise_ssl_param(settings.database_url)
     return URL.create(
         "postgresql+asyncpg",
         username=settings.db_user,
@@ -23,7 +23,26 @@ def build_sqlalchemy_url(settings: Settings) -> str:
         host=settings.db_host,
         port=settings.db_port,
         database=settings.db_name,
+        # `ssl`, không phải `sslmode` — asyncpg từ chối tên kia bằng một
+        # TypeError không hề nhắc tới TLS. Xem ghi chú ở Task 14.
+        query={"ssl": settings.db_sslmode},
     ).render_as_string(hide_password=False)
+
+
+def _normalise_ssl_param(url: str) -> str:
+    """Đổi `sslmode` (cách libpq/Aiven viết) thành `ssl` (cách asyncpg hiểu).
+
+    Aiven đưa URI có `?sslmode=require`. asyncpg từ chối tham số đó bằng
+    `TypeError: connect() got an unexpected keyword argument 'sslmode'` — một
+    thông báo không hề nói tới TLS. Giá trị thì trùng nhau hoàn toàn giữa hai
+    cách viết, nên chỉ cần đổi tên khoá.
+    """
+    parsed = make_url(url)
+    if "sslmode" not in parsed.query:
+        return url
+    query = dict(parsed.query)
+    query["ssl"] = query.pop("sslmode")
+    return parsed.set(query=query).render_as_string(hide_password=False)
 
 
 class Database:

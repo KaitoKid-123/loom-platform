@@ -42,6 +42,9 @@ def pg_settings() -> Iterator[Settings]:
             "LOOM_DB_NAME": pg.dbname,
             "LOOM_DB_USER": pg.username,
             "LOOM_DB_PASSWORD": pg.password,
+            # Container testcontainers không cấu hình TLS; xem ghi chú ở
+            # Settings(...) bên dưới.
+            "LOOM_DB_SSLMODE": "disable",
         }
         result = subprocess.run(
             ["uv", "run", "alembic", "upgrade", "head"],  # noqa: S607 — uv chạy qua PATH có chủ đích
@@ -58,6 +61,13 @@ def pg_settings() -> Iterator[Settings]:
             db_name=pg.dbname,
             db_user=pg.username,
             db_password=pg.password,
+            # Container testcontainers không cấu hình TLS. Mặc định
+            # `db_sslmode` là "verify-full" (đúng cho Aiven qua Internet công
+            # khai — xem Task 14), nhưng ở đây sẽ nổ bằng
+            # `root certificate file "~/.postgresql/root.crt" does not exist`.
+            # Khai rõ "disable" cho container Postgres dùng một lần, dùng
+            # xong bỏ, thay vì lặng lẽ kế thừa một giá trị nhắm cho DB thật.
+            db_sslmode="disable",
         )
 
 
