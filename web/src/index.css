@@ -1,0 +1,18 @@
+@import 'tailwindcss';
+
+/* Tailwind v4 sinh sẵn utility từ các biến trong @theme:
+   --color-surface → bg-surface / text-surface / border-surface, v.v. */
+@theme {
+  --color-surface: #ffffff;
+  --color-muted: #f6f7f9;
+  --color-line: #e3e6ea;
+  --color-ink: #16191d;
+  --color-dim: #616a75;
+  --color-accent: #2f6feb;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
