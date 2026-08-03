@@ -159,8 +159,12 @@ async def test_forged_hs256_token_is_rejected() -> None:
     signing_input = f"{header}.{payload}".encode()
     signature = _b64(hmac.new(public_pem, signing_input, hashlib.sha256).digest())
 
-    with pytest.raises(InvalidIdToken):
+    with pytest.raises(InvalidIdToken) as caught:
         await verifier_for(jwks).verify(f"{header}.{payload}.{signature}")
+    # Phải bị chặn bởi allow-list (PyJWT ném InvalidAlgorithmError), KHÔNG phải
+    # rơi vào catch-all. Nếu ai đó gỡ pin algorithms=["RS256"], PyJWT sẽ thử
+    # HMAC, vấp TypeError, và reason thành "unexpected_error" — test đỏ.
+    assert caught.value.reason == "verification_failed"
 
 
 async def test_alg_none_token_is_rejected() -> None:
@@ -172,8 +176,9 @@ async def test_alg_none_token_is_rejected() -> None:
             {"iss": ISSUER, "aud": CLIENT_ID, "sub": "x", "iat": now, "exp": now + 300}
         ).encode()
     )
-    with pytest.raises(InvalidIdToken):
+    with pytest.raises(InvalidIdToken) as caught:
         await verifier_for(jwks).verify(f"{header}.{payload}.")
+    assert caught.value.reason == "verification_failed"
 
 
 async def test_one_malformed_jwks_entry_does_not_break_good_keys() -> None:

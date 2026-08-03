@@ -121,10 +121,13 @@ class OIDCVerifier:
         except jwt.PyJWTError as exc:
             raise InvalidIdToken("verification_failed") from exc
         except Exception as exc:
-            # PyJWT có thể ném cả thứ không phải PyJWTError (ví dụ TypeError từ
-            # force_bytes khi khoá sai kiểu). Không bao giờ để nó thoát ra thành 500.
+            # PyJWT ném được cả thứ không phải PyJWTError (ví dụ TypeError từ
+            # force_bytes khi khoá sai kiểu). Không để nó thoát ra thành 500 —
+            # nhưng phải mang mã lý do RIÊNG, vì "PyJWT từ chối token" và
+            # "có gì đó hỏng bất ngờ" là hai chuyện khác nhau, và test canh
+            # allow-list dựa vào đúng sự khác biệt này.
             logger.warning("oidc.verify_unexpected_error", error=type(exc).__name__)
-            raise InvalidIdToken("verification_failed") from exc
+            raise InvalidIdToken("unexpected_error") from exc
 
         subject = str(payload["sub"])
         email = str(payload.get("email") or "")
