@@ -28,13 +28,20 @@ ingress:
   host: loom.localhost
 
 database:
-  host: loom-db-rw
-  port: 5432
-  name: loom
-  # CloudNativePG tự tạo secret <cluster>-app
+  # Postgres là dịch vụ NGOÀI (Aiven.io) ở cả ba môi trường. Host/port/dbname
+  # đến từ cùng Secret với credential, do External Secrets đồng bộ từ Vault —
+  # xem Task 14. Tên Secret giữ nguyên `loom-db-app` từ thời CloudNativePG, cố ý:
+  # đổi nhà cung cấp database không cần sửa chart.
   existingSecret: loom-db-app
   usernameKey: username
   passwordKey: password
+  hostKey: host
+  portKey: port
+  nameKey: dbname
+  # CA của Aiven, cùng Secret. PHẢI có: kết nối đi qua Internet công cộng nên
+  # ssl=require (mã hoá, không xác thực server) là chưa đủ — cần verify-full.
+  caKey: ca.pem
+  sslMode: verify-full
 
 oidc:
   issuer: http://loom.localhost/dex

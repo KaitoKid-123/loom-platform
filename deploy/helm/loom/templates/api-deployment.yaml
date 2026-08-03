@@ -66,7 +66,8 @@ spec:
                   name: {{ include "loom.appSecretName" . }}
                   key: session-secret
           # Cold start đo được 1.8s khi rảnh nhưng tới 35s khi CPU bị tranh chấp
-          # (k3d + CNPG + Postgres + Dex + Tilt + docker build cùng chạy).
+          # (k3d + Dex + Tilt + docker build cùng chạy). Postgres không còn
+          # chạy trong cụm (Aiven quản lý) nên không còn góp phần tranh chấp.
           # startupProbe cho tới 60s, và livenessProbe chỉ chạy sau khi nó qua —
           # nên liveness không cần bao cả pha khởi động.
           startupProbe:
@@ -87,3 +88,7 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: {{ .Values.api.readOnlyRootFilesystem }}
             capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            {{- include "loom.dbCaVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "loom.dbCaVolume" . | nindent 8 }}

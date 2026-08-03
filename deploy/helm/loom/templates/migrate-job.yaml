@@ -41,4 +41,8 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            {{- include "loom.dbCaVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "loom.dbCaVolume" . | nindent 8 }}
 {{- end }}

@@ -32,11 +32,26 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 - name: LOOM_LOG_LEVEL
   value: {{ .Values.app.logLevel | quote }}
 - name: LOOM_DB_HOST
-  value: {{ .Values.database.host | quote }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.existingSecret }}
+      key: {{ .Values.database.hostKey }}
 - name: LOOM_DB_PORT
-  value: {{ .Values.database.port | quote }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.existingSecret }}
+      key: {{ .Values.database.portKey }}
 - name: LOOM_DB_NAME
-  value: {{ .Values.database.name | quote }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.existingSecret }}
+      key: {{ .Values.database.nameKey }}
+# asyncpg đọc PGSSLROOTCERT (đã kiểm chứng). Không có nó thì verify-full đi tìm
+# ~/.postgresql/root.crt và thất bại với thông báo không liên quan tới Aiven.
+- name: PGSSLROOTCERT
+  value: /etc/loom/db-ca/{{ .Values.database.caKey }}
+- name: LOOM_DB_SSLMODE
+  value: {{ .Values.database.sslMode | quote }}
 - name: LOOM_DB_USER
   valueFrom:
     secretKeyRef:
@@ -47,4 +62,21 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     secretKeyRef:
       name: {{ .Values.database.existingSecret }}
       key: {{ .Values.database.passwordKey }}
+{{- end -}}
+
+{{/* Volume chiếu key CA từ Secret loom-db-app — dùng chung cho api và migrate job */}}
+{{- define "loom.dbCaVolume" -}}
+- name: db-ca
+  secret:
+    secretName: {{ .Values.database.existingSecret }}
+    items:
+      - key: {{ .Values.database.caKey }}
+        path: {{ .Values.database.caKey }}
+{{- end -}}
+
+{{/* Mount tương ứng, chỉ đọc, tại /etc/loom/db-ca — khớp PGSSLROOTCERT ở trên */}}
+{{- define "loom.dbCaVolumeMount" -}}
+- name: db-ca
+  mountPath: /etc/loom/db-ca
+  readOnly: true
 {{- end -}}
