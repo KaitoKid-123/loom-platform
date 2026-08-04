@@ -235,3 +235,7 @@ lint-workflows:  ## actionlint + shellcheck cho .github/workflows
 		echo "Thiếu shellcheck — chạy 'make bootstrap'. Không có nó, actionlint"; \
 		echo "bỏ qua luật shellcheck và báo xanh oan."; exit 1; }
 	actionlint -shellcheck "$$(command -v shellcheck)"
+
+.PHONY: smoke
+smoke:  ## Bảy phép kiểm chấp nhận qua HTTP (BASE=... để chạy với môi trường khác)
+	@./scripts/smoke.sh
