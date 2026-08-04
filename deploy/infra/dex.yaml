@@ -43,7 +43,11 @@ spec:
     spec:
       containers:
         - name: dex
-          image: ghcr.io/dexidp/dex:v2.45.1
+          # Giữ chỗ, KHÔNG viết cứng tag: `make infra` render qua envsubst để
+          # DEX_IMAGE trong deploy/versions.env là nguồn duy nhất. Viết tag ở
+          # đây lần thứ hai thì lúc bump chắc chắn có ngày lệch nhau.
+          # Hệ quả: file này không còn apply thẳng được, phải qua `make infra`.
+          image: ${DEX_IMAGE}
           command: ["/usr/local/bin/dex", "serve", "/etc/dex/config.yaml"]
           ports:
             - { name: http, containerPort: 5556 }

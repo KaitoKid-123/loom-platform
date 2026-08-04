@@ -99,6 +99,45 @@ helm-validate:  ## helm lint + kubeconform cho cả ba môi trường
 bootstrap:  ## Cài k3d, tilt, kubeconform và kiểm tra môi trường
 	./scripts/bootstrap.sh
 
+.PHONY: cluster-up
+cluster-up:  ## Tạo cụm k3d nếu chưa có
+	@# --image đè lên config file: cluster.yaml không có trường `image:` nên nếu
+	@# không truyền cờ này thì K3S_IMAGE trong versions.env hoàn toàn vô tác dụng.
+	@k3d cluster list -o json | jq -e '.[] | select(.name=="$(CLUSTER)")' >/dev/null 2>&1 \
+		|| k3d cluster create --config deploy/k3d/cluster.yaml --image "$(K3S_IMAGE)"
+	@# `k3d cluster create` tự chuyển context, nhưng nhánh idempotent (cụm đã có)
+	@# thì không — mà máy này có sẵn kubeconfig trỏ vào một cụm thật khác. Chốt
+	@# context ở đây để `make infra` phía sau không cần người dùng nhớ đổi tay,
+	@# đúng như thông báo của check-context đã hứa.
+	kubectl config use-context k3d-$(CLUSTER)
+	@# --context tường minh: target này KHÔNG thể phụ thuộc check-context (lúc
+	@# gọi thì cụm còn chưa tồn tại), nên phải tự bảo vệ mình.
+	kubectl --context k3d-$(CLUSTER) create namespace $(NS) \
+	  --dry-run=client -o yaml | kubectl --context k3d-$(CLUSTER) apply -f -
+
+.PHONY: cluster-down
+cluster-down:  ## Xoá cụm k3d
+	k3d cluster delete $(CLUSTER)
+
+.PHONY: infra
+infra: check-context  ## Cài Dex (local — không có ESO). KHÔNG kèm Secret Aiven
+	@# Dex dùng config tĩnh của chính nó, không đụng database. Gộp Secret Aiven
+	@# vào đây sẽ khiến không dựng nổi tầng đăng nhập chỉ vì chưa có credential.
+	@# `make dev` (Task 16) mới là chỗ phụ thuộc cả hai.
+	@#
+	@# envsubst có tham số '$$DEX_IMAGE' để CHỈ thay đúng biến đó — dex.yaml còn
+	@# chứa hash bcrypt đầy ký tự '$', thay bừa là hỏng mật khẩu đăng nhập.
+	DEX_IMAGE="$(DEX_IMAGE)" envsubst '$$DEX_IMAGE' < deploy/infra/dex.yaml | kubectl apply -f -
+	kubectl -n $(NS) rollout status deployment/dex --timeout=180s
+
+.PHONY: infra-eso
+infra-eso: check-context  ## CHỈ dev/prod: cài External Secrets Operator và áp ExternalSecret
+	kubectl apply --server-side -f \
+	  "https://github.com/external-secrets/external-secrets/releases/download/$(ESO_VERSION)/external-secrets.yaml"
+	kubectl -n external-secrets rollout status deployment/external-secrets --timeout=180s
+	kubectl apply -f deploy/infra/external-secret.yaml
+	kubectl -n $(NS) wait --for=condition=Ready externalsecret/loom-db --timeout=120s
+
 .PHONY: infra-local-secret
 infra-local-secret: check-context  ## CHỈ LOCAL: nạp Secret Aiven từ deploy/local/
 	@test -f deploy/local/aiven.env || { \
