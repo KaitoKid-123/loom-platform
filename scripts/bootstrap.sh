@@ -24,6 +24,8 @@ installed_version() {
     k3d)         k3d version 2>/dev/null | awk '/^k3d version/ {print $3; exit}' ;;
     tilt)        tilt version 2>/dev/null | awk '{gsub(/,/,""); print $1; exit}' ;;
     kubeconform) kubeconform -v 2>/dev/null | head -1 ;;
+    actionlint)  actionlint -version 2>/dev/null | head -1 | sed 's/^/v/' ;;
+    shellcheck)  shellcheck --version 2>/dev/null | awk '/^version:/ {print "v"$2}' ;;
   esac
 }
 
@@ -60,6 +62,24 @@ if needs_install kubeconform "$KUBECONFORM_VERSION"; then
   echo "→ cài kubeconform ${KUBECONFORM_VERSION}"
   fetch "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
     | tar -xz -C "$BIN" kubeconform
+fi
+
+# shellcheck PHẢI có mặt trước khi actionlint hữu dụng: thiếu nó, actionlint
+# LẶNG LẼ tắt luật shellcheck và vẫn báo "0 errors" — chỉ `-verbose` mới lộ ra
+# dòng `Rule "shellcheck" was disabled`. Một lint xanh vì nó đã bỏ qua phần
+# việc khó nhất là đúng cái bẫy dự án này đã dính năm lần.
+if needs_install shellcheck "$SHELLCHECK_VERSION"; then
+  echo "→ cài shellcheck ${SHELLCHECK_VERSION}"
+  fetch "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+    | tar -xJ -C "$BIN" --strip-components=1 "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
+fi
+
+if needs_install actionlint "$ACTIONLINT_VERSION"; then
+  echo "→ cài actionlint ${ACTIONLINT_VERSION}"
+  # Tên asset NHÚNG số phiên bản, nên không có đường /releases/latest/download/
+  # nào dùng được — bản plan cũ dùng đường đó và trả 404.
+  fetch "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION#v}_linux_amd64.tar.gz" \
+    | tar -xz -C "$BIN" actionlint
 fi
 
 docker info >/dev/null 2>&1 || { echo "Docker daemon không chạy." >&2; exit 1; }

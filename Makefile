@@ -201,3 +201,12 @@ dev: cluster-up infra infra-local-secret  ## Dựng mọi thứ rồi chạy Til
 .PHONY: dev-down
 dev-down: check-context  ## Dừng Tilt và gỡ tài nguyên do nó tạo
 	tilt down
+
+.PHONY: lint-workflows
+lint-workflows:  ## actionlint + shellcheck cho .github/workflows
+	@# -shellcheck tường minh: nếu binary không có, actionlint bỏ qua luật đó
+	@# và vẫn trả 0. Chỉ rõ đường dẫn để thiếu là BÁO LỖI chứ không phải im lặng.
+	@command -v shellcheck >/dev/null || { \
+		echo "Thiếu shellcheck — chạy 'make bootstrap'. Không có nó, actionlint"; \
+		echo "bỏ qua luật shellcheck và báo xanh oan."; exit 1; }
+	actionlint -shellcheck "$$(command -v shellcheck)"
