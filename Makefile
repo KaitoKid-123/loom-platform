@@ -31,8 +31,18 @@ test:  ## Unit test (không cần Docker)
 test-int:  ## Integration test (cần Docker)
 	uv run pytest -m integration -o addopts=""
 
+.PHONY: check-context
+check-context:  ## Chặn mọi lệnh kubectl chạy nhầm vào cụm khác
+	@ctx=$$(kubectl config current-context 2>/dev/null || echo none); \
+	if [ "$$ctx" != "k3d-$(CLUSTER)" ]; then \
+		echo "Context hiện tại: '$$ctx' — không phải 'k3d-$(CLUSTER)'."; \
+		echo "Chạy 'make cluster-up' trước, hoặc:"; \
+		echo "  kubectl config use-context k3d-$(CLUSTER)"; \
+		exit 1; \
+	fi
+
 .PHONY: migrate
-migrate:  ## Chạy migration lên head
+migrate:  ## Chạy migration lên head (chạy từ host tới Aiven, KHÔNG qua cụm)
 	cd services/api && uv run alembic upgrade head
 
 .PHONY: migration
@@ -72,7 +82,7 @@ helm-validate:  ## helm lint + kubeconform cho cả ba môi trường
 	done
 
 .PHONY: infra-local-secret
-infra-local-secret:  ## CHỈ LOCAL: nạp Secret Aiven từ deploy/local/
+infra-local-secret: check-context  ## CHỈ LOCAL: nạp Secret Aiven từ deploy/local/
 	@test -f deploy/local/aiven.env || { \
 		echo "Thiếu deploy/local/aiven.env — copy từ aiven.env.example rồi điền"; exit 1; }
 	@test -f deploy/local/aiven-ca.pem || { \
