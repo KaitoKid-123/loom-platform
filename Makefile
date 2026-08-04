@@ -15,7 +15,12 @@ IMAGE_TAG ?= dev
 
 .PHONY: help
 help:  ## Liệt kê các lệnh
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@# Chỉ quét chính Makefile này, KHÔNG phải cả $(MAKEFILE_LIST): từ khi
+	@# `include deploy/versions.env` xuất hiện, danh sách có hai file nên grep
+	@# gắn tiền tố "Makefile:" vào mọi dòng và awk cắt nhầm — mọi target đều
+	@# hiện tên là "Makefile".
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(firstword $(MAKEFILE_LIST)) \
+		| awk -F':.*?## ' '{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: sync
 sync:  ## Cài dependency Python
@@ -125,8 +130,12 @@ infra: check-context  ## Cài Dex (local — không có ESO). KHÔNG kèm Secret
 	@# vào đây sẽ khiến không dựng nổi tầng đăng nhập chỉ vì chưa có credential.
 	@# `make dev` (Task 16) mới là chỗ phụ thuộc cả hai.
 	@#
-	@# envsubst có tham số '$$DEX_IMAGE' để CHỈ thay đúng biến đó — dex.yaml còn
-	@# chứa hash bcrypt đầy ký tự '$', thay bừa là hỏng mật khẩu đăng nhập.
+	@# envsubst giới hạn ở '$$DEX_IMAGE' để mọi chuỗi trông-giống-biến thêm vào
+	@# dex.yaml sau này không bị thay bằng rỗng một cách âm thầm.
+	@# (Hash bcrypt hiện tại KHÔNG cần sự bảo vệ này: mọi '$' trong hash đều
+	@# theo sau bởi chữ số — '$2a', '$10' — mà '$<số>' không phải tham chiếu
+	@# biến hợp lệ nên envsubst bỏ qua. Đã kiểm: bản có và không có giới hạn
+	@# cho ra kết quả giống hệt nhau. Giữ giới hạn vì nó phòng tương lai.)
 	DEX_IMAGE="$(DEX_IMAGE)" envsubst '$$DEX_IMAGE' < deploy/infra/dex.yaml | kubectl apply -f -
 	kubectl -n $(NS) rollout status deployment/dex --timeout=180s
 
