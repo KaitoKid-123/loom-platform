@@ -15,9 +15,11 @@ if k8s_context() != EXPECTED_CONTEXT:
     fail('Tilt chỉ chạy trên %s (context hiện tại: %s). Chạy `make cluster-up` trước.'
          % (EXPECTED_CONTEXT, k8s_context()))
 
-# Lớp chặn thứ hai, của chính Tilt. Không thừa: `k8s_context()` chỉ được đánh
-# giá một lần lúc load Tiltfile, còn allow_k8s_contexts áp cho mọi lần apply
-# về sau.
+# Ghi lại chủ đích, KHÔNG phải một lớp chặn thứ hai — đã kiểm và nó không chặn
+# được gì mà `fail()` ở trên chưa chặn. allow_k8s_contexts chỉ THÊM vào danh
+# sách cho phép, không thể từ chối: mọi context k3d/minikube/docker-desktop đều
+# đã được Tilt coi là local và cho qua sẵn. Một cụm k3d tên khác, không nằm
+# trong danh sách này, vẫn được chấp nhận. Thứ thật sự chặn là `fail()`.
 allow_k8s_contexts(EXPECTED_CONTEXT)
 
 # Rác build không được phép làm bẩn image hay kích hoạt build lại. `tests` nằm
@@ -140,18 +142,21 @@ k8s_resource('loom-web', port_forwards=['8080:8080'], labels=['app'])
 # ngoài tầm với của allow_k8s_contexts ở trên. Không có cờ này thì một lần
 # `kubectl config use-context` ở terminal khác đủ để lệnh migration bắn vào cụm
 # thật — đúng cái tai nạn mà check-context sinh ra để chặn.
-# TRIGGER_MODE_MANUAL có chủ đích. Database ở local KHÔNG phải container dùng
-# xong vứt — nó là Aiven managed thật, cùng loại dịch vụ mà dev và prod dùng.
-# Để mode tự động thì mỗi `make dev`, và mỗi lần sửa file trong loom-api, đều
-# chạy DDL lên một database thật mà không ai bấm nút. Bấm một lần trong giao
-# diện Tilt là đủ, và lần chạy đầu tiên trở thành một hành động có ý thức.
-# Muốn tự động lại: xoá dòng trigger_mode.
+# Database ở local KHÔNG phải container dùng xong vứt — nó là Aiven managed
+# thật, cùng loại dịch vụ mà dev và prod dùng. Nên migration chỉ chạy khi có
+# người bấm nút, không bao giờ tự động.
+#
+# PHẢI CÓ CẢ HAI CỜ. `trigger_mode` một mình là một cái guard rỗng: nó chỉ điều
+# khiển việc chạy LẠI khi file thay đổi, còn lần chạy ĐẦU do `auto_init` quyết
+# định và mặc định là True. Đã kiểm bằng thực nghiệm — chỉ trigger_mode thì
+# resource vẫn chạy ngay lúc `tilt up`, thêm auto_init=False thì mới không.
 local_resource(
     'migrate',
     cmd=('kubectl --context %s -n loom exec deploy/loom-api -- ' % EXPECTED_CONTEXT) +
         'sh -c "cd /app/services/api && alembic upgrade head"',
     resource_deps=['loom-api'],
     trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
     labels=['app'],
 )
 

@@ -156,6 +156,10 @@ infra: check-context  ## Cài Dex (local — không có ESO). KHÔNG kèm Secret
 	@#
 	@# envsubst giới hạn ở '$$DEX_IMAGE' để mọi chuỗi trông-giống-biến thêm vào
 	@# dex.yaml sau này không bị thay bằng rỗng một cách âm thầm.
+	@# LƯU Ý: kubeconform KHÔNG bắt được lỗi ở đây — `image` là trường tuỳ chọn
+	@# nên bản thô, bản render đúng và bản render RỖNG đều hợp lệ như nhau. Việc
+	@# render trước khi validate chỉ có ý nghĩa nếu sau này thêm giữ chỗ ở vị trí
+	@# ảnh hưởng cấu trúc.
 	@# (Hash bcrypt hiện tại KHÔNG cần sự bảo vệ này: mọi '$' trong hash đều
 	@# theo sau bởi chữ số — '$2a', '$10' — mà '$<số>' không phải tham chiếu
 	@# biến hợp lệ nên envsubst bỏ qua. Đã kiểm: bản có và không có giới hạn
@@ -164,12 +168,22 @@ infra: check-context  ## Cài Dex (local — không có ESO). KHÔNG kèm Secret
 	kubectl -n $(NS) rollout status deployment/dex --timeout=180s
 
 .PHONY: infra-eso
-infra-eso: check-context  ## CHỈ dev/prod: cài External Secrets Operator và áp ExternalSecret
-	kubectl apply --server-side -f \
+infra-eso:  ## CHỈ dev/prod: ESO + ExternalSecret. Bắt buộc: make infra-eso CONTEXT=...
+	@# KHÔNG dùng check-context được: target này dành cho dev/prod, mà
+	@# check-context lại đòi đúng k3d-loom — gắn vào thì nó chỉ chạy được trên
+	@# đúng cụm mà nó không phục vụ. Thay bằng: bắt chỉ rõ context, và từ chối
+	@# thẳng cụm local.
+	@test -n "$(CONTEXT)" || { \
+		echo "Phải chỉ rõ cụm đích:  make infra-eso CONTEXT=<tên context dev/prod>"; \
+		echo "Xem danh sách:  kubectl config get-contexts -o name"; exit 1; }
+	@test "$(CONTEXT)" != "k3d-$(CLUSTER)" || { \
+		echo "'$(CONTEXT)' là cụm local. Local không với tới Vault nên dùng"; \
+		echo "'make infra-local-secret' thay vì ESO."; exit 1; }
+	kubectl --context $(CONTEXT) apply --server-side -f \
 	  "https://github.com/external-secrets/external-secrets/releases/download/$(ESO_VERSION)/external-secrets.yaml"
-	kubectl -n external-secrets rollout status deployment/external-secrets --timeout=180s
-	kubectl apply -f deploy/infra/external-secret.yaml
-	kubectl -n $(NS) wait --for=condition=Ready externalsecret/loom-db --timeout=120s
+	kubectl --context $(CONTEXT) -n external-secrets rollout status deployment/external-secrets --timeout=180s
+	kubectl --context $(CONTEXT) apply -f deploy/infra/external-secret.yaml
+	kubectl --context $(CONTEXT) -n $(NS) wait --for=condition=Ready externalsecret/loom-db --timeout=120s
 
 .PHONY: infra-local-secret
 infra-local-secret: check-context  ## CHỈ LOCAL: nạp Secret Aiven từ deploy/local/

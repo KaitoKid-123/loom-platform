@@ -41,6 +41,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: make check-pins
 
+  workflows:
+    name: lint workflow
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Nạp phiên bản đã pin
+        run: grep -E '^[A-Z][A-Z0-9_]*=' deploy/versions.env >> "$GITHUB_ENV"
+      - name: Cài actionlint và shellcheck đúng bản pin
+        # shellcheck BẮT BUỘC phải có: thiếu nó, actionlint lặng lẽ bỏ qua luật
+        # shellcheck và vẫn báo 0 errors. `make lint-workflows` từ chối chạy khi
+        # thiếu, nên bước này không thể vô tình biến thành một lint rỗng.
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL --retry 3 \
+            "https://github.com/koalaman/shellcheck/releases/download/$SHELLCHECK_VERSION/shellcheck-$SHELLCHECK_VERSION.linux.x86_64.tar.xz" \
+            | tar -xJ -C "$HOME/.local/bin" --strip-components=1 "shellcheck-$SHELLCHECK_VERSION/shellcheck"
+          curl -sSfL --retry 3 \
+            "https://github.com/rhysd/actionlint/releases/download/$ACTIONLINT_VERSION/actionlint_${ACTIONLINT_VERSION#v}_linux_amd64.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" actionlint
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: make lint-workflows
+
   lint:
     name: lint (ruff + mypy)
     runs-on: ubuntu-24.04
@@ -143,7 +165,9 @@ jobs:
         run: |
           helm version --short
           kubeconform -v
-          helm version --short | grep -q "^${HELM_VERSION}"
+          # So khớp CHÍNH XÁC: `grep "^v3.20.1"` cũng khớp v3.20.10,
+          # nên một bản helm khác vẫn lọt qua pin.
+          test "$(helm version --short | cut -d+ -f1)" = "$HELM_VERSION"
           test "$(kubeconform -v | head -1)" = "$KUBECONFORM_VERSION"
       - name: Cài envsubst nếu runner chưa có
         # helm-validate render deploy/infra/dex.yaml qua envsubst (giống hệt
@@ -157,7 +181,7 @@ jobs:
 
   build:
     name: build images
-    needs: [pins, lint, test-unit, test-integration, web, manifests]
+    needs: [pins, workflows, lint, test-unit, test-integration, web, manifests]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
