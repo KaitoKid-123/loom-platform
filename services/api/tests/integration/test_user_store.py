@@ -22,6 +22,7 @@ from loom_api.models import DEFAULT_TENANT_ID, AppUser, UserSession
 from loom_api.oidc_verifier import IdTokenClaims, InvalidIdToken
 from loom_api.user_store import PostgresUserStore
 from loom_core.config import Settings
+from loom_core.schemas import Principal
 
 API_DIR = Path(__file__).resolve().parents[2]
 
@@ -106,6 +107,9 @@ async def test_upsert_creates_user_and_session(store: PostgresUserStore, db: Dat
         ).scalar_one()
         assert sess_row.user_id == user.id
         assert sess_row.refresh_token == "rt-fresh"
+        # Token không có claim `groups` → cột phải là mảng RỖNG, không NULL. Cột
+        # NOT NULL, nên một NULL ở đây sẽ là lỗi ghi, không phải "không có nhóm".
+        assert sess_row.groups == []
 
 
 async def test_second_login_reuses_user_and_updates_last_login(
@@ -182,15 +186,138 @@ async def test_concurrent_first_logins_produce_one_user_and_n_sessions(
         assert len(sessions) == n, f"kỳ vọng đúng {n} user_session, thấy {len(sessions)}"
 
 
-async def test_load_session_returns_claims_for_live_session(store: PostgresUserStore) -> None:
+async def test_load_session_returns_principal_for_live_session(
+    store: PostgresUserStore, db: Database
+) -> None:
     claims = IdTokenClaims(subject="subject-live", email="live@loom.local", display_name="Live")
     session_id = await store.upsert_user_and_create_session(claims, refresh_token=None)
 
     loaded = await store.load_session(session_id)
 
-    assert loaded == IdTokenClaims(
-        subject="subject-live", email="live@loom.local", display_name="Live"
+    async with db.session() as session:
+        user = (await session.execute(select_user_by_subject("subject-live"))).scalar_one()
+
+    # So sánh CẢ đối tượng với UUID ĐỌC TỪ DB. `assert user_id is not None` sẽ
+    # xanh kể cả khi load_session() trả uuid4() mới mỗi lần — và user_id là thứ
+    # khớp với role_assignment.principal_user_id, nên sai nó là RBAC nhìn vào
+    # một người khác. Đây là mấu chốt của cả Task 3.
+    assert loaded == Principal(
+        user_id=user.id,
+        subject="subject-live",
+        email="live@loom.local",
+        display_name="Live",
+        groups=(),
     )
+
+
+async def test_load_session_user_id_survives_a_second_login(
+    store: PostgresUserStore, db: Database
+) -> None:
+    """Hai phiên của cùng một người phải mang CÙNG user_id — nếu load_session()
+    lấy id từ hàng session (hoặc dựng mới) thay vì từ app_user thì hai lần đăng
+    nhập cho ra hai principal khác nhau và mọi role_assignment gắn với người này
+    biến mất sau khi đăng nhập lại."""
+    claims = IdTokenClaims(subject="subject-stable", email="s@loom.local", display_name="S")
+    first = await store.upsert_user_and_create_session(claims, refresh_token=None)
+    second = await store.upsert_user_and_create_session(claims, refresh_token=None)
+    assert first != second
+
+    p1 = await store.load_session(first)
+    p2 = await store.load_session(second)
+    assert p1 is not None
+    assert p2 is not None
+
+    async with db.session() as session:
+        user = (await session.execute(select_user_by_subject("subject-stable"))).scalar_one()
+    assert p1.user_id == p2.user_id == user.id
+
+
+async def test_two_users_get_distinct_user_ids(store: PostgresUserStore) -> None:
+    """Bảo vệ ngược lại: một cài đặt trả về hằng số (hay tenant id) cũng làm
+    test trên xanh nếu nó chỉ so hai phiên của MỘT người."""
+    a = await store.upsert_user_and_create_session(
+        IdTokenClaims(subject="subject-a", email="a@loom.local", display_name="A"), None
+    )
+    b = await store.upsert_user_and_create_session(
+        IdTokenClaims(subject="subject-b", email="b@loom.local", display_name="B"), None
+    )
+    pa = await store.load_session(a)
+    pb = await store.load_session(b)
+    assert pa is not None
+    assert pb is not None
+    assert pa.user_id != pb.user_id
+
+
+async def test_groups_survive_login_and_reload(store: PostgresUserStore, db: Database) -> None:
+    """Nhóm đi trọn vòng: claims → cột user_session.groups → Principal."""
+    claims = IdTokenClaims(
+        subject="CgVsb25n",
+        email="long@loom.local",
+        display_name="long",
+        groups=("data-eng", "admins"),
+    )
+    session_id = await store.upsert_user_and_create_session(claims, None)
+
+    async with db.session() as session:
+        sess_row = (
+            await session.execute(
+                sa.select(UserSession).where(UserSession.id == uuid.UUID(session_id))
+            )
+        ).scalar_one()
+        # Cột thật sự mang nhóm — không phải mảng rỗng mà Principal rồi lại
+        # điền vào từ đâu khác.
+        assert sorted(sess_row.groups) == ["admins", "data-eng"]
+
+    principal = await store.load_session(session_id)
+    assert principal is not None
+    # Đã sắp xếp: chứng minh chuẩn hoá xảy ra chứ không phải trùng hợp thứ tự —
+    # claims đưa vào là ("data-eng", "admins").
+    assert principal.groups == ("admins", "data-eng")
+    assert claims.groups != principal.groups, "input phải KHÁC output đã sắp xếp"
+
+
+async def test_load_session_deduplicates_groups_from_the_row(
+    store: PostgresUserStore, db: Database
+) -> None:
+    """Cột là text[] — không có gì trong Postgres chặn phần tử trùng, và một
+    migration hay một bản vá tay hoàn toàn có thể để lại chúng. Chuẩn hoá phải
+    đứng ở đường ĐỌC, không chỉ ở đường ghi."""
+    claims = IdTokenClaims(subject="subject-dupes", email="d@loom.local", display_name="D")
+    session_id = await store.upsert_user_and_create_session(claims, None)
+
+    async with db.session() as session:
+        await session.execute(
+            sa.update(UserSession)
+            .where(UserSession.id == uuid.UUID(session_id))
+            .values(groups=["zulu", "admins", "zulu"])
+        )
+        await session.commit()
+
+    principal = await store.load_session(session_id)
+    assert principal is not None
+    assert principal.groups == ("admins", "zulu")
+
+
+async def test_load_session_rejects_a_row_with_an_empty_group_name(
+    store: PostgresUserStore, db: Database
+) -> None:
+    """`principal_group = ''` trong role_assignment khớp với một nhóm tên rỗng.
+    Cột text[] cho phép '' hoàn toàn tự nhiên, nên validator của Principal là
+    thứ DUY NHẤT chặn một hàng như thế biến thành quyền."""
+    claims = IdTokenClaims(subject="subject-blank-group", email="bg@loom.local", display_name="BG")
+    session_id = await store.upsert_user_and_create_session(claims, None)
+
+    async with db.session() as session:
+        await session.execute(
+            sa.update(UserSession)
+            .where(UserSession.id == uuid.UUID(session_id))
+            .values(groups=["admins", ""])
+        )
+        await session.commit()
+
+    with pytest.raises(InvalidIdToken) as caught:
+        await store.load_session(session_id)
+    assert caught.value.reason == "unusable_session_row"
 
 
 async def test_load_session_returns_none_for_expired_session(
@@ -221,9 +348,15 @@ async def test_load_session_returns_none_for_unknown_id(store: PostgresUserStore
 async def test_load_session_raises_when_row_has_empty_subject(
     store: PostgresUserStore, db: Database
 ) -> None:
-    """load_session() dựng lại IdTokenClaims trực tiếp từ hàng DB, đi vòng qua
-    verify(). __post_init__ của IdTokenClaims phải vẫn chặn subject rỗng trên
-    đường này (dữ liệu hỏng), không được âm thầm trả về danh tính rác."""
+    """load_session() dựng danh tính trực tiếp từ hàng DB, đi vòng qua verify().
+    Bất biến "subject không rỗng" phải vẫn chặn trên đường này (dữ liệu hỏng),
+    không được âm thầm trả về danh tính rác.
+
+    Trước Task 3 thì __post_init__ của IdTokenClaims giữ bất biến ấy. Giờ
+    load_session() trả Principal, nên nó nằm ở validator của Principal và
+    load_session() dịch ValidationError sang InvalidIdToken — nếu không, nhánh
+    `except InvalidIdToken` ở /me (và deps.py của Task 4) thành mã chết và một
+    hàng hỏng đi ra thành 500."""
     async with db.session() as session:
         bad_user = AppUser(
             id=uuid.uuid4(),
@@ -246,7 +379,7 @@ async def test_load_session_raises_when_row_has_empty_subject(
 
     with pytest.raises(InvalidIdToken) as caught:
         await store.load_session(bad_session_id)
-    assert caught.value.reason == "empty_subject"
+    assert caught.value.reason == "unusable_session_row"
 
 
 async def test_delete_session_removes_row(store: PostgresUserStore, db: Database) -> None:

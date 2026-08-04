@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, MetaData, String, Text, func
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -66,6 +67,11 @@ class UserSession(Base):
         index=True,
     )
     refresh_token: Mapped[str | None] = mapped_column(Text)
+    # Nhóm được CHỤP lúc đăng nhập, không đọc lại token mỗi request. Đánh đổi:
+    # đổi nhóm ở IdP chỉ có hiệu lực ở lần đăng nhập sau. Có chủ đích — xem spec
+    # mục 3.3 — và phải nằm trong tài liệu vận hành, nếu không người quản trị
+    # ngồi đợi quyền tự đổi.
+    groups: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )

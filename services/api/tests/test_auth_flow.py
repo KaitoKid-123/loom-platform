@@ -1,3 +1,4 @@
+import uuid
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -6,6 +7,7 @@ from httpx import ASGITransport, AsyncClient
 
 from loom_api.main import create_app
 from loom_api.oidc_verifier import IdTokenClaims, InvalidIdToken
+from loom_core.schemas import Principal
 
 DISCOVERY = {
     "issuer": "http://loom.localhost/dex",
@@ -14,12 +16,21 @@ DISCOVERY = {
     "jwks_uri": "http://loom.localhost/dex/keys",
 }
 
+# Cố ý KHÔNG theo thứ tự tăng dần: /me chỉ được thấy danh sách đã sắp xếp nếu
+# Principal thật sự chuẩn hoá nó.
+TOKEN_GROUPS = ("data-eng", "admins")
+
 
 class FakeUserStore:
-    """Thay cho Postgres trong unit test — Task 5 đã lo phần schema thật."""
+    """Thay cho Postgres trong unit test — test_user_store.py lo phần schema thật.
+
+    load_session() trả `Principal`, ĐÚNG như PostgresUserStore: fake mà trả
+    IdTokenClaims sẽ vẫn làm /me xanh nhờ duck typing (hai kiểu có cùng ba
+    trường), tức là toàn bộ chuỗi /me chưa từng nhìn thấy một Principal thật.
+    """
 
     def __init__(self) -> None:
-        self.sessions: dict[str, IdTokenClaims] = {}
+        self.sessions: dict[str, Principal] = {}
         self.upserts: list[IdTokenClaims] = []
 
     async def upsert_user_and_create_session(
@@ -27,10 +38,16 @@ class FakeUserStore:
     ) -> str:
         self.upserts.append(claims)
         session_id = f"sess-{len(self.upserts)}"
-        self.sessions[session_id] = claims
+        self.sessions[session_id] = Principal(
+            user_id=uuid.uuid4(),
+            subject=claims.subject,
+            email=claims.email,
+            display_name=claims.display_name,
+            groups=claims.groups,
+        )
         return session_id
 
-    async def load_session(self, session_id: str) -> IdTokenClaims | None:
+    async def load_session(self, session_id: str) -> Principal | None:
         return self.sessions.get(session_id)
 
     async def delete_session(self, session_id: str) -> None:
@@ -38,19 +55,19 @@ class FakeUserStore:
 
 
 class UnreconstructableSessionStore:
-    """load_session() không dựng lại được claims — mô phỏng hàng DB hỏng
+    """load_session() không dựng lại được danh tính — mô phỏng hàng DB hỏng
     (subject rỗng) mà PostgresUserStore.load_session() gặp khi đọc thẳng từ
     DB, đi vòng qua verify(). Xem probe thực tế trên Postgres thật ở review
-    trước: __post_init__ của IdTokenClaims ném InvalidIdToken đúng trên
-    đường này."""
+    trước; từ Task 3 thì ValidationError của Principal được dịch thành
+    InvalidIdToken đúng trên đường này."""
 
     async def upsert_user_and_create_session(
         self, claims: IdTokenClaims, refresh_token: str | None
     ) -> str:
         raise NotImplementedError
 
-    async def load_session(self, session_id: str) -> IdTokenClaims | None:
-        raise InvalidIdToken("empty_subject")
+    async def load_session(self, session_id: str) -> Principal | None:
+        raise InvalidIdToken("unusable_session_row")
 
     async def delete_session(self, session_id: str) -> None:
         pass
@@ -75,7 +92,12 @@ def store() -> FakeUserStore:
 @pytest.fixture
 async def app_client(store: FakeUserStore):
     async def verify(_id_token: str) -> IdTokenClaims:
-        return IdTokenClaims(subject="CgRsb25n", email="long@loom.local", display_name="Long")
+        return IdTokenClaims(
+            subject="CgRsb25n",
+            email="long@loom.local",
+            display_name="Long",
+            groups=TOKEN_GROUPS,
+        )
 
     app = create_app(
         user_store=store,
@@ -209,11 +231,17 @@ async def test_me_returns_current_user_after_login(app_client: AsyncClient) -> N
 
     response = await app_client.get("/api/v1/me")
     assert response.status_code == 200
+    # So sánh CẢ đối tượng, không chỉ vài khoá: một trường bị bỏ quên trong
+    # CurrentUser (hoặc thêm vào mà không ai định) làm test này đỏ.
+    # `groups` đã sắp xếp trong khi token phát ra theo thứ tự khác — chứng minh
+    # chuẩn hoá thật sự xảy ra trên đường này, không phải trùng hợp.
     assert response.json() == {
         "subject": "CgRsb25n",
         "email": "long@loom.local",
         "display_name": "Long",
+        "groups": ["admins", "data-eng"],
     }
+    assert list(TOKEN_GROUPS) != ["admins", "data-eng"], "input phải KHÁC output đã sắp xếp"
 
 
 async def test_me_returns_401_when_session_row_is_unreconstructable() -> None:

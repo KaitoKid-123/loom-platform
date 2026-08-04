@@ -194,6 +194,40 @@ async def test_empty_subject_is_rejected() -> None:
         await verifier_for(jwks).verify(sign(key, sub=""))
 
 
+async def test_groups_claim_is_read_from_the_token() -> None:
+    """Đây là điểm DUY NHẤT nhóm đi từ IdP vào hệ thống. Test round-trip ở
+    integration dựng IdTokenClaims bằng tay nên KHÔNG chạm dòng này — nếu
+    `verify()` bỏ qua claim `groups`, chỉ test này thấy."""
+    key, jwks = make_keypair()
+    claims = await verifier_for(jwks).verify(sign(key, groups=["data-eng", "admins"]))
+    assert claims.groups == ("admins", "data-eng")
+
+
+async def test_groups_claim_is_deduplicated_and_sorted() -> None:
+    """Đưa vào giảm dần và có trùng; đi ra tăng dần, không trùng. Tám tên để một
+    mutation bỏ `sorted()` không sống sót nhờ may mắn về thứ tự băm của set."""
+    key, jwks = make_keypair()
+    names = ["zulu", "yankee", "xray", "whiskey", "victor", "uniform", "tango", "sierra"]
+    claims = await verifier_for(jwks).verify(sign(key, groups=[*names, "zulu"]))
+    assert claims.groups == tuple(sorted(names))
+
+
+async def test_blank_group_names_in_the_token_are_dropped() -> None:
+    """Một claim `groups` có phần tử rỗng KHÔNG được làm đăng nhập thất bại —
+    nhưng cũng không được đi vào session: `principal_group = ''` trong
+    role_assignment sẽ khớp với nó."""
+    key, jwks = make_keypair()
+    claims = await verifier_for(jwks).verify(sign(key, groups=["admins", "", "  "]))
+    assert claims.groups == ("admins",)
+
+
+async def test_missing_groups_claim_means_no_groups() -> None:
+    """Dex chưa phát `groups` cho tới Task 25. Trước đó token không có claim đó,
+    và điều đó phải là "không có nhóm", không phải một lỗi."""
+    key, jwks = make_keypair()
+    assert (await verifier_for(jwks).verify(sign(key))).groups == ()
+
+
 async def test_concurrent_unknown_kid_triggers_single_fetch() -> None:
     key, jwks = make_keypair()
     calls = 0

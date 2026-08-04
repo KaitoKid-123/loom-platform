@@ -33,6 +33,10 @@ class IdTokenClaims:
     subject: str
     email: str
     display_name: str
+    # Chuẩn hoá ở verify() (dedupe + sort), không phải ở đây, vì __post_init__ của
+    # một dataclass frozen không gán lại được trường. Người gọi dựng trực tiếp thì
+    # tự chịu thứ tự của mình — Principal chuẩn hoá lại ở đầu bên kia dù sao.
+    groups: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # Bất biến nằm trên chính kiểu dữ liệu, không nằm ở verify(): Task 8
@@ -131,8 +135,15 @@ class OIDCVerifier:
 
         subject = str(payload["sub"])
         email = str(payload.get("email") or "")
+        # Phần tử rỗng bị BỎ, không làm đăng nhập thất bại: một claim lệch chuẩn ở
+        # phía IdP không được chặn người dùng đăng nhập. Nhưng nó cũng không được
+        # đi vào session — `principal_group = ''` trong role_assignment sẽ khớp với
+        # một nhóm tên rỗng, nên Principal từ chối hẳn cái tên đó.
+        raw_groups = payload.get("groups") or []
+        groups = tuple(sorted({str(g).strip() for g in raw_groups if str(g).strip()}))
         return IdTokenClaims(
             subject=subject,
             email=email,
             display_name=str(payload.get("name") or email or subject),
+            groups=groups,
         )

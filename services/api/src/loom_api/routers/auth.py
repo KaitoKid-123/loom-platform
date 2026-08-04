@@ -120,7 +120,7 @@ async def me(request: Request) -> CurrentUser:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "chưa đăng nhập")
 
     try:
-        claims = await request.app.state.user_store.load_session(session_id)
+        principal = await request.app.state.user_store.load_session(session_id)
     except InvalidIdToken as exc:
         # Hàng phiên trong DB không dựng lại được thành danh tính hợp lệ (ví dụ
         # subject rỗng do dữ liệu hỏng). Với client thì phiên đơn giản là không
@@ -128,7 +128,12 @@ async def me(request: Request) -> CurrentUser:
         logger.warning("auth.session_unusable", reason=exc.reason)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "phiên đã hết hạn") from exc
 
-    if claims is None:
+    if principal is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "phiên đã hết hạn")
 
-    return CurrentUser(subject=claims.subject, email=claims.email, display_name=claims.display_name)
+    return CurrentUser(
+        subject=principal.subject,
+        email=principal.email,
+        display_name=principal.display_name,
+        groups=principal.groups,
+    )
