@@ -4,8 +4,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=/dev/null
-set -a; . "$ROOT/deploy/versions.env"; set +a
+# versions.env là file dữ liệu KEY=VALUE, không phải thư viện shell — không có
+# gì để shellcheck đi theo, nên tắt hẳn SC1091 thay vì trỏ nó vào /dev/null
+# (cách đó vẫn phát cảnh báo trên bản shellcheck hiện tại).
+#
+# Directive phải nằm ngay trước ĐÚNG lệnh `.` — để chung dòng với `set -a` thì
+# nó gắn vào `set` và không có tác dụng.
+set -a
+# shellcheck disable=SC1091
+. "$ROOT/deploy/versions.env"
+set +a
 
 BIN="${LOOM_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$BIN"
@@ -64,8 +72,8 @@ if needs_install kubeconform "$KUBECONFORM_VERSION"; then
     | tar -xz -C "$BIN" kubeconform
 fi
 
-# shellcheck PHẢI có mặt trước khi actionlint hữu dụng: thiếu nó, actionlint
-# LẶNG LẼ tắt luật shellcheck và vẫn báo "0 errors" — chỉ `-verbose` mới lộ ra
+# Công cụ shellcheck PHẢI có mặt trước khi actionlint hữu dụng: thiếu nó,
+# actionlint LẶNG LẼ tắt luật đó và vẫn báo "0 errors" — chỉ `-verbose` mới lộ ra
 # dòng `Rule "shellcheck" was disabled`. Một lint xanh vì nó đã bỏ qua phần
 # việc khó nhất là đúng cái bẫy dự án này đã dính năm lần.
 if needs_install shellcheck "$SHELLCHECK_VERSION"; then

@@ -42,7 +42,7 @@ jobs:
       - run: make check-pins
 
   workflows:
-    name: lint workflow
+    name: lint workflow + shell
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,6 +62,7 @@ jobs:
             | tar -xz -C "$HOME/.local/bin" actionlint
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: make lint-workflows
+      - run: make lint-shell
 
   lint:
     name: lint (ruff + mypy)

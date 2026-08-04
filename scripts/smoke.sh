@@ -31,12 +31,12 @@ echo "Smoke test: $BASE"
 
 # 1 — web phục vụ được trang gốc
 c=$(code "$BASE/")
-[ "$c" = 200 ] && ok "web phục vụ /" || bad "web phục vụ /" "mong 200, nhận $c"
+if [ "$c" = 200 ]; then ok "web phục vụ /"; else bad "web phục vụ /" "mong 200, nhận $c"; fi
 
 # 2 — SPA fallback: đường không tồn tại vẫn phải trả index.html, không phải 404.
 #     Nếu hỏng thì F5 trên một route bất kỳ của ứng dụng sẽ ra 404.
 c=$(code "$BASE/mot/duong/khong/ton/tai")
-[ "$c" = 200 ] && ok "SPA fallback" || bad "SPA fallback" "mong 200, nhận $c"
+if [ "$c" = 200 ]; then ok "SPA fallback"; else bad "SPA fallback" "mong 200, nhận $c"; fi
 
 # 3 — healthz: API sống, không đụng database
 b=$(curl -s --max-time 10 "$BASE/api/v1/healthz")
@@ -58,8 +58,7 @@ fi
 # 5 — Dex phục vụ được discovery qua ingress. Đây là bài kiểm cả chuỗi
 #     host → loadbalancer → traefik → ingress → dex.
 iss=$(curl -s --max-time 10 "$BASE/dex/.well-known/openid-configuration" | jq -r '.issuer // empty')
-[ -n "$iss" ] && ok "Dex discovery (issuer: $iss)" \
-              || bad "Dex discovery" "không đọc được issuer"
+if [ -n "$iss" ]; then ok "Dex discovery (issuer: $iss)"; else bad "Dex discovery" "không đọc được issuer"; fi
 
 # 6 — đăng nhập trọn vẹn: login → Dex → callback → /me trả đúng người dùng.
 #     Bài kiểm nặng nhất: nó chạm PKCE, đổi code lấy token, xác minh ID token
@@ -76,7 +75,7 @@ if [ -n "$auth" ]; then
     cb=$(curl -s -b "$JAR" -c "$JAR" -o /dev/null -w '%{redirect_url}' --max-time 10 \
           --data-urlencode "login=$USER_LOGIN" --data-urlencode "password=$USER_PASS" "$act")
     case "$cb" in *approval*) cb=$(curl -s -b "$JAR" -c "$JAR" -o /dev/null -w '%{redirect_url}' --max-time 10 "$cb");; esac
-    [ -n "$cb" ] && curl -s -b "$JAR" -c "$JAR" -o /dev/null --max-time 10 "$cb"
+    if [ -n "$cb" ]; then curl -s -b "$JAR" -c "$JAR" -o /dev/null --max-time 10 "$cb"; fi
   fi
 fi
 me=$(curl -s -b "$JAR" --max-time 10 "$BASE/api/v1/me")

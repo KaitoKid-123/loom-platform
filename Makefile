@@ -239,3 +239,11 @@ lint-workflows:  ## actionlint + shellcheck cho .github/workflows
 .PHONY: smoke
 smoke:  ## Bảy phép kiểm chấp nhận qua HTTP (BASE=... để chạy với môi trường khác)
 	@./scripts/smoke.sh
+
+.PHONY: lint-shell
+lint-shell:  ## shellcheck cho mọi script shell trong repo
+	@# lint-workflows chỉ quét .github/workflows. Ba script shell của dự án
+	@# (bootstrap, smoke, git hook) trước đó không được lint bởi bất cứ thứ gì.
+	@command -v shellcheck >/dev/null || { \
+		echo "Thiếu shellcheck — chạy 'make bootstrap'."; exit 1; }
+	shellcheck scripts/*.sh scripts/git-hooks/*
