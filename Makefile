@@ -83,7 +83,7 @@ build-web:  ## Build image loom-web
 build: build-api build-web  ## Build cả hai image
 
 .PHONY: helm-validate
-helm-validate:  ## helm lint + kubeconform cho cả ba môi trường
+helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
 	helm lint deploy/helm/loom
 	@# `set -e` là BẮT BUỘC: không có nó, exit status của cả vòng lặp là của
 	@# lần lặp CUỐI (prod), nên một lỗi chỉ xảy ra ở local sẽ không làm target đỏ.
@@ -99,6 +99,30 @@ helm-validate:  ## helm lint + kubeconform cho cả ba môi trường
 		| kubeconform -strict -summary \
 			-kubernetes-version $(KUBECONFORM_K8S_VERSION); \
 	done
+	@# dex.yaml không nằm trong chart nên vòng lặp trên không chạm tới nó. Kiểm
+	@# bản ĐÃ render qua envsubst, đúng thứ mà `make infra` đưa vào cụm: bản thô
+	@# cũng hợp lệ với kubeconform (`image: $${DEX_IMAGE}` chỉ là một string) nên
+	@# kiểm bản thô không nói lên điều gì về thứ thật sự được apply.
+	@#
+	@# deploy/infra/external-secret.yaml CỐ Ý không có ở đây: ClusterSecretStore
+	@# và ExternalSecret là CRD, không có schema trong catalog mặc định của
+	@# kubeconform. Thêm nó vào cần -schema-location trỏ ra kho CRD ngoài; chưa
+	@# làm, nên file đó hiện KHÔNG được CI kiểm.
+	@echo "→ infra/dex.yaml"
+	@set -eo pipefail; DEX_IMAGE="$(DEX_IMAGE)" envsubst '$$DEX_IMAGE' < deploy/infra/dex.yaml \
+	| kubeconform -strict -summary \
+		-kubernetes-version $(KUBECONFORM_K8S_VERSION)
+
+.PHONY: check-pins
+check-pins:  ## Chặn FROM trong Dockerfile lệch với deploy/versions.env
+	@# CI cài node và uv theo NODE_VERSION/UV_VERSION trong deploy/versions.env,
+	@# nhưng hai Dockerfile mang tag riêng của chúng. Không có target này thì hai
+	@# bên trôi khỏi nhau âm thầm và CI đi kiểm một toolchain không ai build bằng.
+	@grep -q '^FROM node:$(NODE_VERSION)-alpine' web/Dockerfile \
+		|| { echo "web/Dockerfile không FROM node:$(NODE_VERSION)-alpine — lệch NODE_VERSION trong deploy/versions.env"; exit 1; }
+	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/api/Dockerfile \
+		|| { echo "services/api/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
+	@echo "Pin khớp: node $(NODE_VERSION), uv $(UV_VERSION)"
 
 .PHONY: bootstrap
 bootstrap:  ## Cài k3d, tilt, kubeconform và kiểm tra môi trường

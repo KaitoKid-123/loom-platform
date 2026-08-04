@@ -1,0 +1,176 @@
+# CI gọi ĐÚNG những target mà `make` đã có. Viết lại các lệnh đó bằng YAML thì
+# một hôm nào đó Makefile sửa mà workflow không sửa, và CI lặng lẽ kiểm một thứ
+# khác với thứ dev chạy ở máy. Mọi bước dưới đây hoặc là `make <target>`, hoặc
+# là cài công cụ để target đó chạy được.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Chỉ huỷ lần chạy cũ trên nhánh PR. Trên main mỗi commit phải có kết quả của
+  # riêng nó, nếu không thì một commit hỏng có thể bị huỷ giữa chừng bởi commit
+  # sau và không bao giờ đỏ.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # `shell: bash` KHÔNG thừa. Mặc định của GitHub cho Linux là `bash -e`, tức
+    # là KHÔNG có pipefail: một `a | b` với a hỏng vẫn xanh. Khai báo tường minh
+    # thì runner dùng `bash --noprofile --norc -eo pipefail`. Cùng lý do với
+    # `set -eo pipefail` trong target helm-validate.
+    shell: bash
+
+# Action pin bằng SHA commit, tag chỉ để người đọc. Tag di chuyển được — v7.0.1
+# hôm nay và v7.0.1 tháng sau có thể là hai đoạn mã khác nhau.
+jobs:
+  # Job rẻ nhất và cũng là job dễ bị quên nhất: NODE_VERSION/UV_VERSION trong
+  # deploy/versions.env quyết định toolchain của CI, nhưng Dockerfile mang tag
+  # riêng. Lệch nhau thì CI xanh trên một toolchain không ai build bằng.
+  pins:
+    name: version pins
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make check-pins
+
+  lint:
+    name: lint (ruff + mypy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Nạp phiên bản pin từ deploy/versions.env
+        # Nguồn phiên bản duy nhất, đúng file mà Makefile `include`. Lọc bỏ dòng
+        # chú thích và dòng trống vì $GITHUB_ENV chỉ nhận KEY=VALUE.
+        run: grep -E '^[A-Z][A-Z0-9_]*=' deploy/versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: make sync
+      - run: make lint
+
+  test-unit:
+    name: test (unit)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Nạp phiên bản pin từ deploy/versions.env
+        run: grep -E '^[A-Z][A-Z0-9_]*=' deploy/versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: make sync
+      - run: make test
+
+  # Integration test CÓ chạy trên CI. Chúng cần Docker (testcontainers dựng
+  # postgres:17-alpine) và runner ubuntu của GitHub có sẵn daemon Docker đang
+  # chạy — không cần service container, không cần secret nào. Bỏ chúng ra thì
+  # đường alembic + schema thật không còn chỗ nào được kiểm tự động: test unit
+  # không đụng database, còn `make dev` thì trỏ vào Aiven thật.
+  test-integration:
+    name: test (integration, cần Docker)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Nạp phiên bản pin từ deploy/versions.env
+        run: grep -E '^[A-Z][A-Z0-9_]*=' deploy/versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: make sync
+      - name: Xác nhận Docker chạy được
+        # test-int mà KHÔNG có Docker thì testcontainers ném lỗi lúc collect và
+        # job đỏ — nhưng với một thông báo dài chẳng liên quan gì tới nguyên
+        # nhân. Hỏi thẳng ở đây để lỗi tự nói ra nó là gì.
+        run: docker info > /dev/null
+      - run: make test-int
+
+  web:
+    name: web (test + typecheck + build)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Nạp phiên bản pin từ deploy/versions.env
+        run: grep -E '^[A-Z][A-Z0-9_]*=' deploy/versions.env >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: make web-install
+      - run: make web-test
+      - name: Build bundle production
+        # Job `build` cũng build bundle này (bên trong web/Dockerfile), nhưng nó
+        # chạy SAU và mất thêm vài phút docker. Chạy ở đây để lỗi vite hiện ra
+        # sớm. Vẫn là script `build` trong package.json, không phải lệnh chép lại.
+        working-directory: web
+        run: npm run build
+
+  manifests:
+    name: manifests (helm lint + kubeconform)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Nạp phiên bản pin từ deploy/versions.env
+        run: grep -E '^[A-Z][A-Z0-9_]*=' deploy/versions.env >> "$GITHUB_ENV"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Cài kubeconform ${{ env.KUBECONFORM_VERSION }}
+        # Cùng URL mà scripts/bootstrap.sh dùng, nhưng PHIÊN BẢN thì lấy từ
+        # deploy/versions.env chứ không viết cứng — chỉ có con số mới trôi.
+        # Makefile đã tự thêm ~/.local/bin vào PATH; $GITHUB_PATH là để các bước
+        # gọi thẳng kubeconform (bước xác nhận ngay dưới) cũng thấy nó.
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL --retry 3 --retry-delay 2 \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" kubeconform
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Xác nhận công cụ đúng phiên bản đã pin
+        # Không có bước này thì một bản helm hoặc kubeconform khác lọt vào mà
+        # không ai biết, và "CI xanh" nói về một tổ hợp công cụ không xác định.
+        run: |
+          helm version --short
+          kubeconform -v
+          helm version --short | grep -q "^${HELM_VERSION}"
+          test "$(kubeconform -v | head -1)" = "$KUBECONFORM_VERSION"
+      - name: Cài envsubst nếu runner chưa có
+        # helm-validate render deploy/infra/dex.yaml qua envsubst (giống hệt
+        # `make infra`). Thiếu nó thì target đỏ vì "command not found".
+        run: |
+          command -v envsubst > /dev/null || {
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq gettext-base
+          }
+      - run: make helm-validate
+
+  build:
+    name: build images
+    needs: [pins, lint, test-unit, test-integration, web, manifests]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Cố tình KHÔNG dùng docker/build-push-action + cache gha ở Giai đoạn 0:
+      # `make build` gọi đúng hai lệnh `docker build` mà Tiltfile và máy dev gọi,
+      # nên không có đường nào để CI và local build khác nhau. Đổi lại là mất
+      # cache giữa các lần chạy (~vài phút cho image api). Khi Giai đoạn 6 có
+      # registry thì đây là chỗ thêm buildx, cache và `push: true`.
+      - name: Build loom/api và loom/web
+        run: make build IMAGE_TAG="${{ github.sha }}"
+      - name: Xác nhận hai image thật sự tồn tại
+        # `docker build` xanh mà không tạo ra tag nào là chuyện đã xảy ra ở dự án
+        # này (xem ghi chú (1) trong Tiltfile). Hỏi daemon cho chắc.
+        run: |
+          docker image inspect "loom/api:${{ github.sha }}" > /dev/null
+          docker image inspect "loom/web:${{ github.sha }}" > /dev/null
