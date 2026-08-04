@@ -1,13 +1,14 @@
 import secrets
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import RedirectResponse
 
+from loom_api.deps import PrincipalDep
 from loom_api.oidc_client import TokenExchangeError
 from loom_api.oidc_verifier import InvalidIdToken
 from loom_api.sessions import CookieSigner, generate_pkce_pair
-from loom_core.schemas import CurrentUser
+from loom_core.schemas import CurrentUser, Principal
 
 TX_COOKIE = "loom_oidc_tx"
 TX_MAX_AGE = 600
@@ -113,24 +114,9 @@ async def logout(request: Request, response: Response) -> Response:
 
 
 @router.get("/me", response_model=CurrentUser)
-async def me(request: Request) -> CurrentUser:
-    settings = request.app.state.settings
-    session_id = request.cookies.get(settings.session_cookie_name)
-    if not session_id:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "chưa đăng nhập")
-
-    try:
-        principal = await request.app.state.user_store.load_session(session_id)
-    except InvalidIdToken as exc:
-        # Hàng phiên trong DB không dựng lại được thành danh tính hợp lệ (ví dụ
-        # subject rỗng do dữ liệu hỏng). Với client thì phiên đơn giản là không
-        # dùng được — 401, không phải 500.
-        logger.warning("auth.session_unusable", reason=exc.reason)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "phiên đã hết hạn") from exc
-
-    if principal is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "phiên đã hết hạn")
-
+async def me(principal: Principal = PrincipalDep) -> CurrentUser:
+    # Không còn đọc cookie ở đây: xem loom_api.deps. Handler nào cũng tự đọc
+    # cookie thì chỉ cần một handler quên là có một endpoint công khai.
     return CurrentUser(
         subject=principal.subject,
         email=principal.email,
