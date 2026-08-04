@@ -5,6 +5,10 @@ SHELL := /bin/bash
 # một file pin mà không ai đọc thì chỉ là tài liệu, và sẽ lệch âm thầm.
 include deploy/versions.env
 
+# scripts/bootstrap.sh cài k3d/tilt/kubeconform vào ~/.local/bin. Đưa thư mục đó
+# vào PATH của make để không phải nhớ sửa ~/.bashrc trước khi chạy target nào.
+export PATH := $(HOME)/.local/bin:$(PATH)
+
 CLUSTER := loom
 NS := loom
 IMAGE_TAG ?= dev
@@ -90,6 +94,10 @@ helm-validate:  ## helm lint + kubeconform cho cả ba môi trường
 		| kubeconform -strict -summary \
 			-kubernetes-version $(KUBECONFORM_K8S_VERSION); \
 	done
+
+.PHONY: bootstrap
+bootstrap:  ## Cài k3d, tilt, kubeconform và kiểm tra môi trường
+	./scripts/bootstrap.sh
 
 .PHONY: infra-local-secret
 infra-local-secret: check-context  ## CHỈ LOCAL: nạp Secret Aiven từ deploy/local/
