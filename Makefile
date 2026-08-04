@@ -20,7 +20,7 @@ help:  ## Liệt kê các lệnh
 	@# gắn tiền tố "Makefile:" vào mọi dòng và awk cắt nhầm — mọi target đều
 	@# hiện tên là "Makefile".
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(firstword $(MAKEFILE_LIST)) \
-		| awk -F':.*?## ' '{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+		| awk -F':.*?## ' '{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: sync
 sync:  ## Cài dependency Python

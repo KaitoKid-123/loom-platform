@@ -140,12 +140,20 @@ k8s_resource('loom-web', port_forwards=['8080:8080'], labels=['app'])
 # ngoài tầm với của allow_k8s_contexts ở trên. Không có cờ này thì một lần
 # `kubectl config use-context` ở terminal khác đủ để lệnh migration bắn vào cụm
 # thật — đúng cái tai nạn mà check-context sinh ra để chặn.
+# TRIGGER_MODE_MANUAL có chủ đích. Database ở local KHÔNG phải container dùng
+# xong vứt — nó là Aiven managed thật, cùng loại dịch vụ mà dev và prod dùng.
+# Để mode tự động thì mỗi `make dev`, và mỗi lần sửa file trong loom-api, đều
+# chạy DDL lên một database thật mà không ai bấm nút. Bấm một lần trong giao
+# diện Tilt là đủ, và lần chạy đầu tiên trở thành một hành động có ý thức.
+# Muốn tự động lại: xoá dòng trigger_mode.
 local_resource(
     'migrate',
     cmd=('kubectl --context %s -n loom exec deploy/loom-api -- ' % EXPECTED_CONTEXT) +
         'sh -c "cd /app/services/api && alembic upgrade head"',
     resource_deps=['loom-api'],
+    trigger_mode=TRIGGER_MODE_MANUAL,
     labels=['app'],
 )
 
 print('Mở http://loom.localhost — đăng nhập long@loom.local / password')
+print('Lần đầu: bấm chạy resource "migrate" trong Tilt để tạo bảng trên Aiven.')
