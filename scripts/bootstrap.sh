@@ -82,6 +82,14 @@ if needs_install actionlint "$ACTIONLINT_VERSION"; then
     | tar -xz -C "$BIN" actionlint
 fi
 
+# core.hooksPath là cấu hình CỤC BỘ, không đi theo repo khi clone — nên phải đặt
+# ở đây, nếu không người mới clone về sẽ không có lớp chặn credential nào ngoài
+# .gitignore, mà .gitignore thì `git add -f` đi xuyên qua được.
+if [ "$(git -C "$ROOT" config --get core.hooksPath 2>/dev/null)" != "scripts/git-hooks" ]; then
+  echo "→ bật git hook chặn credential"
+  git -C "$ROOT" config core.hooksPath scripts/git-hooks
+fi
+
 docker info >/dev/null 2>&1 || { echo "Docker daemon không chạy." >&2; exit 1; }
 
 # `loom.localhost` phải phân giải về loopback. Hai tầng, vì chúng khác nhau thật:

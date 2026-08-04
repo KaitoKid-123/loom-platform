@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Chặn credential lọt vào commit. Repo này PUBLIC, nên một lần lỡ tay là mật
+# khẩu database nằm trên Internet — và đã push thì phải xoay vòng credential,
+# xoá commit không cứu được vì GitHub vẫn giữ object và người ta đã crawl.
+#
+# .gitignore KHÔNG đủ: `git add -f` đi xuyên qua nó. Hook này là lớp thứ hai.
+#
+# Cài: git config core.hooksPath scripts/git-hooks   (scripts/bootstrap.sh tự làm)
+set -euo pipefail
+
+staged() { git diff --cached --name-only --diff-filter=ACM; }
+
+fail() {
+  echo "" >&2
+  echo "COMMIT BỊ CHẶN — $1" >&2
+  echo "" >&2
+  echo "Repo này public. Nếu thật sự cần commit, bỏ hook một lần bằng:" >&2
+  echo "    git commit --no-verify" >&2
+  echo "và tự chịu trách nhiệm xoay vòng credential sau đó." >&2
+  echo "" >&2
+  exit 1
+}
+
+# 1) Chặn theo ĐƯỜNG DẪN — thứ chắc chắn không bao giờ được commit.
+for path in deploy/local/aiven.env deploy/local/aiven-ca.pem; do
+  if staged | grep -qxF "$path"; then
+    fail "$path đang nằm trong staged. File này chứa credential Aiven thật."
+  fi
+done
+
+# 2) Chặn theo NỘI DUNG — bắt cả trường hợp đổi tên hoặc dán nhầm vào file khác.
+#    Chỉ quét phần THÊM VÀO (dòng bắt đầu bằng '+'), không quét cả file, để sửa
+#    một file lớn có sẵn chuỗi lạ không bị chặn oan.
+added="$(git diff --cached -U0 | grep '^+' || true)"
+
+# Tiền tố mật khẩu do Aiven sinh, kèm phần ngẫu nhiên phía sau.
+#
+# Bắt buộc phải có {8,} ký tự theo sau, không phải chỉ mỗi tiền tố: nếu khớp
+# trần thì hook TỰ CHẶN COMMIT CỦA CHÍNH NÓ, vì mã nguồn này có chứa tiền tố đó
+# trong biểu thức tìm kiếm. Đã dính đúng một lần khi thêm file này.
+if grep -qE 'AVNS_[A-Za-z0-9_-]{8,}' <<<"$added"; then
+  fail "nội dung thêm vào có mật khẩu Aiven (tiền tố AVNS)."
+fi
+
+if grep -qE 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY' <<<"$added"; then
+  fail "nội dung thêm vào có khoá riêng tư."
+fi
+
+# host Aiven thật đi kèm cổng: gần như luôn là connection string bị dán nhầm.
+if grep -qE '[a-z0-9-]+\.[a-z0-9-]+\.aivencloud\.com' <<<"$added"; then
+  fail "nội dung thêm vào có hostname Aiven thật."
+fi
+
+exit 0
