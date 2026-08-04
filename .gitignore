@@ -25,3 +25,6 @@ kubeconfig
 # Credential Aiven cho local — commit chỉ file .example, không commit thứ này
 deploy/local/aiven.env
 deploy/local/aiven-ca.pem
+
+# Cấu hình cục bộ của công cụ, có thể chứa đường dẫn/khoá riêng của máy
+.claude/

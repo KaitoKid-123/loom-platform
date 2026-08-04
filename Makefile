@@ -1,5 +1,10 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
+
+# Nguồn phiên bản duy nhất. `include` để những giá trị này thật sự được dùng —
+# một file pin mà không ai đọc thì chỉ là tài liệu, và sẽ lệch âm thầm.
+include deploy/versions.env
+
 CLUSTER := loom
 NS := loom
 IMAGE_TAG ?= dev
@@ -73,12 +78,17 @@ helm-validate:  ## helm lint + kubeconform cho cả ba môi trường
 	helm lint deploy/helm/loom
 	@# `set -e` là BẮT BUỘC: không có nó, exit status của cả vòng lặp là của
 	@# lần lặp CUỐI (prod), nên một lỗi chỉ xảy ra ở local sẽ không làm target đỏ.
-	@set -e; for env in local dev prod; do \
+	@#
+	@# `pipefail` cũng BẮT BUỘC, vì lý do khác: `set -e` chỉ thấy lệnh CUỐI của
+	@# pipe. Nếu chính `helm template` hỏng (template sai, thiếu `required`,
+	@# thiếu file values) thì kubeconform đọc stdin RỖNG, báo "0 resources found"
+	@# và thoát 0 — target xanh trong khi không kiểm tra được gì cả.
+	@set -eo pipefail; for env in local dev prod; do \
 		echo "→ $$env"; \
 		helm template loom deploy/helm/loom -n $(NS) \
 			-f deploy/envs/values-$$env.yaml \
 		| kubeconform -strict -summary \
-			-kubernetes-version 1.32.0; \
+			-kubernetes-version $(KUBECONFORM_K8S_VERSION); \
 	done
 
 .PHONY: infra-local-secret
