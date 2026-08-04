@@ -1,0 +1,38 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loom-dev
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  # Hai nguồn: chart nằm một path, values nằm path khác trong cùng repo. Đây là
+  # cách chính thức để tham chiếu file values ngoài thư mục chart.
+  #
+  # Repo đang để Public nên ArgoCD đọc được mà không cần credential. Nếu sau này
+  # chuyển sang Private thì phải khai báo Secret repo trong namespace argocd,
+  # nếu không Application sẽ kẹt ở "ComparisonError" chứ không báo lỗi quyền.
+  sources:
+    - repoURL: https://github.com/KaitoKid-123/loom-platform.git
+      targetRevision: main
+      ref: repo
+    - repoURL: https://github.com/KaitoKid-123/loom-platform.git
+      targetRevision: main
+      path: deploy/helm/loom
+      helm:
+        valueFiles:
+          - $repo/deploy/envs/values-dev.yaml
+  destination:
+    # Cùng cụm với ArgoCD. Nếu dùng một ArgoCD trung tâm quản nhiều cụm thì
+    # thay bằng địa chỉ API server của cụm dev đã đăng ký.
+    server: https://kubernetes.default.svc
+    namespace: loom
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  revisionHistoryLimit: 10

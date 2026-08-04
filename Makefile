@@ -113,6 +113,17 @@ helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
 	| kubeconform -strict -summary \
 		-kubernetes-version $(KUBECONFORM_K8S_VERSION)
 
+	@echo "→ argocd/"
+	@# ArgoCD Application là CRD nên không có trong catalog mặc định của
+	@# kubeconform. Cách thường thấy là thêm -ignore-missing-schemas, nhưng thế
+	@# thì mọi Application thành "Skipped" và một apiVersion gõ sai vẫn exit 0 —
+	@# đã kiểm: Skipped 2, exit 0, không bắt được gì. Nên vendor hẳn schema vào
+	@# deploy/schemas/ và KHÔNG dùng cờ đó: thiếu schema giờ là Errors, không
+	@# phải Skipped.
+	kubeconform -strict -summary \
+		-schema-location 'deploy/schemas/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json' \
+		-kubernetes-version $(KUBECONFORM_K8S_VERSION) deploy/argocd/
+
 .PHONY: check-pins
 check-pins:  ## Chặn FROM trong Dockerfile lệch với deploy/versions.env
 	@# CI cài node và uv theo NODE_VERSION/UV_VERSION trong deploy/versions.env,

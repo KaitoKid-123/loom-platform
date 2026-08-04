@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loom-prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://github.com/KaitoKid-123/loom-platform.git
+      targetRevision: main
+      ref: repo
+    - repoURL: https://github.com/KaitoKid-123/loom-platform.git
+      targetRevision: main
+      path: deploy/helm/loom
+      helm:
+        valueFiles:
+          - $repo/deploy/envs/values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: loom
+  syncPolicy:
+    # KHÔNG có `automated`, khác hẳn dev. Production đồng bộ do người bấm: đổi
+    # image tag phải đi qua PR có người duyệt, và một commit hỏng merge vào main
+    # sẽ không tự chảy thẳng ra production.
+    #
+    # Hệ quả cần biết: không có `selfHeal`, nên thay đổi sửa tay trực tiếp trên
+    # cụm sẽ TỒN TẠI cho tới lần sync kế tiếp. Đó là đánh đổi có chủ đích —
+    # người trực sự cố cần vá gấp được, và ArgoCD báo OutOfSync để không ai quên.
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  revisionHistoryLimit: 20
