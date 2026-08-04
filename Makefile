@@ -164,3 +164,16 @@ infra-local-secret: check-context  ## CHỈ LOCAL: nạp Secret Aiven từ deplo
 	  --dry-run=client -o json \
 	| jq --rawfile ca deploy/local/aiven-ca.pem '.data["ca.pem"] = ($$ca | @base64)' \
 	| kubectl apply -f -
+
+.PHONY: dev
+dev: cluster-up infra infra-local-secret  ## Dựng mọi thứ rồi chạy Tilt
+	@# `infra-local-secret` nằm ở đây chứ không nằm trong `infra`, đúng như ghi
+	@# chú của target đó: Dex phải dựng được kể cả khi chưa có credential Aiven,
+	@# còn `make dev` thì cần cả hai. Đặt nó là prerequisite cũng để lỗi "thiếu
+	@# deploy/local/*" hiện ra ngay dưới dạng một câu tiếng người, thay vì thành
+	@# một pod loom-api treo ở ContainerCreating trong giao diện Tilt.
+	tilt up
+
+.PHONY: dev-down
+dev-down: check-context  ## Dừng Tilt và gỡ tài nguyên do nó tạo
+	tilt down

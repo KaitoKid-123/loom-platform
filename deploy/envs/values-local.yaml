@@ -11,3 +11,12 @@ app:
   environment: local
   logLevel: DEBUG
   cookieSecure: false
+migration:
+  # Ở local KHÔNG sinh Job migration. Tilt triển khai bằng `helm template` rồi
+  # `kubectl apply` lặp đi lặp lại; Job thì bất biến ở spec.template nên lần
+  # apply thứ hai sau mỗi lần đổi image sẽ đỏ với "field is immutable".
+  # (Ngoài ra hook annotation `helm.sh/hook` cũng vô nghĩa khi không có helm
+  # install đứng sau — không có gì dọn Job cũ đi.)
+  # Local chạy migration bằng `local_resource('migrate')` trong Tiltfile.
+  # Nhánh Job vẫn được kiểm chứng ở dev/prod qua `make helm-validate`.
+  enabled: false
