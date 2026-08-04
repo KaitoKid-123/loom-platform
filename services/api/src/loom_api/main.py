@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from loom_api import VERSION
 from loom_api.db import Database, build_sqlalchemy_url
+from loom_api.errors import install_error_handlers
 from loom_api.logging import configure_logging
 from loom_api.middleware import RequestContextMiddleware
 from loom_api.oidc_client import OIDCClient
@@ -74,6 +75,7 @@ def create_app(
     # tự đăng ký đảo ngược, nên cái thêm sau cùng chạy ngoài cùng — vào trước
     # (dọn sạch contextvars) và ra sau. Middleware nào cũng bind contextvars thì
     # phải đăng ký TRƯỚC dòng này, không bao giờ sau.
+    install_error_handlers(app)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")

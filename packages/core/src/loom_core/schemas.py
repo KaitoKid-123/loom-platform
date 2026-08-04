@@ -1,5 +1,7 @@
 """Model Pydantic dùng chung giữa API, task pod và client sinh tự động."""
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -20,9 +22,13 @@ class CurrentUser(BaseModel):
 
 
 class ProblemDetail(BaseModel):
-    """RFC 9457."""
+    """RFC 9457 Problem Details. `type` để 'about:blank' khi không có trang tài
+    liệu riêng cho loại lỗi đó — RFC cho phép, và bịa một URL không tồn tại thì
+    tệ hơn."""
 
     type: str = "about:blank"
     title: str
     status: int
     detail: str | None = None
+    instance: str | None = None
+    errors: list[dict[str, Any]] | None = None
