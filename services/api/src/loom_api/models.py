@@ -1,8 +1,18 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, MetaData, String, Text, func
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    MetaData,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -77,4 +87,89 @@ class UserSession(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+ACTIVE = "active"
+DELETED = "deleted"
+
+
+class TimestampMixin:
+    """created_by/updated_by là NOT NULL có chủ đích: mọi hàng phải truy được về
+    một người. Audit trả lời 'ai đổi gì'; hai cột này trả lời 'ai tạo ra thứ này'
+    mà không phải quét audit."""
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class Domain(Base, TimestampMixin):
+    __tablename__ = "domain"
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_domain_tenant_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("tenant.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
+    )
+    updated_by: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
+    )
+
+
+class Workspace(Base, TimestampMixin):
+    __tablename__ = "workspace"
+    __table_args__ = (
+        # Unique MỘT PHẦN, không phải unique thường. Xem test_models_workspace.
+        Index(
+            "uq_workspace_active_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("state = 'active'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("tenant.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # SET NULL chứ không CASCADE: xoá một domain là thao tác phân loại, không
+    # được biến thành mất workspace.
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("domain.id", ondelete="SET NULL"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    # Giai đoạn 2 dùng. NOT NULL từ giờ để Giai đoạn 2 không phải backfill.
+    storage_prefix: Mapped[str] = mapped_column(String(255), nullable=False)
+    resource_profile: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=ACTIVE)
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
+    )
+    updated_by: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
     )
