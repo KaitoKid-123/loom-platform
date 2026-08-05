@@ -5,6 +5,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     MetaData,
     String,
     Text,
@@ -172,4 +173,93 @@ class Workspace(Base, TimestampMixin):
     )
     updated_by: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
+    )
+
+
+class Item(Base, TimestampMixin):
+    __tablename__ = "item"
+    __table_args__ = (
+        Index(
+            "uq_item_active_name",
+            "workspace_id",
+            "type",
+            "name",
+            unique=True,
+            postgresql_where=text("state = 'active'"),
+        ),
+        Index(
+            "ix_item_workspace_folder",
+            "workspace_id",
+            "folder_path",
+            postgresql_where=text("state = 'active'"),
+        ),
+        # Thứ tự cột PHẢI khớp ORDER BY của cursor: (updated_at DESC, id DESC).
+        # Cả ba cột ASC là CỐ Ý — btree quét NGƯỢC index này cho ra đúng thứ tự
+        # đó khi workspace_id là điều kiện bằng. Đặt `updated_at DESC` như DDL
+        # trong spec mục 3.1 thì không chiều quét nào khớp và planner phải Sort.
+        Index(
+            "ix_item_pagination",
+            "workspace_id",
+            "updated_at",
+            "id",
+            postgresql_where=text("state = 'active'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workspace.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    folder_path: Mapped[str] = mapped_column(String(1024), nullable=False, server_default="/")
+    description: Mapped[str | None] = mapped_column(Text)
+    definition: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    # Dấu vết NỘI DUNG của definition — cho Git drift ở Giai đoạn 5. KHÔNG phải
+    # ETag: nó không phủ display_name/folder_path nên không phát hiện được xung
+    # đột đổi tên. ETag là `version`.
+    definition_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=ACTIVE)
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
+    )
+    updated_by: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
+    )
+
+
+class ItemVersion(Base):
+    __tablename__ = "item_version"
+    __table_args__ = (UniqueConstraint("item_id", "version", name="uq_item_version"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("item.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    definition: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    # Lưu cả metadata, không chỉ definition: restore phải hoàn tác được một lần
+    # đổi tên hoặc di chuyển folder, không riêng nội dung.
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    folder_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    change_note: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
