@@ -28,7 +28,9 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 
+from loom_api.item_store import ItemStore
 from loom_api.models import DEFAULT_TENANT_ID, AppUser, Domain, Item, RoleAssignment, Workspace
+from loom_core.item_definitions import ItemType
 from loom_core.roles import Role
 from loom_core.schemas import Principal
 
@@ -311,4 +313,42 @@ async def rbac_fixture(db_session: AsyncSession, sql_log: list[str]) -> RbacFixt
         # KHÔNG có hàng app_user tương ứng: một principal hoàn toàn xa lạ phải
         # ra cùng kết quả với một user có thật mà chưa được gán gì.
         principal_nobody=principal(uuid.uuid4(), "nobody", ()),
+    )
+
+
+@pytest.fixture
+async def contributor_bob(rbac_fixture: RbacFixture) -> None:
+    """bob là contributor trên `ws_a` — tiền đề của mọi test ghi."""
+    await rbac_fixture.grant(
+        user=rbac_fixture.user_bob, scope=("workspace", rbac_fixture.ws_a), role=Role.contributor
+    )
+
+
+@pytest.fixture
+async def an_item(rbac_fixture: RbacFixture, contributor_bob: None) -> Item:
+    """Một item version 1 trong `ws_a`, tạo QUA `ItemStore.create`.
+
+    Không dùng `RbacFixture.add_item`: hàm đó chèn thẳng hàng `item` và KHÔNG
+    sinh hàng `item_version` nào. Mọi test dưới đây đếm version, nên một item
+    thiếu version 1 sẽ làm chúng đếm lệch một — và lệch theo hướng cho phép một
+    bản cài đặt sai vẫn xanh.
+
+    Người tạo là ALICE trong khi mọi test ghi chạy dưới BOB, và điều đó là cố ý.
+    Tạo bằng chính bob thì `updated_by` đã bằng bob TỪ TRƯỚC khi có lần sửa nào,
+    nên `assert row.updated_by == user_bob` đúng kể cả với một bản cài đặt không
+    hề ghi `updated_by` — một phép kiểm không nhìn thấy được thứ nó đặt tên. Hai
+    người khác nhau làm hai vế đó phân biệt được.
+    """
+    await rbac_fixture.grant(
+        user=rbac_fixture.user_alice,
+        scope=("workspace", rbac_fixture.ws_a),
+        role=Role.contributor,
+    )
+    store = ItemStore(rbac_fixture.session, rbac_fixture.principal_alice, request_id="fixture")
+    return await store.create(
+        workspace_id=rbac_fixture.ws_a,
+        item_type=ItemType.sql_script,
+        name="can-sua",
+        display_name="Cần sửa",
+        definition={"schema_version": 1, "sql": "SELECT 1"},
     )

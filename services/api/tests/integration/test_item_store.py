@@ -1,12 +1,14 @@
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom_api.item_store import ItemStore, NameTaken
-from loom_api.models import Item
+from loom_api.item_store import ItemStore, NameTaken, VersionMismatch
+from loom_api.models import Item, ItemVersion
 from loom_api.pagination import CursorMismatch
 from loom_api.permissions import Forbidden, NotVisible
 from loom_core.item_definitions import ItemType, canonical_hash
@@ -14,6 +16,39 @@ from loom_core.roles import Role
 from loom_core.schemas import Principal
 
 pytestmark = pytest.mark.integration
+
+
+async def _count_versions(session: AsyncSession, item_id: uuid.UUID) -> int:
+    return (
+        await session.execute(
+            select(func.count()).select_from(ItemVersion).where(ItemVersion.item_id == item_id)
+        )
+    ).scalar_one()
+
+
+async def _row(session: AsyncSession, item_id: uuid.UUID) -> Any:
+    """Trạng thái hàng `item` như POSTGRES thấy, không như identity map thấy.
+
+    `select(Item)` trả lại chính đối tượng đang nằm trong session, nên khẳng
+    định trên nó chỉ đọc lại thứ vừa gán trong Python — nó mù với một `flush()`
+    thiếu, với một cột không được ghi, và với một UPDATE bị transaction khác đè.
+    Chọn theo CỘT thì kết quả tới từ database.
+    """
+    return (
+        await session.execute(
+            select(
+                Item.version,
+                Item.definition,
+                Item.definition_hash,
+                Item.display_name,
+                Item.folder_path,
+                Item.description,
+                Item.state,
+                Item.updated_at,
+                Item.updated_by,
+            ).where(Item.id == item_id)
+        )
+    ).one()
 
 
 async def test_contributor_can_create(rbac_fixture):
@@ -289,3 +324,180 @@ async def test_a_cursor_from_one_filter_is_rejected_by_another(rbac_fixture):
             cursor=page.next_cursor,
             item_type=ItemType.pipeline,
         )
+
+
+# ------------------------------------------------------------ Task 17: update
+
+
+async def test_update_bumps_version_and_writes_a_version_row(rbac_fixture, an_item):
+    f, item = rbac_fixture, an_item
+    before = await _row(f.session, item.id)
+    # Tiền đề của hai khẳng định `updated_by` bên dưới: người tạo KHÔNG phải bob.
+    assert before.updated_by == f.user_alice
+
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    updated = await store.update(
+        item.id,
+        expected_version=1,
+        definition={"schema_version": 1, "sql": "SELECT 2"},
+    )
+    assert updated.version == 2
+
+    stored = {"schema_version": 1, "sql": "SELECT 2", "visualization": None}
+    row = await _row(f.session, item.id)
+    assert row.version == 2
+    assert row.definition == stored
+    # Hash phải đi theo nội dung. Không khẳng định điều này thì một bản cài đặt
+    # quên cập nhật `definition_hash` vẫn xanh, và Git drift ở Giai đoạn 5 sẽ
+    # báo "không có gì đổi" cho một item vừa bị viết lại.
+    assert row.definition_hash == canonical_hash(stored)
+    assert row.updated_by == f.user_bob
+    # `updated_at` phải TIẾN. Không có vế này thì bỏ hẳn dòng gán vẫn xanh —
+    # `updated_at` không có `onupdate` nên nó sẽ đứng nguyên ở thời điểm tạo, và
+    # một item vừa bị viết lại vẫn nằm im ở cuối danh sách sắp theo `updated_at`.
+    assert row.updated_at > before.updated_at
+
+    versions = (
+        (
+            await f.session.execute(
+                select(ItemVersion)
+                .where(ItemVersion.item_id == item.id)
+                .order_by(ItemVersion.version)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [v.version for v in versions] == [1, 2]
+    # Hàng version phải mang nội dung MỚI. Ghi một hàng version rỗng, hay ghi
+    # lại nội dung cũ, cũng cho ra "hai hàng" — phép đếm một mình không nhìn
+    # thấy thứ nó đặt tên.
+    assert versions[1].definition == stored
+    # alice tạo, bob sửa: hai hàng version phải ghi hai người khác nhau. Cùng
+    # một người ở cả hai thì khẳng định này đúng cả khi `created_by` bị bỏ qua.
+    assert (versions[0].created_by, versions[1].created_by) == (f.user_alice, f.user_bob)
+
+
+async def test_stale_version_is_412(rbac_fixture, an_item):
+    f, item = rbac_fixture, an_item
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    await store.update(item.id, expected_version=1, definition={"schema_version": 1, "sql": "A"})
+    with pytest.raises(VersionMismatch) as exc:
+        await store.update(
+            item.id, expected_version=1, definition={"schema_version": 1, "sql": "B"}
+        )
+    assert exc.value.status_code == 412
+
+    # Lần bị từ chối không được để lại dấu vết. Chỉ khẳng định là có ném ngoại lệ
+    # thì vẫn xanh với một bản cài đặt ghi xong rồi mới phát hiện lệch version.
+    row = await _row(f.session, item.id)
+    assert row.version == 2
+    assert row.definition["sql"] == "A"
+    assert await _count_versions(f.session, item.id) == 2
+
+
+async def test_update_that_changes_nothing_is_a_noop(rbac_fixture, an_item):
+    """Không có quy tắc này thì lịch sử version đầy bản ghi trùng và rollback mất
+    tác dụng — người dùng phải lần qua hai mươi version giống nhau."""
+    f, item = rbac_fixture, an_item
+    before = await _row(f.session, item.id)
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    result = await store.update(
+        item.id,
+        expected_version=1,
+        definition=dict(item.definition),
+        display_name=before.display_name,
+        folder_path=before.folder_path,
+        description=before.description,
+    )
+    assert result.version == 1
+    assert await _count_versions(f.session, item.id) == 1
+
+    after = await _row(f.session, item.id)
+    assert after.version == 1
+    # `updated_at` cũng phải đứng yên: nó là khoá sắp xếp của danh sách, nên một
+    # no-op có chạm vào nó sẽ đẩy item lên đầu mọi trang mà không ai đổi gì.
+    assert after.updated_at == before.updated_at
+
+
+async def test_rename_alone_is_detected_as_a_change(rbac_fixture, an_item):
+    """ETag là `version`, không phải definition_hash — chính vì thế đổi tên MỘT
+    MÌNH cũng phải sinh version mới. Xem spec mục 2.2."""
+    f, item = rbac_fixture, an_item
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    updated = await store.update(
+        item.id,
+        expected_version=1,
+        definition=dict(item.definition),
+        display_name="Tên mới",
+    )
+    assert updated.version == 2
+    assert updated.display_name == "Tên mới"
+    row = await _row(f.session, item.id)
+    assert (row.version, row.display_name) == (2, "Tên mới")
+    assert await _count_versions(f.session, item.id) == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("folder_path", "/bao-cao"), ("description", "mô tả mới")],
+)
+async def test_a_folder_move_or_a_description_edit_is_a_change_too(
+    rbac_fixture, an_item, field, value
+):
+    """`test_rename_alone_...` chỉ nhìn thấy vế `display_name` của quy tắc no-op.
+
+    Bỏ vế `folder_path` hoặc vế `description` khỏi phép so thì test đó vẫn XANH,
+    còn việc di chuyển thư mục hoặc sửa mô tả thì lặng lẽ biến mất — không hàng
+    version nào ghi lại và không có gì để rollback về. Mỗi vế của quy tắc cần
+    một phép kiểm nhìn thấy được đúng vế đó.
+
+    Cũng là chỗ duy nhất gọi `update` mà KHÔNG truyền `definition`: nhánh giữ lại
+    definition cũ không có test nào khác đi qua.
+    """
+    f, item = rbac_fixture, an_item
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    updated = await store.update(item.id, expected_version=1, **{field: value})
+    assert updated.version == 2
+
+    row = await _row(f.session, item.id)
+    assert getattr(row, field) == value
+    assert row.version == 2
+    # definition không được truyền thì phải giữ nguyên, không thành NULL/rỗng.
+    assert row.definition == item.definition
+    assert await _count_versions(f.session, item.id) == 2
+
+
+async def test_viewer_cannot_update(rbac_fixture):
+    """`require_item(..., item_update)` với `item_read` cho ra cùng kết quả ở
+    MỌI test khác trong file này, vì mọi test khác đều chạy dưới contributor.
+    Đây là phép kiểm phân biệt được hai hằng số đó."""
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("workspace", f.ws_a), role=Role.viewer)
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    with pytest.raises(Forbidden):
+        await store.update(f.item_a1, expected_version=1, display_name="X")
+
+
+async def test_stranger_updating_gets_404_not_403(rbac_fixture):
+    f = rbac_fixture
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    with pytest.raises(NotVisible):
+        await store.update(f.item_a1, expected_version=1, display_name="X")
+
+
+async def test_an_invalid_definition_is_rejected_before_the_version_is_bumped(
+    rbac_fixture, an_item
+):
+    """422 của client không được để lại nửa cái ghi."""
+    from pydantic import ValidationError
+
+    f, item = rbac_fixture, an_item
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    with pytest.raises(ValidationError):
+        await store.update(
+            item.id, expected_version=1, definition={"schema_version": 1, "khong-co-truong-nay": 1}
+        )
+    row = await _row(f.session, item.id)
+    assert row.version == 1
+    assert await _count_versions(f.session, item.id) == 1

@@ -5,6 +5,7 @@ chạm database. Một definition sai là lỗi 422 của client, và không có
 nó tốn một round trip."""
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -37,6 +38,26 @@ class NameTaken(HTTPException):
             status.HTTP_409_CONFLICT,
             f"đã có item tên '{name}' cùng loại trong workspace này",
         )
+
+
+class VersionMismatch(HTTPException):
+    """412, không phải 409: `If-Match` là một ĐIỀU KIỆN TIÊN QUYẾT của request.
+
+    409 nói "yêu cầu xung đột với trạng thái hiện tại" mà không nói điều kiện nào
+    đã bị kiểm, nên client không biết thử lại theo cách nào. 412 nói đúng một
+    điều: cái bạn nói bạn đang sửa không còn là cái đang có.
+
+    Mang theo `current` để tầng HTTP đặt được `ETag` của bản hiện tại vào phản
+    hồi — bắt client gọi thêm một GET chỉ để biết mình lệch bao nhiêu là một
+    round trip không cần thiết.
+    """
+
+    def __init__(self, current: int) -> None:
+        super().__init__(
+            status.HTTP_412_PRECONDITION_FAILED,
+            f"item đã được người khác đổi (bản hiện tại {current}) — tải lại rồi thử lại",
+        )
+        self.current = current
 
 
 def _constraint_of(exc: IntegrityError) -> str | None:
@@ -131,6 +152,112 @@ class ItemStore:
             # require_item đã qua nghĩa là có assignment, nhưng item có thể vừa bị
             # xoá mềm. Với client thì nó không còn tồn tại.
             raise NotVisible
+        return item
+
+    async def _lock_active(self, item_id: uuid.UUID) -> Item:
+        """Đọc item đang sống và KHOÁ hàng đó, trong một câu lệnh.
+
+        `with_for_update` là phần khoá: hai PATCH đồng thời không được cùng đọc
+        version 1, cùng thấy khớp, rồi cùng ghi version 2. Kiểm version mà không
+        khoá hàng là một race, không phải một kiểm tra.
+
+        `populate_existing` là phần khiến việc khoá có Ý NGHĨA. Mặc định của
+        SQLAlchemy: truy vấn trả về hàng của một đối tượng đã nằm trong identity
+        map thì trả lại chính đối tượng cũ và KHÔNG ghi đè thuộc tính đã nạp. Với
+        một session đã đọc item từ trước — đường GET-rồi-PATCH bình thường —
+        `FOR UPDATE` chờ đúng chỗ và nhận về hàng đã được bên kia bump, nhưng
+        `item.version` trong bộ nhớ vẫn là số cũ và phép so vẫn khớp. Khoá hàng
+        mới rồi so với bản chụp cũ thì cũng không phải một phép kiểm.
+
+        Ba đường ghi dùng CHUNG hàm này thay vì chép lại câu select. Chép ba lần
+        là ba cơ hội để một bản sao rụng mất một trong hai tuỳ chọn trên, và cả
+        hai đều hỏng theo kiểu im lặng.
+        """
+        item = (
+            await self._session.execute(
+                select(Item)
+                .where(Item.id == item_id, Item.state == ACTIVE)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if item is None:
+            # require_* đã qua nghĩa là có assignment, nhưng hàng có thể vừa bị
+            # xoá mềm. Với client thì nó không còn tồn tại.
+            raise NotVisible
+        return item
+
+    async def update(
+        self,
+        item_id: uuid.UUID,
+        expected_version: int,
+        definition: dict[str, object] | None = None,
+        display_name: str | None = None,
+        folder_path: str | None = None,
+        description: str | None = None,
+        change_note: str | None = None,
+    ) -> Item:
+        await self._perms.require_item(item_id, Action.item_update)
+        item = await self._lock_active(item_id)
+        if item.version != expected_version:
+            raise VersionMismatch(item.version)
+
+        # Validate SAU khi đọc hàng, khác với `create`: loại item nằm trên hàng
+        # đó, nên không có cách nào biết phải kiểm theo schema nào trước khi đọc.
+        item_type = ItemType(item.type)
+        new_definition = (
+            parse_definition(item_type, definition).model_dump(mode="json")
+            if definition is not None
+            else dict(item.definition)
+        )
+        new_hash = canonical_hash(new_definition)
+        new_display = display_name if display_name is not None else item.display_name
+        new_folder = folder_path if folder_path is not None else item.folder_path
+        new_desc = description if description is not None else item.description
+
+        # No-op: so definition_hash CỘNG cả ba trường metadata. So hash một mình
+        # là bỏ sót đổi tên — mà đổi tên là thay đổi thật và phải sinh version.
+        # Đây chính là lý do ETag là `version` chứ không phải `definition_hash`.
+        unchanged = (
+            new_hash == item.definition_hash
+            and new_display == item.display_name
+            and new_folder == item.folder_path
+            and new_desc == item.description
+        )
+        if unchanged:
+            # Không bump, không ghi hàng version, không chạm `updated_at`. Bump
+            # thì lịch sử đầy bản ghi trùng và rollback mất tác dụng; chạm
+            # `updated_at` thì item nhảy lên đầu mọi danh sách mà không ai đổi gì.
+            return item
+
+        item.definition = new_definition
+        item.definition_hash = new_hash
+        item.display_name = new_display
+        item.folder_path = new_folder
+        item.description = new_desc
+        item.version = item.version + 1
+        item.updated_by = self._principal.user_id
+        # Đặt tường minh, không dựa vào `now()` của Postgres: `now()` là thời
+        # điểm bắt đầu TRANSACTION, nên hai lần sửa trong cùng một transaction sẽ
+        # trùng dấu thời gian và khoá sắp xếp của phân trang mất tính duy nhất
+        # theo đúng cách Task 16 đã gặp. Cột này cũng KHÔNG có `onupdate`, nên bỏ
+        # dòng này đi thì `updated_at` đứng nguyên ở thời điểm tạo mãi mãi.
+        item.updated_at = datetime.now(UTC)
+
+        self._session.add(
+            ItemVersion(
+                id=uuid.uuid4(),
+                item_id=item.id,
+                version=item.version,
+                definition=new_definition,
+                display_name=new_display,
+                folder_path=new_folder,
+                description=new_desc,
+                change_note=change_note,
+                created_by=self._principal.user_id,
+            )
+        )
+        await self._session.flush()
         return item
 
     async def _require_visible_workspace(self, workspace_id: uuid.UUID) -> None:
