@@ -162,3 +162,19 @@ local_resource(
 
 print('Mở http://loom.localhost — đăng nhập long@loom.local / password')
 print('Lần đầu: bấm chạy resource "migrate" trong Tilt để tạo bảng trên Aiven.')
+
+# ĐÃ KIỂM, và không ai đoán được:
+#
+# 1. Dừng `tilt up` (Ctrl-C hoặc SIGINT) XOÁ THEO `loom-api` và `loom-web` — nó không
+#    chỉ tắt giao diện Tilt. `dex` sống sót vì do `make infra` tạo, không phải Tilt.
+#    Muốn giữ app chạy mà KHÔNG giữ Tilt:
+#
+#        helm upgrade --install loom deploy/helm/loom -n loom \
+#          -f deploy/envs/values-local.yaml
+#
+#    (cần loom/api:dev và loom/web:dev đã `k3d image import` vào node; mất hot reload)
+#
+# 2. Tilt giữ BỐN port trên host: 8080 (web), 8000 (api), 10350 (giao diện Tilt) và
+#    một port ephemeral. Nếu 8080 đang bị thứ khác chiếm thì `tilt up` hỏng ở bước
+#    port-forward chứ KHÔNG phải ở bước build — thông báo lỗi không chỉ về phía port,
+#    nên chỗ này đã tốn thời gian gỡ một lần.

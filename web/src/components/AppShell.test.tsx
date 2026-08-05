@@ -1,48 +1,64 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { ReactNode } from 'react'
+import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 
 import { AppShell } from './AppShell'
 
-const user = { subject: 'CgRsb25n', email: 'long@loom.local', display_name: 'Long' }
+const user = {
+  subject: 'CgRsb25n',
+  email: 'long@loom.local',
+  display_name: 'Long',
+  groups: ['data-eng'],
+}
+
+// Nav là `NavLink`, và `NavLink` cần Router context — nav VỐN là chuyện routing, nên
+// bọc ở đây thay vì bẻ AppShell thành nhận nav qua props chỉ để test khỏi cần router.
+function renderShell(children?: ReactNode) {
+  return render(
+    <MemoryRouter>
+      <AppShell user={user} onLogout={vi.fn()}>
+        {children}
+      </AppShell>
+    </MemoryRouter>,
+  )
+}
 
 describe('AppShell', () => {
   it('hiển thị tên sản phẩm', () => {
-    render(<AppShell user={user} onLogout={vi.fn()} />)
+    renderShell()
     expect(screen.getByText('Loom')).toBeInTheDocument()
   })
 
   it('hiển thị tên người dùng đang đăng nhập', () => {
-    render(<AppShell user={user} onLogout={vi.fn()} />)
+    renderShell()
     expect(screen.getByText('Long')).toBeInTheDocument()
   })
 
-  it('có đủ các mục điều hướng của Giai đoạn 0', () => {
-    render(<AppShell user={user} onLogout={vi.fn()} />)
-    for (const label of ['Trang chủ', 'Workspace', 'Monitor', 'Catalog', 'Admin']) {
-      expect(screen.getByRole('link', { name: label })).toBeInTheDocument()
+  it('nav chỉ có những mục ĐÃ có trang', () => {
+    renderShell()
+    expect(screen.getByRole('link', { name: 'Workspace' })).toBeInTheDocument()
+    // Bốn mục cũ bị bỏ có chủ đích: một mục nav dẫn tới trang trắng tệ hơn là không
+    // có mục đó. Khẳng định chúng KHÔNG còn, để ai thêm lại phải thêm cả trang.
+    for (const label of ['Trang chủ', 'Monitor', 'Catalog', 'Admin']) {
+      expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument()
     }
-  })
-
-  it('hiển thị trạng thái rỗng nói rõ bước tiếp theo', () => {
-    render(<AppShell user={user} onLogout={vi.fn()} />)
-    expect(screen.getByTestId('empty-state')).toHaveTextContent(/Giai đoạn 1/)
   })
 
   it('gọi onLogout khi bấm Đăng xuất', async () => {
     const onLogout = vi.fn()
-    render(<AppShell user={user} onLogout={onLogout} />)
+    render(
+      <MemoryRouter>
+        <AppShell user={user} onLogout={onLogout} />
+      </MemoryRouter>,
+    )
     await userEvent.click(screen.getByRole('button', { name: 'Đăng xuất' }))
     expect(onLogout).toHaveBeenCalledOnce()
   })
 
   it('hiển thị children khi được truyền vào', () => {
-    render(
-      <AppShell user={user} onLogout={vi.fn()}>
-        <p>nội dung thật</p>
-      </AppShell>,
-    )
+    renderShell(<p>nội dung thật</p>)
     expect(screen.getByText('nội dung thật')).toBeInTheDocument()
-    expect(screen.queryByTestId('empty-state')).not.toBeInTheDocument()
   })
 })

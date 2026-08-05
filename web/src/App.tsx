@@ -1,11 +1,16 @@
 import { useEffect } from 'react'
+import { RouterProvider, createBrowserRouter } from 'react-router'
 
-import { AppShell } from './components/AppShell'
-import { apiPost } from './lib/api'
 import { navigateTo } from './lib/navigate'
 import { UnauthorizedError, useCurrentUser } from './lib/useCurrentUser'
+import { routeObjects } from './routes'
 
 const LOGIN_URL = '/api/v1/auth/login'
+
+// Dựng MỘT LẦN ở tầng module, không trong thân component: `createBrowserRouter` gắn
+// listener vào history, và dựng lại nó mỗi lần render sẽ mất vị trí điều hướng cùng
+// mọi state của router.
+const router = createBrowserRouter(routeObjects)
 
 export function App() {
   const { data: user, error, isPending } = useCurrentUser()
@@ -51,10 +56,5 @@ export function App() {
     )
   }
 
-  const logout = async () => {
-    await apiPost('/api/v1/auth/logout')
-    navigateTo(LOGIN_URL)
-  }
-
-  return <AppShell user={user} onLogout={logout} />
+  return <RouterProvider router={router} />
 }

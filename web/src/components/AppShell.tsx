@@ -1,9 +1,14 @@
 import type { ReactNode } from 'react'
+import { NavLink } from 'react-router'
 
 export interface CurrentUser {
   subject: string
   email: string
   display_name: string
+  // Backend trả trường này từ Task 3 và RBAC theo nhóm chạy thật từ Task 25. Thiếu
+  // nó ở đây thì TypeScript không bao giờ nhắc ai rằng nhóm tồn tại, và tính năng
+  // nằm im trong khi backend đã sẵn sàng.
+  groups: string[]
 }
 
 interface AppShellProps {
@@ -12,13 +17,10 @@ interface AppShellProps {
   children?: ReactNode
 }
 
-const NAV_ITEMS = [
-  { label: 'Trang chủ', glyph: '🏠' },
-  { label: 'Workspace', glyph: '📊' },
-  { label: 'Monitor', glyph: '⚡' },
-  { label: 'Catalog', glyph: '🗂' },
-  { label: 'Admin', glyph: '⚙' },
-] as const
+// Bốn mục cũ — Trang chủ, Monitor, Catalog, Admin — BỎ ở Giai đoạn 1: chúng chưa
+// có trang, và một mục nav dẫn tới trang trắng tệ hơn là không có mục đó. Monitor và
+// Catalog quay lại ở Giai đoạn 3, Admin ở Giai đoạn 4.
+const NAV_ITEMS = [{ label: 'Workspace', glyph: '📊', to: '/' }] as const
 
 export function AppShell({ user, onLogout, children }: AppShellProps) {
   return (
@@ -49,31 +51,26 @@ export function AppShell({ user, onLogout, children }: AppShellProps) {
           className="flex w-14 shrink-0 flex-col items-center gap-1 border-r border-line py-3"
         >
           {NAV_ITEMS.map((item) => (
-            <a
+            <NavLink
               key={item.label}
-              href="#"
+              to={item.to}
               aria-label={item.label}
               title={item.label}
-              className="flex h-10 w-10 items-center justify-center rounded hover:bg-muted"
+              className={({ isActive }) =>
+                `flex h-10 w-10 items-center justify-center rounded ${
+                  isActive ? 'bg-muted' : 'hover:bg-muted'
+                }`
+              }
             >
               <span aria-hidden>{item.glyph}</span>
-            </a>
+            </NavLink>
           ))}
         </nav>
 
-        <main className="min-w-0 flex-1 overflow-auto p-8">
-          {children ?? (
-            <div
-              data-testid="empty-state"
-              className="mx-auto max-w-lg rounded-lg border border-dashed border-line p-8 text-center"
-            >
-              <h1 className="text-lg font-medium">Nền tảng đã chạy</h1>
-              <p className="mt-2 text-sm text-dim">
-                Giai đoạn 0 hoàn tất. Workspace và item sẽ xuất hiện ở Giai đoạn 1.
-              </p>
-            </div>
-          )}
-        </main>
+        {/* Trạng thái rỗng "Giai đoạn 0 hoàn tất" đã bỏ: với router thì children luôn
+            là <Outlet />, nên nó không còn đường nào tới được — và nội dung của nó
+            giờ cũng sai. Một mảng UI chết mang chữ lỗi thời tệ hơn là không có. */}
+        <main className="min-w-0 flex-1 overflow-auto p-8">{children}</main>
       </div>
     </div>
   )
