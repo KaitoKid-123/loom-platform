@@ -39,6 +39,7 @@ from loom_api.item_store import ItemStore, VersionMismatch
 from loom_api.models import (
     DEFAULT_TENANT_ID,
     AppUser,
+    AuditLog,
     Item,
     ItemVersion,
     RoleAssignment,
@@ -121,6 +122,12 @@ async def committed_item(
         yield item_id, principal
     finally:
         async with maker() as session:
+            # audit_log.actor_user_id có FK tới app_user, nên phải xoá audit
+            # TRƯỚC user. Task 19 làm update() ghi audit, và thiếu dòng này thì
+            # teardown vỡ vì FK — fixture im lặng để lại workspace, và những
+            # test gán vai trò cấp tenant (thấy MỌI workspace) bắt đầu đỏ ở chỗ
+            # không liên quan gì tới chúng.
+            await session.execute(delete(AuditLog).where(AuditLog.workspace_id == ws_id))
             await session.execute(delete(ItemVersion).where(ItemVersion.item_id == item_id))
             await session.execute(delete(Item).where(Item.id == item_id))
             await session.execute(delete(RoleAssignment).where(RoleAssignment.scope_id == ws_id))

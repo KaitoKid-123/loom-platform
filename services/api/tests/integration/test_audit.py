@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom_api.audit import AuditReader
 from loom_api.item_store import ItemStore
-from loom_api.models import DEFAULT_TENANT_ID, AuditLog, Item
+from loom_api.models import AuditLog, Item
 from loom_api.permissions import Forbidden, NotVisible
 from loom_core.item_definitions import ItemType
 from loom_core.roles import Role
@@ -24,9 +24,7 @@ pytestmark = pytest.mark.integration
 async def _count_audit(session, resource_id: uuid.UUID) -> int:
     return (
         await session.execute(
-            select(func.count())
-            .select_from(AuditLog)
-            .where(AuditLog.resource_id == resource_id)
+            select(func.count()).select_from(AuditLog).where(AuditLog.resource_id == resource_id)
         )
     ).scalar_one()
 
@@ -47,11 +45,9 @@ async def test_create_writes_one_audit_row_carrying_the_request_id(rbac_fixture)
     )
 
     rows = list(
-        (
-            await f.session.execute(
-                select(AuditLog).where(AuditLog.resource_id == item.id)
-            )
-        ).scalars().all()
+        (await f.session.execute(select(AuditLog).where(AuditLog.resource_id == item.id)))
+        .scalars()
+        .all()
     )
     assert len(rows) == 1
     row = rows[0]
@@ -87,12 +83,16 @@ async def test_summary_names_the_changed_fields_and_omits_the_definition(rbac_fi
     )
 
     row = (
-        await f.session.execute(
-            select(AuditLog).where(
-                AuditLog.resource_id == item.id, AuditLog.action == "item.update"
+        (
+            await f.session.execute(
+                select(AuditLog).where(
+                    AuditLog.resource_id == item.id, AuditLog.action == "item.update"
+                )
             )
         )
-    ).scalars().one()
+        .scalars()
+        .one()
+    )
 
     assert "definition" not in row.summary
     assert set(row.summary) == {"changed", "version"}
@@ -117,12 +117,16 @@ async def test_a_rename_is_recorded_as_a_rename(rbac_fixture):
     await store.update(item.id, expected_version=1, display_name="Tên mới")
 
     row = (
-        await f.session.execute(
-            select(AuditLog).where(
-                AuditLog.resource_id == item.id, AuditLog.action == "item.update"
+        (
+            await f.session.execute(
+                select(AuditLog).where(
+                    AuditLog.resource_id == item.id, AuditLog.action == "item.update"
+                )
             )
         )
-    ).scalars().one()
+        .scalars()
+        .one()
+    )
     assert row.summary["changed"] == ["display_name"]
 
 
@@ -174,7 +178,9 @@ async def test_delete_and_restore_are_recorded(rbac_fixture):
                 .where(AuditLog.resource_id == item.id)
                 .order_by(AuditLog.created_at, AuditLog.id)
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     ]
     assert actions.count("item.create") == 1
     assert actions.count("item.update") == 1
@@ -215,9 +221,7 @@ async def test_a_failure_before_commit_loses_both_the_item_and_its_audit_row(
         ).scalar_one()
         audits = (
             await session.execute(
-                select(func.count())
-                .select_from(AuditLog)
-                .where(AuditLog.request_id == "r-hong")
+                select(func.count()).select_from(AuditLog).where(AuditLog.request_id == "r-hong")
             )
         ).scalar_one()
 

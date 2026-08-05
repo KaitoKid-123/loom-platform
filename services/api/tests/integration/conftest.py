@@ -436,9 +436,7 @@ async def committed_workspace(
         async with maker() as session:
             await session.execute(delete(AuditLog).where(AuditLog.workspace_id == ws_id))
             await session.execute(delete(Item).where(Item.workspace_id == ws_id))
-            await session.execute(
-                delete(RoleAssignment).where(RoleAssignment.scope_id == ws_id)
-            )
+            await session.execute(delete(RoleAssignment).where(RoleAssignment.scope_id == ws_id))
             await session.execute(delete(Workspace).where(Workspace.id == ws_id))
             await session.execute(delete(AppUser).where(AppUser.id == user_id))
             await session.commit()
