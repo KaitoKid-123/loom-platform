@@ -1,6 +1,7 @@
 import { useParams, useSearchParams } from 'react-router'
 
 import { ExplorerTree } from '../components/Explorer/ExplorerTree'
+import { NewItemDialog } from '../components/Explorer/NewItemDialog'
 import { buildTree } from '../lib/folderTree'
 import { useItems } from '../lib/useItems'
 
@@ -13,6 +14,15 @@ export function ExplorerPage() {
   const { workspaceId = '' } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const type = searchParams.get('type') ?? undefined
+  // Hộp thoại mở QUA URL: `?new=1` deep-link và sống qua F5 (spec mục 7.4). State
+  // React sẽ mất khi tải lại, và một hộp thoại đã điền nửa mà biến mất là mất việc.
+  const creating = searchParams.get('new') === '1'
+
+  const closeDialog = () => {
+    const next = new URLSearchParams(searchParams)
+    next.delete('new')
+    setSearchParams(next, { replace: true })
+  }
 
   const { data, isPending, error } = useItems(workspaceId, type)
 
@@ -21,6 +31,17 @@ export function ExplorerPage() {
       <div className="mb-4 flex items-center gap-2">
         <h1 className="text-lg font-medium">Item</h1>
         <div className="flex-1" />
+        <button
+          type="button"
+          onClick={() => {
+            const next = new URLSearchParams(searchParams)
+            next.set('new', '1')
+            setSearchParams(next)
+          }}
+          className="rounded border border-line px-3 py-1 text-sm hover:bg-muted"
+        >
+          Tạo item
+        </button>
         <label className="text-sm text-dim" htmlFor="type-filter">
           Loại
         </label>
@@ -93,6 +114,8 @@ export function ExplorerPage() {
           <ExplorerTree node={buildTree(data.items)} workspaceId={workspaceId} />
         </>
       )}
+
+      {creating && <NewItemDialog workspaceId={workspaceId} onClose={closeDialog} />}
     </div>
   )
 }
