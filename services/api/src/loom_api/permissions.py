@@ -15,10 +15,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import ColumnElement, and_, or_, select
+from sqlalchemy import ColumnElement, Select, and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom_api.models import Item, RoleAssignment, Workspace
+from loom_api.models import ACTIVE, Item, RoleAssignment, Workspace
 from loom_core.roles import Action, Role, allows, max_role
 from loom_core.schemas import Principal
 
@@ -226,3 +226,107 @@ class PermissionService:
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [Role[r] for r in rows]
+
+
+# ------------------------------------------------ Task 11: biểu thức cho danh sách
+
+
+def _roles_allowing(action: Action) -> list[str]:
+    """Tập vai trò cho phép hành động này, SUY RA từ `ACTION_MATRIX`.
+
+    Đây là chi tiết làm "một nguồn quy tắc" thành thật. Nếu biểu thức lọc chỉ
+    kiểm "có assignment nào không" thì hiện tại nó vẫn cho đúng kết quả — vì cả
+    bốn vai trò đều có `item_read` — nhưng đúng một cách TÌNH CỜ. Thêm một vai
+    trò không có quyền đọc là hai đường lệch nhau ngay, và lệch ở đây nghĩa là
+    danh sách trả về hàng mà `require_item` sẽ từ chối.
+
+    Trả `list[str]` chứ không `list[Role]`: cột `role` là text (xem
+    `Role.__str__`), nên phép so sánh phải xảy ra ở cùng kiểu với cột.
+    """
+    return [str(role) for role in Role if allows(role, action)]
+
+
+def visible_items_select(
+    principal: Principal, workspace_id: uuid.UUID | None = None
+) -> Select[tuple[Item]]:
+    """`select(Item)` đã JOIN Workspace và đã áp điều kiện quyền.
+
+    Trả cả câu select chứ không phải một biểu thức boolean rời: nhánh `domain`
+    cần `Workspace.domain_id`, nên truy vấn BUỘC phải join Workspace. Trả điều
+    kiện rời thì mỗi người gọi phải tự nhớ join, và quên là cartesian product —
+    một lỗi không báo gì, chỉ trả sai.
+
+    `state == ACTIVE` ở CẢ HAI bảng. Đường một-tài-nguyên cố ý không lọc theo
+    `state` (một item đã xoá mềm vẫn phải đọc được theo id để khôi phục được),
+    nên đây là chỗ hai đường KHÔNG đối xứng, và test đối chiếu phải biết điều đó.
+    """
+    stmt = (
+        select(Item)
+        .join(Workspace, Workspace.id == Item.workspace_id)
+        .where(
+            Item.state == ACTIVE,
+            Workspace.state == ACTIVE,
+            exists(
+                select(1)
+                .select_from(RoleAssignment)
+                .where(
+                    principal_matches(principal),
+                    RoleAssignment.role.in_(_roles_allowing(Action.item_read)),
+                    or_(
+                        *_chain_conditions(
+                            Item.id, Item.workspace_id, Workspace.domain_id, Item.tenant_id
+                        )
+                    ),
+                )
+                .correlate(Item, Workspace)
+            ),
+        )
+    )
+    if workspace_id is not None:
+        # Lọc THÊM, không thay: một tham số lọc không bao giờ được mở rộng quyền.
+        stmt = stmt.where(Item.workspace_id == workspace_id)
+    return stmt
+
+
+def visible_workspaces_select(principal: Principal) -> Select[tuple[Workspace]]:
+    """Thấy workspace khi có vai trò trên chính nó / domain / tenant, HOẶC khi có
+    assignment lên một item bên trong nó.
+
+    Nhánh thứ hai là vì UX, và nó làm hai đường CỐ Ý bất đồng:
+    `effective_role_for_workspace` trả `None` cho đúng trường hợp đó, vì chuỗi
+    tổ tiên chỉ chạy từ tài nguyên LÊN. Nhưng chia sẻ lẻ một item mà không hiện
+    workspace chứa nó thì item đó không có đường nào tới. Bất đồng này là thiết
+    kế, nên test đối chiếu khẳng định một quan hệ BAO HÀM chứ không phải đẳng
+    thức — xem `test_permissions_differential.py`.
+    """
+    by_scope = exists(
+        select(1)
+        .select_from(RoleAssignment)
+        .where(
+            principal_matches(principal),
+            RoleAssignment.role.in_(_roles_allowing(Action.workspace_read)),
+            or_(*_chain_conditions(None, Workspace.id, Workspace.domain_id, Workspace.tenant_id)),
+        )
+        .correlate(Workspace)
+    )
+    by_item_inside = exists(
+        select(1)
+        .select_from(Item)
+        .join(
+            RoleAssignment,
+            and_(
+                RoleAssignment.scope_type == "item",
+                RoleAssignment.scope_id == Item.id,
+            ),
+        )
+        .where(
+            Item.workspace_id == Workspace.id,
+            # Một item đã xoá mềm không kéo theo workspace của nó: nó không nằm
+            # trong `visible_items_select` nữa, nên workspace hiện ra sẽ rỗng.
+            Item.state == ACTIVE,
+            principal_matches(principal),
+            RoleAssignment.role.in_(_roles_allowing(Action.item_read)),
+        )
+        .correlate(Workspace)
+    )
+    return select(Workspace).where(Workspace.state == ACTIVE, or_(by_scope, by_item_inside))
