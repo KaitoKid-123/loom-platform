@@ -144,20 +144,22 @@ class RoleStore:
         # Dùng lại đúng `GRANTABLE_BY` của quy tắc 1, không dựng bảng thứ hai:
         # hai bảng nói cùng một điều là hai bảng sẽ trôi khỏi nhau.
         existing = (
-            await self._session.execute(
-                select(RoleAssignment.role).where(
-                    RoleAssignment.scope_type == scope_type,
-                    RoleAssignment.scope_id == scope_id,
-                    target,
+            (
+                await self._session.execute(
+                    select(RoleAssignment.role).where(
+                        RoleAssignment.scope_type == scope_type,
+                        RoleAssignment.scope_id == scope_id,
+                        target,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for role_name in existing:
             role = Role[role_name]
             if role not in GRANTABLE_BY[actor_role]:
-                raise Forbidden(
-                    f"vai trò {actor_role} không thu được vai trò {role}"
-                )
+                raise Forbidden(f"vai trò {actor_role} không thu được vai trò {role}")
 
         # QUY TẮC 2, và nó phải chạy TRONG CÙNG transaction với DELETE.
         #
