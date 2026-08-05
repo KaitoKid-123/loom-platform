@@ -24,12 +24,25 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy import delete, event
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from testcontainers.community.postgres import PostgresContainer
 
 from loom_api.item_store import ItemStore
-from loom_api.models import DEFAULT_TENANT_ID, AppUser, Domain, Item, RoleAssignment, Workspace
+from loom_api.models import (
+    DEFAULT_TENANT_ID,
+    AppUser,
+    AuditLog,
+    Domain,
+    Item,
+    RoleAssignment,
+    Workspace,
+)
 from loom_core.item_definitions import ItemType
 from loom_core.roles import Role
 from loom_core.schemas import Principal
@@ -352,3 +365,80 @@ async def an_item(rbac_fixture: RbacFixture, contributor_bob: None) -> Item:
         display_name="Cần sửa",
         definition={"schema_version": 1, "sql": "SELECT 1"},
     )
+
+
+@pytest.fixture
+async def committed_workspace(
+    db_engine: AsyncEngine,
+) -> AsyncIterator[tuple[uuid.UUID, Principal]]:
+    """Một workspace ĐÃ COMMIT, cùng một principal có quyền tạo item trong đó.
+
+    Khác `rbac_fixture`: fixture kia sống trong một transaction bị rollback cuối
+    test, nên một session THỨ HAI không thấy dữ liệu của nó. Test nào cần kiểm
+    hành vi transaction — audit có mất cùng thao tác không, hai request đồng thời —
+    buộc phải có dữ liệu commit thật, và tự dọn sau.
+    """
+    maker = async_sessionmaker(db_engine, expire_on_commit=False)
+    user_id = uuid.uuid4()
+    ws_id = uuid.uuid4()
+
+    async with maker() as session:
+        session.add(
+            AppUser(
+                id=user_id,
+                tenant_id=DEFAULT_TENANT_ID,
+                subject=f"committed-{user_id.hex[:8]}",
+                email="committed@loom.local",
+                display_name="committed",
+            )
+        )
+        await session.flush()
+        session.add(
+            Workspace(
+                id=ws_id,
+                tenant_id=DEFAULT_TENANT_ID,
+                domain_id=None,
+                name=f"ws-committed-{ws_id.hex[:6]}",
+                display_name="WS committed",
+                storage_prefix=f"workspaces/{ws_id}",
+                created_by=user_id,
+                updated_by=user_id,
+            )
+        )
+        await session.flush()
+        session.add(
+            RoleAssignment(
+                id=uuid.uuid4(),
+                tenant_id=DEFAULT_TENANT_ID,
+                principal_type="user",
+                principal_user_id=user_id,
+                principal_group=None,
+                scope_type="workspace",
+                scope_id=ws_id,
+                role=str(Role.admin),
+                created_by=user_id,
+            )
+        )
+        await session.commit()
+
+    principal = Principal(
+        user_id=user_id,
+        subject=f"committed-{user_id.hex[:8]}",
+        email="committed@loom.local",
+        display_name="committed",
+        groups=(),
+    )
+    try:
+        yield ws_id, principal
+    finally:
+        # Dọn tay: không có transaction nào bao ngoài để rollback hộ. Xoá theo thứ
+        # tự khoá ngoại — item và audit trước, rồi workspace, rồi user.
+        async with maker() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.workspace_id == ws_id))
+            await session.execute(delete(Item).where(Item.workspace_id == ws_id))
+            await session.execute(
+                delete(RoleAssignment).where(RoleAssignment.scope_id == ws_id)
+            )
+            await session.execute(delete(Workspace).where(Workspace.id == ws_id))
+            await session.execute(delete(AppUser).where(AppUser.id == user_id))
+            await session.commit()

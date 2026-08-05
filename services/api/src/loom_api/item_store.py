@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_api.audit import AuditWriter
 from loom_api.models import ACTIVE, DEFAULT_TENANT_ID, DELETED, Item, ItemVersion, Workspace
 from loom_api.pagination import Page, decode_cursor, encode_cursor
 from loom_api.permissions import (
@@ -77,6 +78,7 @@ class ItemStore:
         self._principal = principal
         self._request_id = request_id
         self._perms = PermissionService(session, principal)
+        self._audit = AuditWriter(session, principal, request_id)
 
     async def create(
         self,
@@ -123,6 +125,19 @@ class ItemStore:
                 change_note="tạo mới",
                 created_by=self._principal.user_id,
             )
+        )
+        # Ghi audit TRƯỚC `flush()`, trong cùng session: nếu lệnh chèn vỡ thì dòng
+        # audit chưa bao giờ tới database. Ghi sau flush thành công cũng đúng, nhưng
+        # đặt ở đây làm rõ rằng hai thứ đi cùng nhau chứ không phải nối tiếp.
+        #
+        # `summary` là TÓM TẮT, không nhúng `definition`: `item_version` đã giữ bản
+        # đầy đủ, và với item `connection` thì `definition` mang `secret_ref`.
+        self._audit.record(
+            action="item.create",
+            resource_type="item",
+            resource_id=item.id,
+            workspace_id=workspace_id,
+            summary={"type": str(item_type), "name": name},
         )
         try:
             await self._session.flush()
@@ -230,6 +245,18 @@ class ItemStore:
             # `updated_at` thì item nhảy lên đầu mọi danh sách mà không ai đổi gì.
             return item
 
+        # Tính danh sách trường đã đổi TRƯỚC `_bump` — sau đó giá trị cũ không còn
+        # để so nữa.
+        changed = [
+            field
+            for field, old, new in (
+                ("definition", item.definition_hash, new_hash),
+                ("display_name", item.display_name, new_display),
+                ("folder_path", item.folder_path, new_folder),
+                ("description", item.description, new_desc),
+            )
+            if old != new
+        ]
         self._bump(
             item,
             definition=new_definition,
@@ -238,6 +265,7 @@ class ItemStore:
             description=new_desc,
             change_note=change_note,
         )
+        self._record_change(item, "item.update", {"changed": changed, "version": item.version})
         await self._session.flush()
         return item
 
@@ -286,6 +314,21 @@ class ItemStore:
             )
         )
 
+    def _record_change(self, item: Item, action: str, summary: dict[str, object]) -> None:
+        """Ghi audit cho một thay đổi trên item đã có.
+
+        Gọi từ `update`/`restore_version`/`soft_delete` SAU khi đã biết chắc có thay
+        đổi — một `PATCH` không đổi gì không được ghi gì, nếu không dấu vết đầy
+        tiếng ồn và người đọc bắt đầu bỏ qua nó, tức mất tác dụng theo cách tệ nhất.
+        """
+        self._audit.record(
+            action=action,
+            resource_type="item",
+            resource_id=item.id,
+            workspace_id=item.workspace_id,
+            summary=summary,
+        )
+
     async def soft_delete(self, item_id: uuid.UUID) -> None:
         """Đánh dấu item là đã xoá. KHÔNG chạm `item_version`.
 
@@ -305,6 +348,7 @@ class ItemStore:
         item.state = DELETED
         item.updated_by = self._principal.user_id
         item.updated_at = datetime.now(UTC)
+        self._record_change(item, "item.delete", {"name": item.name})
         await self._session.flush()
 
     async def restore_version(self, item_id: uuid.UUID, version: int) -> Item:
@@ -340,6 +384,11 @@ class ItemStore:
             folder_path=source.folder_path,
             description=source.description,
             change_note=f"phục hồi từ version {version}",
+        )
+        self._record_change(
+            item,
+            "item.restore",
+            {"from_version": version, "version": item.version},
         )
         await self._session.flush()
         return item
