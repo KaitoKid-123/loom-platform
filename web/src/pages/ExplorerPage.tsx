@@ -1,4 +1,4 @@
-import { useParams, useSearchParams } from 'react-router'
+import { Link, useParams, useSearchParams } from 'react-router'
 
 import { ExplorerTree } from '../components/Explorer/ExplorerTree'
 import { NewItemDialog } from '../components/Explorer/NewItemDialog'
@@ -38,6 +38,14 @@ export function ExplorerPage() {
       <div className="mb-4 flex items-center gap-2">
         <h1 className="text-lg font-medium">Item</h1>
         <div className="flex-1" />
+        {/* Route `/connections` không có gì trỏ tới thì trang đó không tới được, và một
+            trang không tới được là code chết dù test của nó xanh. */}
+        <Link
+          to={`/workspaces/${workspaceId}/connections`}
+          className="rounded border border-line px-3 py-1 text-sm hover:bg-muted"
+        >
+          Connections
+        </Link>
         <button
           type="button"
           onClick={setParam('new')}

@@ -322,3 +322,17 @@ describe('ExplorerPage — hộp thoại phân quyền', () => {
     expect(router.state.location.search).toBe('?type=pipeline')
   })
 })
+
+describe('ExplorerPage — đường tới Connections', () => {
+  it('có liên kết tới trang Connections của cùng workspace', async () => {
+    // Không có liên kết nào thì route `/connections` không tới được, và trang đó là code
+    // chết dù test riêng của nó xanh.
+    stubItems([item('x')])
+    renderPage()
+    await screen.findByText('x')
+    expect(screen.getByRole('link', { name: 'Connections' })).toHaveAttribute(
+      'href',
+      `/workspaces/${WS}/connections`,
+    )
+  })
+})
