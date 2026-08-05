@@ -51,6 +51,12 @@ async def app_client():
             401, "chưa đăng nhập", headers={"WWW-Authenticate": 'Bearer realm="loom"'}
         )
 
+    @app.get("/dict-detail")
+    async def dict_detail() -> None:
+        # `detail` của Starlette khai kiểu Any và nhận dict thật. Handler phải
+        # sống sót được với nó.
+        raise HTTPException(400, {"code": "workspace_locked", "workspace": "w-1"})
+
     @app.get("/unhandled")
     async def unhandled() -> None:
         raise ValueError(SECRET_MESSAGE)
@@ -231,3 +237,32 @@ async def test_unhandled_exception_logs_the_traceback_with_the_request_id():
     # sys.exc_info() còn giá trị, và đó là chi tiết nội bộ của Starlette.
     assert isinstance(entry["exc_info"], RuntimeError)
     assert str(entry["exc_info"]) == SECRET_MESSAGE
+
+
+async def test_dict_detail_does_not_become_a_500(app_client):
+    """`ProblemDetail.detail` là `str | None`. Starlette khai `HTTPException.detail`
+    là Any và code thật đặt dict vào đó. Bỏ phép kiểm `isinstance(exc.detail, str)`
+    thì Pydantic ném ValidationError NGAY TRONG handler lỗi, Starlette bắt lấy và
+    trả 500 text/plain — một 400 sạch sẽ biến thành sự cố."""
+    r = await app_client.get("/dict-detail")
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["status"] == 400
+    assert body["title"] == "Bad Request"
+    # Bỏ HẲN chứ không stringify: `"{'code': 'workspace_locked'}"` là repr của
+    # Python rò ra ngoài dây, và `detail` theo RFC 9457 là câu giải thích cho
+    # người đọc, không phải một cấu trúc.
+    assert "detail" not in body
+
+
+async def test_problem_type_is_about_blank(app_client):
+    """RFC 9457: `type` vắng mặt được hiểu là "about:blank". Ghi rõ ra là hợp
+    lệ và là điều ProblemDetail chọn — nhưng chuỗi RỖNG thì không: một URI rỗng
+    tham chiếu chính tài liệu hiện tại, nên client nào phân nhánh theo `type`
+    sẽ gộp mọi lỗi vào một loại. Không test nào chạm tới giá trị này trước đây."""
+    for path, status in (("/boom", 403), ("/dict-detail", 400)):
+        body = (await app_client.get(path)).json()
+        assert body["type"] == "about:blank", (path, status)
+    validation = (await app_client.get("/typed?n=x")).json()
+    assert validation["type"] == "about:blank"
