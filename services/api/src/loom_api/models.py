@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -260,6 +261,96 @@ class ItemVersion(Base):
     created_by: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class RoleAssignment(Base):
+    __tablename__ = "role_assignment"
+    __table_args__ = (
+        # `name` CHỈ là phần đuôi: NAMING_CONVENTION["ck"] đã có sẵn tiền tố
+        # "ck_%(table_name)s_". Truyền tên đầy đủ vào đây thì nó bị ghép hai lần
+        # và constraint mang tên ck_role_assignment_ck_role_assignment_...
+        CheckConstraint("principal_type IN ('user','group')", name="principal_type"),
+        CheckConstraint(
+            "scope_type IN ('tenant','domain','workspace','item')",
+            name="scope_type",
+        ),
+        CheckConstraint(
+            "role IN ('viewer','contributor','member','admin')",
+            name="role",
+        ),
+        # Đúng MỘT trong hai. Cả hai NULL thì hàng không thuộc về ai; cả hai có
+        # giá trị thì không rõ hàng nói về ai.
+        CheckConstraint(
+            "num_nonnulls(principal_user_id, principal_group) = 1",
+            name="one_principal",
+        ),
+        # NULLS NOT DISTINCT: mặc định Postgres coi hai NULL là khác nhau, nên
+        # unique thường KHÔNG chặn được hai hàng trùng cho cùng một nhóm (cả hai
+        # có principal_user_id = NULL).
+        Index(
+            "uq_role_assignment_principal_scope",
+            "principal_user_id",
+            "principal_group",
+            "scope_type",
+            "scope_id",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False
+    )
+    principal_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    principal_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id", ondelete="CASCADE"), index=True
+    )
+    principal_group: Mapped[str | None] = mapped_column(String(255), index=True)
+    scope_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    # KHÔNG có FK — trỏ tới bốn bảng tuỳ scope_type. Xem spec mục 3.1.
+    scope_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+    __table_args__ = (
+        Index("ix_audit_resource", "resource_type", "resource_id", "created_at"),
+        Index(
+            "ix_audit_workspace",
+            "workspace_id",
+            "created_at",
+            postgresql_where=text("workspace_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    actor_user_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    # Nối với log/trace của Giai đoạn 0. NOT NULL: một dòng audit không truy được
+    # về request nào thì mất nửa giá trị.
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    summary: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
