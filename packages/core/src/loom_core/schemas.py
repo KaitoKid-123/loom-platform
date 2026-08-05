@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from loom_core.item_definitions import ItemType
+
 
 class HealthStatus(BaseModel):
     status: str
@@ -107,7 +109,12 @@ class WorkspaceOut(BaseModel):
 class ItemCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: str
+    # `ItemType` chứ không `str`. Router phải gọi `ItemType(body.type)` để dùng được
+    # giá trị này, và với `str` thì một loại không tồn tại đi thẳng tới constructor
+    # đó, `ValueError` không ai bắt, và client nhận 500 với một thân phản hồi cố ý
+    # không nói gì. Khai đúng kiểu ở biên thì Pydantic trả 422 kèm danh sách loại
+    # hợp lệ, tức người gọi biết phải sửa gì.
+    type: ItemType
     name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$")
     display_name: str = Field(min_length=1, max_length=255)
     # Phải bắt đầu VÀ kết thúc bằng `/`. Nhận cả `/a/b` lẫn `/a/b/` thì cây trên

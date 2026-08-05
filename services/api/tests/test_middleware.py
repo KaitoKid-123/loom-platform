@@ -23,6 +23,35 @@ async def test_each_request_gets_distinct_id(client: AsyncClient) -> None:
     assert first.headers["x-request-id"] != second.headers["x-request-id"]
 
 
+async def test_request_state_carries_the_same_id_as_the_header() -> None:
+    """Mọi store đọc `request.state.request_id` để ghi vào `audit_log.request_id`,
+    và chúng đọc bằng `getattr(..., "-")`. Nên thiếu nó là một lỗi IM LẶNG: audit
+    ghi toàn dấu gạch, không có ngoại lệ nào, và bảng audit lẫn log cùng tồn tại mà
+    không ghép được với nhau — đúng cái mà cột đó sinh ra để làm.
+
+    Bind vào contextvars KHÔNG thay được điều này, nên test về log context ở dưới
+    không nhìn thấy thuộc tính này. Đây là chỗ duy nhất canh nó.
+    """
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    async def echo(request: Request) -> JSONResponse:
+        return JSONResponse({"from_state": getattr(request.state, "request_id", None)})
+
+    app = Starlette(routes=[Route("/echo", echo)])
+    app.add_middleware(RequestContextMiddleware)
+
+    from httpx import ASGITransport
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/echo", headers={"X-Request-ID": "gan-vao-state"})
+
+    assert r.json()["from_state"] == "gan-vao-state"
+    assert r.headers["x-request-id"] == "gan-vao-state"
+
+
 async def test_log_context_contains_request_id(client: AsyncClient) -> None:
     captured: list[dict[str, object]] = []
 

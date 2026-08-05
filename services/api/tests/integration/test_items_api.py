@@ -135,6 +135,36 @@ async def test_invalid_folder_path_is_rejected_at_the_boundary(contributor):
     assert any(e["loc"][-1] == "folder_path" for e in r.json()["errors"])
 
 
+@pytest.mark.parametrize("where", ["body", "query"])
+async def test_an_unknown_item_type_is_422_not_500(contributor, where):
+    """`ItemType("notebook")` là `ValueError`, và không ai bắt nó thì client nhận 500
+    với một thân phản hồi cố ý không nói gì. Người gọi không biết `notebook` không
+    tồn tại, không biết bốn loại hợp lệ là gì, và không có gì để sửa.
+
+    Cả HAI chỗ: body của lệnh tạo và query của lệnh liệt kê. Mỗi chỗ là một
+    constructor riêng nhận thẳng dữ liệu client gửi, nên chúng hỏng riêng được.
+    """
+    if where == "body":
+        r = await contributor.client.post(
+            f"/api/v1/workspaces/{contributor.ws_a}/items",
+            json={
+                "type": "notebook",
+                "name": "khong-co-loai-nay",
+                "display_name": "Không có loại này",
+                "definition": _SQL,
+            },
+        )
+    else:
+        r = await contributor.client.get(
+            f"/api/v1/workspaces/{contributor.ws_a}/items", params={"type": "notebook"}
+        )
+
+    assert r.status_code == 422, r.text
+    assert r.headers["content-type"].startswith("application/problem+json")
+    # Phản hồi phải LIỆT KÊ các loại hợp lệ, không chỉ nói là sai.
+    assert "sql_script" in r.text
+
+
 async def test_a_pasted_password_in_secret_ref_is_rejected(contributor):
     """Chặn ở đây là lớp phòng vệ chống việc dán MẬT KHẨU THẬT vào ô secret_ref.
     Lọt một lần là credential đi vào definition, item_version, audit và Git."""

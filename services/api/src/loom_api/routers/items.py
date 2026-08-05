@@ -61,7 +61,9 @@ def _store(request: Request, session: AsyncSession, principal: Principal) -> Ite
 async def list_items(
     request: Request,
     workspace_id: uuid.UUID,
-    type: str | None = None,
+    # Cùng lý do như `ItemCreate.type`: `ItemType(type)` ở dưới là một constructor
+    # nhận thẳng dữ liệu client gửi, và một loại không tồn tại thành 500.
+    type: ItemType | None = None,
     folder: str | None = None,
     cursor: str | None = None,
     limit: int = 50,
@@ -73,7 +75,7 @@ async def list_items(
         workspace_id=workspace_id,
         limit=min(limit, _MAX_LIMIT),
         cursor=cursor,
-        item_type=ItemType(type) if type else None,
+        item_type=type,
         folder=folder,
     )
     return PageOut(
@@ -98,7 +100,7 @@ async def create_item(
     store = _store(request, session, principal)
     item = await store.create(
         workspace_id=workspace_id,
-        item_type=ItemType(body.type),
+        item_type=body.type,
         name=body.name,
         display_name=body.display_name,
         definition=body.definition,

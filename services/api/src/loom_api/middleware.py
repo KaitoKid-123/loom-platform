@@ -36,6 +36,17 @@ class RequestContextMiddleware:
         incoming = request.headers.get(REQUEST_ID_HEADER, "")[:MAX_REQUEST_ID_LENGTH]
         request_id = incoming or str(uuid.uuid4())
 
+        # `scope["state"]` là thứ `Request.state` đọc, và nó là CÙNG một dict cho
+        # mọi `Request(scope)` dựng phía dưới — nên đây là cách request_id tới được
+        # tầng store.
+        #
+        # Bind vào contextvars một mình là KHÔNG đủ, và thiếu sót đó im lặng: mọi
+        # store gọi `getattr(request.state, "request_id", "-")`, nên chúng ghi `"-"`
+        # vào `audit_log.request_id` mà không lỗi gì. Kết quả là bảng audit và log
+        # cùng tồn tại nhưng không ghép được với nhau — đúng cái mà cột đó sinh ra
+        # để làm. Đã sửa sau khi cửa chặn 1b đọc ra `request_id` toàn dấu gạch.
+        scope.setdefault("state", {})["request_id"] = request_id
+
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(
             request_id=request_id,

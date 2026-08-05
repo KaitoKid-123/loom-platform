@@ -81,6 +81,13 @@ endef
 migrate:  ## Chạy migration lên head (chạy từ host tới Aiven, KHÔNG qua cụm)
 	@$(DB_ENV) cd services/api && uv run alembic upgrade head
 
+.PHONY: grant-admin
+grant-admin:  ## Gán admin cấp tenant cho admin ĐẦU TIÊN: make grant-admin EMAIL=...
+	@# Mọi thứ khác cấp quyền qua API, và API đòi người gọi đã có quyền. Cái đầu
+	@# tiên không có ai cấp được, nên nó phải đến từ ngoài hệ thống.
+	@test -n "$(EMAIL)" || { echo "Thiếu EMAIL:  make grant-admin EMAIL=long@loom.local"; exit 1; }
+	@$(DB_ENV) uv run python scripts/grant_tenant_admin.py "$(EMAIL)"
+
 .PHONY: migration
 migration:  ## Sinh migration mới: make migration m="mô tả"
 	cd services/api && uv run alembic revision -m "$(m)"
