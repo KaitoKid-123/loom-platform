@@ -55,9 +55,31 @@ check-context:  ## Chặn mọi lệnh kubectl chạy nhầm vào cụm khác
 		exit 1; \
 	fi
 
+
+# Nạp credential Aiven cho các lệnh alembic chạy TỪ HOST. Trong cụm thì pod đã có
+# sẵn qua Secret loom-db-app; từ host thì không có gì nạp hộ, và thiếu chúng thì
+# alembic chết bằng một stack trace asyncpg thay vì một câu tiếng người.
+#
+# PGSSLROOTCERT là bắt buộc riêng: db_sslmode mặc định `verify-full`, và không có
+# biến này asyncpg đi tìm ~/.postgresql/root.crt rồi báo
+# "root certificate file does not exist" — đúng cái bẫy đã ghi từ Giai đoạn 0.
+#
+# Tên khoá trong aiven.env là username/password/host/port/dbname để khớp khoá của
+# Secret trong Kubernetes; Settings thì đọc LOOM_DB_*. Ánh xạ ở đây.
+define DB_ENV
+test -f deploy/local/aiven.env || { \
+    echo "Thiếu deploy/local/aiven.env — copy từ aiven.env.example rồi điền"; exit 1; }; \
+test -f deploy/local/aiven-ca.pem || { \
+    echo "Thiếu deploy/local/aiven-ca.pem — tải CA từ console Aiven"; exit 1; }; \
+set -a; . ./deploy/local/aiven.env; set +a; \
+export LOOM_DB_USER="$$username" LOOM_DB_PASSWORD="$$password" \
+       LOOM_DB_HOST="$$host" LOOM_DB_PORT="$$port" LOOM_DB_NAME="$$dbname" \
+       PGSSLROOTCERT="$$PWD/deploy/local/aiven-ca.pem";
+endef
+
 .PHONY: migrate
 migrate:  ## Chạy migration lên head (chạy từ host tới Aiven, KHÔNG qua cụm)
-	cd services/api && uv run alembic upgrade head
+	@$(DB_ENV) cd services/api && uv run alembic upgrade head
 
 .PHONY: migration
 migration:  ## Sinh migration mới: make migration m="mô tả"
@@ -73,7 +95,7 @@ check-migrations:  ## Chặn model và migration lệch nhau (cần database, LO
 	@# khớp. Nó cũng không so CHECK constraint. Hai khoảng đó được
 	@# tests/integration/test_migrations.py bịt bằng cách đọc thẳng pg_constraint
 	@# và bằng phép kiểm hành vi trên schema đã migrate.
-	cd services/api && uv run alembic check
+	@$(DB_ENV) cd services/api && uv run alembic check
 
 .PHONY: build-api
 build-api:  ## Build image loom-api
