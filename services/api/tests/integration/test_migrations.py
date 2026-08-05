@@ -19,11 +19,8 @@ unique-một-phần thành unique thường (không tạo lại được tên đ
 qua. Cả hai hỏng ÂM THẦM — không có lỗi nào ở lúc migrate.
 """
 
-import os
-import subprocess
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
@@ -31,7 +28,7 @@ from testcontainers.community.postgres import PostgresContainer
 
 from loom_api.models import DEFAULT_TENANT_ID
 
-API_DIR = Path(__file__).resolve().parents[2]
+from .pg_support import POSTGRES_IMAGE, run_alembic, sync_url
 
 pytestmark = pytest.mark.integration
 
@@ -50,55 +47,16 @@ PARTIAL_INDEXES = {
 }
 
 
-def _alembic_env(pg: PostgresContainer) -> dict[str, str]:
-    return {
-        "LOOM_DB_HOST": pg.get_container_host_ip(),
-        "LOOM_DB_PORT": str(pg.get_exposed_port(5432)),
-        "LOOM_DB_NAME": pg.dbname,
-        "LOOM_DB_USER": pg.username,
-        "LOOM_DB_PASSWORD": pg.password,
-        # Container testcontainers không cấu hình TLS; mặc định "verify-full"
-        # của LOOM_DB_SSLMODE nhắm cho Aiven thật, không cho container dùng một
-        # lần này. Xem ghi chú ở test_user_store.py.
-        "LOOM_DB_SSLMODE": "disable",
-    }
-
-
-def _sync_url(pg: PostgresContainer) -> str:
-    return (
-        f"postgresql+psycopg2://{pg.username}:{pg.password}"
-        f"@{pg.get_container_host_ip()}:{pg.get_exposed_port(5432)}/{pg.dbname}"
-    )
-
-
-def _alembic(pg: PostgresContainer, *args: str) -> subprocess.CompletedProcess[str]:
-    # S603: `args` là hằng viết tay trong chính file này, không phải input ngoài.
-    return subprocess.run(  # noqa: S603
-        ["uv", "run", "alembic", *args],  # noqa: S607 — uv chạy qua PATH có chủ đích
-        cwd=API_DIR,
-        env={**os.environ, **_alembic_env(pg)},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-@pytest.fixture(scope="module")
-def migrated_pg() -> Iterator[PostgresContainer]:
-    """Một container cho cả module, đã `alembic upgrade head`.
-
-    Mọi test bên dưới soi/đụng vào SCHEMA ĐÃ MIGRATE — không có test nào dựng
-    bảng từ metadata của model, vì như thế là kiểm nhầm thứ.
-    """
-    with PostgresContainer("postgres:17-alpine") as pg:
-        result = _alembic(pg, "upgrade", "head")
-        assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
-        yield pg
+# `migrated_pg` giờ ở conftest.py, phạm vi SESSION: test quyền của Task 9 chạy
+# trên đúng schema đã migrate này, và một container thứ hai cho cùng một schema
+# chỉ tốn thêm ba giây initdb. Mọi test bên dưới vẫn soi/đụng vào SCHEMA ĐÃ
+# MIGRATE — không có test nào dựng bảng từ metadata của model, vì như thế là
+# kiểm nhầm thứ.
 
 
 @pytest.fixture(scope="module")
 def engine(migrated_pg: PostgresContainer) -> Iterator[sa.Engine]:
-    eng = sa.create_engine(_sync_url(migrated_pg))
+    eng = sa.create_engine(sync_url(migrated_pg))
     yield eng
     eng.dispose()
 
@@ -256,7 +214,7 @@ def test_models_and_migrations_do_not_drift(migrated_pg: PostgresContainer) -> N
     Đã kiểm chứng cửa này thật sự đóng được: thêm một cột vào Item làm
     `alembic check` trả về 255 với `add_column`, gỡ ra thì xanh lại.
     """
-    result = _alembic(migrated_pg, "check")
+    result = run_alembic(migrated_pg, "check")
     assert result.returncode == 0, (
         f"model và migration đã lệch nhau:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
@@ -268,9 +226,9 @@ def test_downgrade_removes_exactly_the_new_tables_and_upgrade_restores_them() ->
     Container riêng: test này hạ rồi nâng lại schema, không dùng chung được với
     các test khác trong module.
     """
-    with PostgresContainer("postgres:17-alpine") as pg:
-        assert _alembic(pg, "upgrade", "head").returncode == 0
-        eng = sa.create_engine(_sync_url(pg))
+    with PostgresContainer(POSTGRES_IMAGE) as pg:
+        assert run_alembic(pg, "upgrade", "head").returncode == 0
+        eng = sa.create_engine(sync_url(pg))
 
         def snapshot() -> tuple[set[str], set[str], str]:
             with eng.connect() as c:
@@ -288,7 +246,7 @@ def test_downgrade_removes_exactly_the_new_tables_and_upgrade_restores_them() ->
         assert before[0] >= NEW_TABLES
         assert before[2] == "0003"
 
-        assert _alembic(pg, "downgrade", "0002").returncode == 0
+        assert run_alembic(pg, "downgrade", "0002").returncode == 0
         after_down = snapshot()
         assert not (NEW_TABLES & after_down[0]), (
             f"downgrade để sót bảng: {sorted(NEW_TABLES & after_down[0])}"
@@ -297,7 +255,7 @@ def test_downgrade_removes_exactly_the_new_tables_and_upgrade_restores_them() ->
         assert {"tenant", "app_user", "user_session"} <= after_down[0]
         assert after_down[2] == "0002"
 
-        assert _alembic(pg, "upgrade", "head").returncode == 0
+        assert run_alembic(pg, "upgrade", "head").returncode == 0
         # So cả tập index, không chỉ tập bảng: một downgrade/upgrade đánh rơi
         # đúng một index sẽ cho tập bảng y hệt.
         assert snapshot() == before
