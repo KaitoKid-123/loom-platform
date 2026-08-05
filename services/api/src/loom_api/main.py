@@ -58,11 +58,21 @@ def create_app(
         if owns_db:
             await db.dispose()
 
+    # Tài liệu API CHỈ mở ở local. Từ Giai đoạn 1b, bề mặt API chính là mô hình
+    # RBAC — mọi đường workspace/item/role/audit, tên tham số, hình dạng mọi
+    # response. Với người chưa đăng nhập thì đó là một bản đồ trinh sát miễn phí,
+    # và nó càng có giá trị theo mỗi endpoint ta thêm vào.
+    #
+    # Đóng bằng cách KHÔNG đăng ký route, chứ không phải đặt sau xác thực: một
+    # route không tồn tại thì không có bề mặt nào để dò.
+    is_local = settings.environment == "local"
+
     app = FastAPI(
         title="Loom API",
         version=VERSION,
-        openapi_url="/api/v1/openapi.json",
-        docs_url="/api/v1/docs",
+        openapi_url="/api/v1/openapi.json" if is_local else None,
+        docs_url="/api/v1/docs" if is_local else None,
+        redoc_url=None,
         lifespan=lifespan,
     )
     app.state.settings = settings

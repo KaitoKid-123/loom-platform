@@ -12,10 +12,13 @@ dependency của Giai đoạn 1b xếp CHỒNG lên get_principal (`require_perm
 `workspace_member`...) vẫn được tính là đã xác thực mà không phải sửa gì ở đây.
 """
 
+import pytest
 from fastapi.routing import iter_route_contexts
+from httpx import ASGITransport, AsyncClient
 
 from loom_api.deps import get_principal
 from loom_api.main import create_app
+from loom_core.config import get_settings
 
 # Allowlist viết thẳng ra dưới dạng literal, KHÔNG suy ra từ app: thêm một
 # đường dẫn vào đây phải là một hành động nhìn thấy được trong diff và review
@@ -24,8 +27,8 @@ from loom_api.main import create_app
 #
 # healthz/readyz: kubelet gọi, không có cookie.
 # auth/login|callback|logout: chính là đường để CÓ một phiên.
-# docs|openapi.json: công khai từ Giai đoạn 0 — xem ghi chú ở
-#   test_the_allowlist_describes_reality.
+# docs|openapi.json: CHỈ tồn tại ở local (xem test_api_docs_are_local_only).
+#   Ở dev/prod chúng không được đăng ký nên không có route nào để canh.
 PUBLIC_API_PATHS = frozenset(
     {
         "/api/v1/healthz",
@@ -116,3 +119,32 @@ def test_the_allowlist_describes_reality() -> None:
         if path in PUBLIC_API_PATHS and get_principal in deps
     )
     assert not still_public, f"{still_public} đã yêu cầu xác thực — bỏ khỏi PUBLIC_API_PATHS."
+
+
+@pytest.mark.parametrize(
+    ("environment", "expect_status"),
+    [("local", 200), ("dev", 404), ("prod", 404)],
+)
+async def test_api_docs_are_local_only(
+    monkeypatch: pytest.MonkeyPatch, environment: str, expect_status: int
+) -> None:
+    """Từ Giai đoạn 1b, bề mặt API CHÍNH LÀ mô hình RBAC — mọi đường
+    workspace/item/role/audit, tên tham số, hình dạng mọi response. Với người
+    chưa đăng nhập đó là một bản đồ trinh sát miễn phí.
+
+    Đóng bằng cách không đăng ký route (404), chứ không phải đặt sau xác thực
+    (401): một route không tồn tại thì không có bề mặt nào để dò.
+    """
+    monkeypatch.setenv("LOOM_ENVIRONMENT", environment)
+    if environment != "local":
+        # Settings từ chối secret mặc định ngoài local, nên phải cấp giá trị thật.
+        monkeypatch.setenv("LOOM_SESSION_SECRET", "x" * 48)
+        monkeypatch.setenv("LOOM_OIDC_CLIENT_SECRET", "y" * 48)
+    get_settings.cache_clear()
+
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            for path in ("/api/v1/docs", "/api/v1/openapi.json"):
+                assert (await client.get(path)).status_code == expect_status, path
