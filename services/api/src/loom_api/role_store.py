@@ -18,8 +18,10 @@ import uuid
 from fastapi import HTTPException, status
 from sqlalchemy import ColumnElement, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_api.integrity import constraint_of
 from loom_api.models import DEFAULT_TENANT_ID, RoleAssignment
 from loom_api.permissions import Forbidden, PermissionService
 from loom_core.roles import GRANTABLE_BY, Action, Role
@@ -28,11 +30,24 @@ from loom_core.schemas import Principal
 Scope = tuple[str, uuid.UUID]
 
 
+_PRINCIPAL_USER_FK = "fk_role_assignment_principal_user_id_app_user"
+
+
 class LastAdminError(HTTPException):
     def __init__(self) -> None:
         super().__init__(
             status.HTTP_409_CONFLICT,
             "đây là admin cuối cùng của phạm vi này — gán admin khác trước khi thu",
+        )
+
+
+class UnknownUser(HTTPException):
+    def __init__(self, user_id: uuid.UUID) -> None:
+        # 422 chứ không 500: `user_id` là dữ liệu client gửi lên, và một danh sách
+        # người dùng đã cũ trên giao diện là cách bình thường nhất để nó sai.
+        super().__init__(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"không có người dùng {user_id}",
         )
 
 
@@ -54,6 +69,16 @@ class RoleStore:
         self._session = session
         self._principal = principal
         self._perms = PermissionService(session, principal)
+
+    @property
+    def perms(self) -> PermissionService:
+        """Cùng một `PermissionService` mà các phép kiểm ở đây đã dùng.
+
+        Router cần vai trò hiệu lực của người gọi để tính `grantable_roles`. Dựng
+        một service thứ hai cho ra cùng câu trả lời nhưng mất cache trong phạm vi
+        request, tức là một round trip nữa cho một câu hỏi vừa hỏi xong.
+        """
+        return self._perms
 
     async def _require_role_grant(self, scope: Scope) -> Role:
         """Cửa quyền dùng CHUNG cho grant và revoke.
@@ -119,7 +144,17 @@ class RoleStore:
                 set_={"role": str(role), "created_by": self._principal.user_id},
             )
         )
-        await self._session.execute(stmt)
+        try:
+            await self._session.execute(stmt)
+            # flush ngay để lỗi khoá ngoại nổ Ở ĐÂY, nơi còn biết `user_id` nào
+            # gây ra nó. Để tới lúc `commit()` ở router thì IntegrityError bay ra
+            # từ một chỗ không có ngữ cảnh và client nhận 500.
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            if constraint_of(exc) != _PRINCIPAL_USER_FK or user_id is None:
+                raise
+            raise UnknownUser(user_id) from exc
 
     async def revoke(
         self,
@@ -228,10 +263,17 @@ class RoleStore:
         return list(
             (
                 await self._session.execute(
-                    select(RoleAssignment).where(
+                    select(RoleAssignment)
+                    .where(
                         RoleAssignment.scope_type == scope_type,
                         RoleAssignment.scope_id == scope_id,
                     )
+                    # Thứ tự XÁC ĐỊNH, theo lúc gán. Không có nó Postgres tự do trả
+                    # theo thứ tự nào cũng được, và bảng quyền trên giao diện đổi chỗ
+                    # giữa hai lần tải — người dùng đọc đó là "có ai vừa sửa gì".
+                    # `id` phá thế hoà: nhiều grant trong cùng một transaction chia
+                    # nhau một `created_at`.
+                    .order_by(RoleAssignment.created_at, RoleAssignment.id)
                 )
             )
             .scalars()

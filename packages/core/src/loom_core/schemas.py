@@ -3,9 +3,9 @@
 import uuid
 from collections.abc import Iterable
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class HealthStatus(BaseModel):
@@ -143,3 +143,47 @@ class ItemOut(BaseModel):
 class PageOut(BaseModel):
     items: list[Any]
     next_cursor: str | None = None
+
+
+class PrincipalRef(BaseModel):
+    """Trỏ tới ĐÚNG MỘT principal: một người, hoặc một nhóm.
+
+    Quy tắc "đúng một" nằm ở đây chứ không ở router, để câu trả lời 422 mang theo
+    `errors[]` như mọi lỗi validate khác — frontend gắn được lỗi vào đúng ô input.
+    Một `HTTPException(422)` ở router chỉ cho một dòng `detail` và ô nào sai thì
+    người dùng phải tự đoán. `RoleStore` vẫn giữ phép kiểm của nó: nó gọi được từ
+    chỗ khác ngoài HTTP.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: uuid.UUID | None = None
+    group: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def _exactly_one_principal(self) -> "PrincipalRef":
+        if (self.user_id is None) == (self.group is None):
+            raise ValueError("phải chỉ đúng một trong user_id hoặc group")
+        return self
+
+
+class RoleGrant(PrincipalRef):
+    role: Literal["viewer", "contributor", "member", "admin"]
+
+
+class RoleAssignmentOut(BaseModel):
+    principal_type: str
+    user_id: uuid.UUID | None
+    group: str | None
+    role: str
+
+
+class RoleListOut(BaseModel):
+    items: list[RoleAssignmentOut]
+    # Vai trò mà NGƯỜI GỌI được phép gán — spec mục 7.3. Thuộc tính của người gọi
+    # nên nó ở cấp phản hồi, không lặp trên từng hàng.
+    #
+    # Đây là lớp phòng vệ THỨ HAI và nó không phải chỗ chặn: `RoleStore.grant` là
+    # thứ thật sự chặn leo thang. Gỡ trường này thì UI hiện tuỳ chọn server sẽ từ
+    # chối; gỡ phép kiểm ở store thì bất kỳ ai gọi API trực tiếp đều leo thang được.
+    grantable_roles: list[str]

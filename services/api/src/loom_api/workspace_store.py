@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_api.audit import AuditWriter
+from loom_api.integrity import constraint_of
 from loom_api.models import ACTIVE, DEFAULT_TENANT_ID, DELETED, Workspace
 from loom_api.pagination import Page, decode_cursor, encode_cursor
 from loom_api.permissions import (
@@ -26,18 +27,6 @@ _WORKSPACE_NAME_INDEX = "uq_workspace_active_name"
 class NameTaken(HTTPException):
     def __init__(self, name: str) -> None:
         super().__init__(status.HTTP_409_CONFLICT, f"đã có workspace tên '{name}'")
-
-
-def _constraint_of(exc: IntegrityError) -> str | None:
-    """Tên constraint đã vỡ, hoặc None nếu không đọc được.
-
-    Hai lớp bọc: `exc.orig` là shim DBAPI của SQLAlchemy và KHÔNG có
-    `constraint_name`; phải đi tiếp tới `__cause__`. Viết thiếu tầng đó thì điều
-    kiện không bao giờ khớp và mọi lỗi ràng buộc thành 500.
-    """
-    cause = getattr(exc.orig, "__cause__", None)
-    name = getattr(cause, "constraint_name", None)
-    return str(name) if name is not None else None
 
 
 class WorkspaceStore:
@@ -125,7 +114,7 @@ class WorkspaceStore:
             # Chỉ ánh xạ ĐÚNG constraint tên. Một FK `domain_id` trỏ vào domain
             # không tồn tại cũng ra IntegrityError, và báo "đã có workspace tên X"
             # cho một cái tên chưa ai dùng gửi người vận hành đi sai hướng.
-            if _constraint_of(exc) != _WORKSPACE_NAME_INDEX:
+            if constraint_of(exc) != _WORKSPACE_NAME_INDEX:
                 raise
             raise NameTaken(name) from exc
         return ws

@@ -461,6 +461,11 @@ class ApiWorld:
     user_id: uuid.UUID
     principal: Principal
     grant: Callable[..., Awaitable[None]]
+    # Một người dùng thứ hai đã COMMIT, và nó tự vào danh sách dọn. `role_assignment
+    # .principal_user_id` có khoá ngoại tới `app_user`, nên mọi test về gán quyền
+    # cần một người thật để gán cho — và một test tự chèn app_user rồi quên xoá sẽ
+    # làm lệnh xoá user của fixture vỡ vì khoá ngoại, đúng lỗi Task 19 đã gặp.
+    make_user: Callable[[str], Awaitable[uuid.UUID]]
 
 
 @pytest.fixture
@@ -523,6 +528,24 @@ async def api_world(db_engine: AsyncEngine) -> AsyncIterator[ApiWorld]:
             )
             await session.commit()
 
+    extra_users: list[uuid.UUID] = []
+
+    async def make_user(name: str) -> uuid.UUID:
+        uid = uuid.uuid4()
+        async with maker() as session:
+            session.add(
+                AppUser(
+                    id=uid,
+                    tenant_id=DEFAULT_TENANT_ID,
+                    subject=f"{name}-{uid.hex[:8]}",
+                    email=f"{name}-{uid.hex[:8]}@loom.local",
+                    display_name=name,
+                )
+            )
+            await session.commit()
+        extra_users.append(uid)
+        return uid
+
     class _Store:
         """Trả về principal cố định. Xác thực OIDC đã có test riêng; ở đây ta kiểm
         PHÂN QUYỀN, nên giả lập đúng một bước và không hơn."""
@@ -553,7 +576,7 @@ async def api_world(db_engine: AsyncEngine) -> AsyncIterator[ApiWorld]:
             cookies={"loom_session": "phien-hop-le"},
         ) as client:
             try:
-                yield ApiWorld(client, db_engine, ws_a, ws_b, user_id, principal, grant)
+                yield ApiWorld(client, db_engine, ws_a, ws_b, user_id, principal, grant, make_user)
             finally:
                 async with maker() as session:
                     # Dọn audit theo ACTOR, không theo workspace: một test có thể
@@ -570,5 +593,21 @@ async def api_world(db_engine: AsyncEngine) -> AsyncIterator[ApiWorld]:
                     await session.execute(
                         delete(RoleAssignment).where(RoleAssignment.scope_id == DEFAULT_TENANT_ID)
                     )
+                    if extra_users:
+                        # Theo PRINCIPAL và theo ACTOR, không theo scope: một test có
+                        # thể gán quyền cho người dùng phụ ở một phạm vi ngoài ws_a/ws_b.
+                        await session.execute(
+                            delete(RoleAssignment).where(
+                                RoleAssignment.principal_user_id.in_(extra_users)
+                            )
+                        )
+                        await session.execute(
+                            delete(RoleAssignment).where(RoleAssignment.created_by.in_(extra_users))
+                        )
+                        await session.execute(
+                            delete(AuditLog).where(AuditLog.actor_user_id.in_(extra_users))
+                        )
                     await session.execute(delete(AppUser).where(AppUser.id == user_id))
+                    if extra_users:
+                        await session.execute(delete(AppUser).where(AppUser.id.in_(extra_users)))
                     await session.commit()
