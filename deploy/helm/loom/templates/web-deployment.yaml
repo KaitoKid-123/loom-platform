@@ -17,6 +17,7 @@ spec:
         {{- include "loom.labels" . | nindent 8 }}
         app.kubernetes.io/component: web
     spec:
+      terminationGracePeriodSeconds: {{ .Values.web.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -36,6 +37,12 @@ spec:
             httpGet: { path: /, port: http }
             initialDelaySeconds: 2
             periodSeconds: 10
+          # Ngủ TRƯỚC khi nhận SIGTERM, để endpoint kịp bị gỡ khỏi Service.
+          # Thiếu nó thì mọi lần rollout đều làm rơi request — xem values.yaml.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "{{ .Values.web.preStopSleepSeconds }}"]
           resources:
             {{- toYaml .Values.web.resources | nindent 12 }}
           securityContext:

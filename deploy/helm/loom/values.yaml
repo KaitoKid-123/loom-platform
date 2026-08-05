@@ -7,6 +7,20 @@ api:
   replicas: 1
   # Chỉ bật ở local: uvicorn --reload và cho phép ghi vào rootfs để Tilt sync mã nguồn
   devReload: false
+  # Số giây pod tiếp tục phục vụ SAU khi Kubernetes quyết định xoá nó.
+  #
+  # Endpoint bị gỡ khỏi Service KHÔNG đồng bộ với việc pod nhận SIGTERM, nên trong
+  # vài trăm mili-giây tới vài giây, Traefik vẫn gửi request vào một pod đang tắt.
+  # Không có preStop thì MỌI lần rollout — kể cả mỗi lần ArgoCD đồng bộ ở dev/prod —
+  # đều làm rơi một phần request. Đo được ở local: `make smoke` chạy ngay sau
+  # `rollout restart` hỏng 4/9 phép, trong đó có `healthz`, một endpoint không dính
+  # gì tới đăng nhập.
+  #
+  # Kubernetes chạy preStop rồi MỚI gửi SIGTERM, nên trong lúc ngủ pod vẫn phục vụ
+  # bình thường. Phải nhỏ hơn terminationGracePeriodSeconds một khoảng đủ để uvicorn
+  # đóng nốt request đang dở.
+  preStopSleepSeconds: 5
+  terminationGracePeriodSeconds: 30
   readOnlyRootFilesystem: true
   resources:
     requests: { cpu: 50m, memory: 192Mi }
@@ -16,6 +30,9 @@ web:
   image: loom/web
   tag: dev
   replicas: 1
+  # Cùng lý do như api — xem ghi chú ở trên.
+  preStopSleepSeconds: 5
+  terminationGracePeriodSeconds: 30
   # An toàn: nginx chỉ cần ghi vào /tmp, đã có emptyDir mount ở đó.
   readOnlyRootFilesystem: true
   resources:

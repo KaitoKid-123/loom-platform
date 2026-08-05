@@ -17,6 +17,7 @@ spec:
         {{- include "loom.labels" . | nindent 8 }}
         app.kubernetes.io/component: api
     spec:
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -82,6 +83,12 @@ spec:
             httpGet: { path: /api/v1/readyz, port: http }
             initialDelaySeconds: 3
             periodSeconds: 10
+          # Ngủ TRƯỚC khi nhận SIGTERM, để endpoint kịp bị gỡ khỏi Service.
+          # Thiếu nó thì mọi lần rollout đều làm rơi request — xem values.yaml.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "{{ .Values.api.preStopSleepSeconds }}"]
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
           securityContext:
