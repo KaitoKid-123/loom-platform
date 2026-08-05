@@ -1,11 +1,21 @@
 from typing import Annotated
 
+import httpx
 import pytest
+import structlog.contextvars
+import structlog.testing
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 from pydantic import AfterValidator, BaseModel
 
-from loom_api.errors import install_error_handlers
+from loom_api.errors import UNEXPECTED_ERROR_DETAIL, install_error_handlers
+from loom_api.main import create_app
+
+# Trông giống hệt thứ một thông điệp ngoại lệ thật hay mang theo: đường dẫn nội
+# bộ, tên host, một giá trị bí mật. Mỗi mẩu được kiểm riêng ở dưới, nên không
+# một cách rò rỉ từng phần nào lọt qua.
+SECRET_MESSAGE = "/etc/loom/aiven.env: password=hunter2 host=pg-loom.aivencloud.com"
+REQUEST_ID = "rid-9f2c-from-the-edge"
 
 
 def _must_be_even(v: int) -> int:
@@ -41,7 +51,15 @@ async def app_client():
             401, "chưa đăng nhập", headers={"WWW-Authenticate": 'Bearer realm="loom"'}
         )
 
-    transport = ASGITransport(app=app)
+    @app.get("/unhandled")
+    async def unhandled() -> None:
+        raise ValueError(SECRET_MESSAGE)
+
+    # raise_app_exceptions=False: ServerErrorMiddleware của Starlette ném LẠI
+    # ngoại lệ sau khi handler đã dựng xong phản hồi (để server thật log được
+    # nó), nên nếu không tắt cờ này thì test client nổ trước khi nhìn thấy
+    # phản hồi mà nó cần kiểm.
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
@@ -129,3 +147,87 @@ async def test_wrong_method_on_a_real_route_still_carries_allow(client):
     assert response.status_code == 405
     assert response.headers["allow"]
     assert "GET" in response.headers["allow"]
+
+
+# --------------------------------------------------------------------------
+# Ngoại lệ chưa xử lý. Commit của Task 1 nói "return RFC 9457 problem details
+# for every error" và spec mục 6 đòi đúng thế; cả hai đều sai cho tới khi có
+# handler dưới đây — không đăng ký handler nào cho `Exception` nghĩa là mọi lỗi
+# lạ rơi xuống ServerErrorMiddleware của Starlette và ra ngoài dưới dạng
+# `Internal Server Error` text/plain.
+# --------------------------------------------------------------------------
+
+
+async def test_unhandled_exception_becomes_problem_json(app_client):
+    r = await app_client.get("/unhandled")
+    assert r.status_code == 500
+    assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["status"] == 500
+    assert body["title"] == "Internal Server Error"
+    # `instance` là thứ nối phản hồi này với dòng log tương ứng.
+    assert body["instance"] == "/unhandled"
+
+
+async def test_unhandled_exception_leaks_nothing_from_the_message(app_client):
+    """Thông điệp ngoại lệ mang đường dẫn nội bộ, host và giá trị đang xử lý.
+    Không mẩu nào được rời khỏi log. Kiểm trên TOÀN BỘ thân phản hồi, không chỉ
+    trường `detail`: một handler "hữu ích" nhét str(exc) vào `errors` hay vào
+    `title` cũng phải đỏ."""
+    r = await app_client.get("/unhandled")
+    raw = r.text
+    for leak in ("hunter2", "aiven.env", "aivencloud.com", "/etc/loom", "ValueError"):
+        assert leak not in raw, leak
+    assert r.json()["detail"] == UNEXPECTED_ERROR_DETAIL
+
+
+async def test_unhandled_exception_logs_the_traceback_with_the_request_id():
+    """Thân phản hồi im lặng chỉ chấp nhận được nếu log thì không. `request_id`
+    là sợi dây duy nhất nối "người dùng báo trang lỗi lúc 14:03" với traceback
+    thật, nên nó phải nằm trên chính dòng log đó.
+
+    Chạy trên app THẬT: request_id do RequestContextMiddleware bind vào
+    contextvars, nên app đồ chơi trong file này không kiểm được nhánh này.
+    """
+
+    class ExplodingStore:
+        async def load_session(self, session_id: str) -> None:
+            raise RuntimeError(SECRET_MESSAGE)
+
+    app = create_app(
+        user_store=ExplodingStore(),
+        oidc_http=httpx.AsyncClient(),
+        verify_id_token=None,
+    )
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            # create_app() gọi configure_logging(), mà configure_logging() thay
+            # cả danh sách processor — nên nó phải chạy XONG trước khi vào
+            # capture_logs, không thì bản ghi bị thổi bay.
+            with structlog.testing.capture_logs(
+                processors=[structlog.contextvars.merge_contextvars]
+            ) as logs:
+                r = await ac.get(
+                    "/api/v1/me",
+                    headers={
+                        # Cookie phải có, nếu không get_principal trả 401 trước
+                        # khi chạm tới store và ngoại lệ không bao giờ xảy ra.
+                        "Cookie": "loom_session=s-1",
+                        "X-Request-ID": REQUEST_ID,
+                    },
+                )
+
+    assert r.status_code == 500
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert SECRET_MESSAGE not in r.text
+
+    entries = [e for e in logs if e["event"] == "http.unhandled_exception"]
+    assert len(entries) == 1, [e["event"] for e in logs]
+    entry = entries[0]
+    assert entry["request_id"] == REQUEST_ID
+    assert entry["exc_type"] == "RuntimeError"
+    # Ngoại lệ THẬT, không phải True: `exc_info=True` chỉ đúng khi
+    # sys.exc_info() còn giá trị, và đó là chi tiết nội bộ của Starlette.
+    assert isinstance(entry["exc_info"], RuntimeError)
+    assert str(entry["exc_info"]) == SECRET_MESSAGE

@@ -7,6 +7,7 @@ cấu trúc với lỗi lạ, và mất luôn chi tiết từng trường của 
 from collections.abc import Mapping
 from http import HTTPStatus
 
+import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -15,6 +16,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from loom_core.schemas import ProblemDetail
 
 PROBLEM_JSON = "application/problem+json"
+
+# Câu duy nhất mà một lỗi chưa xử lý nói ra ngoài dây. Một HẰNG SỐ, không phải
+# str(exc): thông điệp ngoại lệ hay mang đường dẫn nội bộ, một mẩu SQL, một giá
+# trị đang xử lý, hoặc chính chuỗi kết nối. Không có gì client làm được với nó,
+# nên nó không có lý do gì để rời khỏi log.
+UNEXPECTED_ERROR_DETAIL = "lỗi không mong đợi ở phía máy chủ"
+
+logger = structlog.get_logger(__name__)
 
 
 def _title(status_code: int) -> str:
@@ -77,6 +86,42 @@ async def _validation_error_handler(request: Request, exc: Exception) -> JSONRes
     )
 
 
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Lưới cuối. Không có nó, một ngoại lệ chưa xử lý đi thẳng tới
+    ServerErrorMiddleware của Starlette và ra ngoài dưới dạng `Internal Server
+    Error` text/plain — tức là đúng một mã trạng thái trong toàn bộ API KHÔNG
+    phải problem+json, ngay chỗ frontend cần biết chuyện gì đang xảy ra nhất.
+
+    Thân phản hồi cố ý không nói gì: xem UNEXPECTED_ERROR_DETAIL. Traceback đi
+    vào log, nơi `request_id` (RequestContextMiddleware bind vào contextvars)
+    nối nó lại với đúng request mà người dùng vừa báo hỏng — đó là toàn bộ cách
+    để tra ra một lỗi mà client không được phép nhìn thấy.
+    """
+    # exc_info=exc chứ không phải logger.exception(): handler này được gọi từ
+    # trong khối except của ServerErrorMiddleware nên sys.exc_info() hiện đang
+    # có giá trị, nhưng buộc traceback vào ĐÚNG ngoại lệ được truyền vào thì
+    # không phụ thuộc vào chi tiết đó của Starlette.
+    logger.error(
+        "http.unhandled_exception",
+        exc_type=type(exc).__name__,
+        path=str(request.url.path),
+        exc_info=exc,
+    )
+    return _response(
+        ProblemDetail(
+            title=_title(500),
+            status=500,
+            detail=UNEXPECTED_ERROR_DETAIL,
+            instance=str(request.url.path),
+        )
+    )
+
+
 def install_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, _http_exception_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
+    # Handler cho `Exception` KHÔNG chồng lấn hai cái trên: Starlette chọn
+    # handler theo kiểu cụ thể nhất, và cái này chạy ở ServerErrorMiddleware
+    # (ngoài cùng) chứ không phải ExceptionMiddleware. Starlette vẫn ném lại
+    # ngoại lệ sau khi handler trả phản hồi, nên server/test client vẫn thấy nó.
+    app.add_exception_handler(Exception, _unhandled_exception_handler)
