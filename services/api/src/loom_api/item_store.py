@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom_api.models import ACTIVE, DEFAULT_TENANT_ID, Item, ItemVersion, Workspace
+from loom_api.models import ACTIVE, DEFAULT_TENANT_ID, DELETED, Item, ItemVersion, Workspace
 from loom_api.pagination import Page, decode_cursor, encode_cursor
 from loom_api.permissions import (
     NotVisible,
@@ -230,11 +230,39 @@ class ItemStore:
             # `updated_at` thì item nhảy lên đầu mọi danh sách mà không ai đổi gì.
             return item
 
-        item.definition = new_definition
-        item.definition_hash = new_hash
-        item.display_name = new_display
-        item.folder_path = new_folder
-        item.description = new_desc
+        self._bump(
+            item,
+            definition=new_definition,
+            display_name=new_display,
+            folder_path=new_folder,
+            description=new_desc,
+            change_note=change_note,
+        )
+        await self._session.flush()
+        return item
+
+    def _bump(
+        self,
+        item: Item,
+        *,
+        definition: dict[str, object],
+        display_name: str,
+        folder_path: str,
+        description: str | None,
+        change_note: str | None,
+    ) -> None:
+        """Nâng item lên một version mới và ghi hàng lịch sử tương ứng.
+
+        `update` và `restore_version` dùng chung hàm này vì chúng là CÙNG một
+        thao tác với hai nguồn nội dung khác nhau. Viết hai lần thì hash, dấu
+        thời gian và người sửa có hai chỗ để trôi khỏi nhau, và bản sao bị bỏ
+        quên sẽ sai theo kiểu không ai nhìn thấy.
+        """
+        item.definition = definition
+        item.definition_hash = canonical_hash(definition)
+        item.display_name = display_name
+        item.folder_path = folder_path
+        item.description = description
         item.version = item.version + 1
         item.updated_by = self._principal.user_id
         # Đặt tường minh, không dựa vào `now()` của Postgres: `now()` là thời
@@ -249,13 +277,69 @@ class ItemStore:
                 id=uuid.uuid4(),
                 item_id=item.id,
                 version=item.version,
-                definition=new_definition,
-                display_name=new_display,
-                folder_path=new_folder,
-                description=new_desc,
+                definition=definition,
+                display_name=display_name,
+                folder_path=folder_path,
+                description=description,
                 change_note=change_note,
                 created_by=self._principal.user_id,
             )
+        )
+
+    async def soft_delete(self, item_id: uuid.UUID) -> None:
+        """Đánh dấu item là đã xoá. KHÔNG chạm `item_version`.
+
+        Lịch sử version là thứ duy nhất phục hồi được nội dung sau một lần xoá,
+        nên một xoá mềm làm mất lịch sử chỉ là một lần xoá cứng chậm hơn.
+
+        Cũng KHÔNG bump `version`: version đánh số các bản NỘI DUNG, và xoá không
+        tạo ra nội dung nào. Bump ở đây để lại một số không có hàng
+        `item_version` nào tương ứng — `restore_version` sẽ không tìm thấy nó —
+        và làm ETag của client đổi vì một lý do không phải là một lần sửa.
+
+        Đi qua `_lock_active` nên xoá lần thứ hai là 404 chứ không phải một lần
+        ghi im lặng dời `updated_at` của một hàng người gọi tưởng đã biến mất.
+        """
+        await self._perms.require_item(item_id, Action.item_delete)
+        item = await self._lock_active(item_id)
+        item.state = DELETED
+        item.updated_by = self._principal.user_id
+        item.updated_at = datetime.now(UTC)
+        await self._session.flush()
+
+    async def restore_version(self, item_id: uuid.UUID, version: int) -> Item:
+        """Sinh version MỚI mang nội dung của một version cũ — không lùi con trỏ.
+
+        Lịch sử bất biến nghĩa là hoàn tác được cả cú hoàn tác. Lùi con trỏ thì
+        mọi bản ghi giữa hai mốc biến mất và không ai lấy lại được.
+
+        Khôi phục cả metadata, không riêng definition: `item_version` lưu
+        display_name/folder_path/description chính là để một lần đổi tên hay một
+        lần chuyển thư mục cũng hoàn tác được.
+        """
+        await self._perms.require_item(item_id, Action.item_update)
+        item = await self._lock_active(item_id)
+
+        # Lọc theo CẢ hai cột. Số version là cục bộ theo item, nên `version = 2`
+        # một mình khớp với hàng của mọi item trong database và restore sẽ kéo
+        # nội dung của một item ở workspace khác vào đây.
+        source = (
+            await self._session.execute(
+                select(ItemVersion).where(
+                    ItemVersion.item_id == item_id, ItemVersion.version == version
+                )
+            )
+        ).scalar_one_or_none()
+        if source is None:
+            raise NotVisible
+
+        self._bump(
+            item,
+            definition=dict(source.definition),
+            display_name=source.display_name,
+            folder_path=source.folder_path,
+            description=source.description,
+            change_note=f"phục hồi từ version {version}",
         )
         await self._session.flush()
         return item

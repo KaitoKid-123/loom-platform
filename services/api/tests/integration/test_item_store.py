@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_api.item_store import ItemStore, NameTaken, VersionMismatch
-from loom_api.models import Item, ItemVersion
+from loom_api.models import DELETED, Item, ItemVersion
 from loom_api.pagination import CursorMismatch
 from loom_api.permissions import Forbidden, NotVisible
 from loom_core.item_definitions import ItemType, canonical_hash
@@ -147,14 +147,6 @@ async def test_an_unrelated_integrity_error_is_not_reported_as_a_name_clash(rbac
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AttributeError,
-    reason="soft_delete tới ở Task 18. strict + raises để nó tự dọn: khi Task 18 "
-    "thêm hàm, test XPASS và strict=True làm build ĐỎ cho tới khi marker bị gỡ. "
-    "Bỏ hẳn test khỏi file thì không có gì nhắc, còn để nó đỏ thì `make test-int` "
-    "đỏ suốt hai task và không ai còn đọc kết quả nữa.",
-)
 async def test_name_can_be_reused_after_soft_delete(rbac_fixture):
     """Đây là lý do index unique phải có WHERE state = 'active'. Không có nó,
     người dùng bị chặn bởi một hàng họ không còn thấy."""
@@ -501,3 +493,209 @@ async def test_an_invalid_definition_is_rejected_before_the_version_is_bumped(
     row = await _row(f.session, item.id)
     assert row.version == 1
     assert await _count_versions(f.session, item.id) == 1
+
+
+# ------------------------------------------- Task 18: xoá mềm và restore
+
+
+async def _versions(session: AsyncSession, item_id: uuid.UUID) -> list[ItemVersion]:
+    return list(
+        (
+            await session.execute(
+                select(ItemVersion)
+                .where(ItemVersion.item_id == item_id)
+                .order_by(ItemVersion.version)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def test_soft_delete_hides_but_keeps_versions(rbac_fixture, an_item):
+    f, item = rbac_fixture, an_item
+    definition_before = dict(item.definition)
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    await store.soft_delete(item.id)
+
+    with pytest.raises(NotVisible):
+        await store.get(item.id)
+
+    # Lịch sử version là thứ DUY NHẤT phục hồi được nội dung sau khi xoá; một
+    # xoá mềm làm mất lịch sử chỉ là một lần xoá cứng chậm hơn.
+    assert await _count_versions(f.session, item.id) == 1
+
+    row = await _row(f.session, item.id)
+    assert row.state == DELETED
+    # Hàng phải còn NGUYÊN nội dung. `state='deleted'` cộng với một definition bị
+    # dọn rỗng vẫn thoả mọi khẳng định ở trên, và vẫn là mất dữ liệu.
+    assert row.definition == definition_before
+    assert row.updated_by == f.user_bob
+    # `version` KHÔNG được nhúc nhích: nó đánh số các bản nội dung, và xoá không
+    # tạo ra nội dung nào. Bump ở đây để lại một số không có hàng `item_version`
+    # tương ứng, và `restore_version` sẽ không tìm thấy nó.
+    assert row.version == 1
+
+
+async def test_a_soft_deleted_item_disappears_from_listings(rbac_fixture, an_item):
+    """`get` và `list_items` đi qua hai bộ lọc `state` KHÁC nhau — một cái trong
+    `ItemStore`, một cái trong `visible_items_select`. Bỏ cái thứ hai thì item đã
+    xoá vẫn hiện trong Explorer dù mở ra là 404."""
+    f, item = rbac_fixture, an_item
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    before = await store.list_items(f.ws_a)
+    assert item.id in {i.id for i in before.items}
+
+    await store.soft_delete(item.id)
+    after = await store.list_items(f.ws_a)
+    assert item.id not in {i.id for i in after.items}
+
+
+async def test_deleting_twice_is_a_404(rbac_fixture, an_item):
+    """Lần xoá thứ hai không được âm thầm thành công: nó sẽ dời `updated_at` của
+    một hàng mà người gọi tin là đã biến mất."""
+    f, item = rbac_fixture, an_item
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    await store.soft_delete(item.id)
+    with pytest.raises(NotVisible):
+        await store.soft_delete(item.id)
+
+
+async def test_viewer_cannot_soft_delete(rbac_fixture):
+    """Phép kiểm phân biệt `item_delete` với `item_read`; contributor có cả hai
+    nên mọi test khác ở đây mù với việc đổi hằng số."""
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("workspace", f.ws_a), role=Role.viewer)
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    with pytest.raises(Forbidden):
+        await store.soft_delete(f.item_a1)
+
+
+async def test_stranger_deleting_gets_404_not_403(rbac_fixture):
+    f = rbac_fixture
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    with pytest.raises(NotVisible):
+        await store.soft_delete(f.item_a1)
+
+
+async def test_restore_creates_a_new_version_instead_of_rewinding(rbac_fixture, an_item):
+    """Lịch sử bất biến: restore version 1 khi đang ở version 3 sinh ra version 4
+    mang nội dung của version 1. Nhờ vậy hoàn tác được cả cú hoàn tác."""
+    f, item = rbac_fixture, an_item
+    original = dict(item.definition)
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    await store.update(item.id, expected_version=1, definition={"schema_version": 1, "sql": "V2"})
+    await store.update(item.id, expected_version=2, definition={"schema_version": 1, "sql": "V3"})
+
+    restored = await store.restore_version(item.id, version=1)
+    assert restored.version == 4
+    assert restored.definition == original
+
+    # `definition` đúng MỘT MÌNH không phân biệt được "sinh version mới" với
+    # "lùi con trỏ về 1": cả hai đều để lại nội dung của version 1 trên hàng
+    # item. Thứ phân biệt được là lịch sử vẫn còn đủ BỐN mốc, và version 3 vẫn
+    # đọc lại được — tức cú hoàn tác này còn hoàn tác ngược lại được.
+    rows = await _versions(f.session, item.id)
+    assert [v.version for v in rows] == [1, 2, 3, 4]
+    assert [v.definition["sql"] for v in rows] == [original["sql"], "V2", "V3", original["sql"]]
+
+    row = await _row(f.session, item.id)
+    assert row.version == 4
+    assert row.definition_hash == canonical_hash(original)
+    assert row.updated_by == f.user_bob
+    # change_note phải nói version nào đã được phục hồi. Không có nó thì lịch sử
+    # có hai mốc nội dung giống hệt nhau và không cách nào biết cái nào là bản
+    # gốc, cái nào là bản khôi phục.
+    assert rows[3].change_note is not None
+    assert "1" in rows[3].change_note
+
+
+async def test_restore_also_restores_metadata(rbac_fixture, an_item):
+    """`item_version` lưu cả display_name/folder_path/description chính là để
+    việc này được. Khôi phục mỗi definition thì một lần đổi tên là không hoàn
+    tác được."""
+    f, item = rbac_fixture, an_item
+    original_name, original_folder = item.display_name, item.folder_path
+    assert item.description is None
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    await store.update(
+        item.id,
+        expected_version=1,
+        display_name="Đã đổi",
+        folder_path="/noi-khac",
+        description="mô tả thêm vào sau",
+    )
+
+    restored = await store.restore_version(item.id, version=1)
+    row = await _row(f.session, item.id)
+    assert (restored.display_name, restored.folder_path) == (original_name, original_folder)
+    assert (row.display_name, row.folder_path) == (original_name, original_folder)
+    # Phải quay về NULL. Một bản cài đặt copy theo kiểu `x if x is not None else
+    # giữ nguyên` khôi phục được hai trường trên nhưng KHÔNG xoá lại được mô tả,
+    # và hai khẳng định đầu vẫn xanh.
+    assert restored.description is None
+    assert row.description is None
+
+
+async def test_restore_of_unknown_version_is_404(rbac_fixture, an_item):
+    f, item = rbac_fixture, an_item
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    with pytest.raises(NotVisible):
+        await store.restore_version(item.id, version=99)
+    # Và không để lại nửa cái ghi nào.
+    assert (await _row(f.session, item.id)).version == 1
+    assert await _count_versions(f.session, item.id) == 1
+
+
+async def test_restore_cannot_reach_another_items_version(rbac_fixture, an_item):
+    """Truy vấn nguồn phải lọc theo CẢ `item_id` lẫn `version`.
+
+    Số version là cục bộ theo item, nên `WHERE version = 2` một mình khớp với
+    hàng của mọi item trong database. Mọi test restore khác chỉ có đúng một item
+    trong tầm nhìn, nên chúng mù với việc bỏ vế `item_id` — và thứ bị bỏ sót ở
+    đây là nội dung của một item trong workspace mà người gọi không hề được xem.
+    """
+    f, item = rbac_fixture, an_item
+    await f.grant(user=f.user_alice, scope=("workspace", f.ws_b), role=Role.contributor)
+    other_store = ItemStore(f.session, f.principal_alice, request_id="fixture")
+    other = await other_store.create(
+        workspace_id=f.ws_b,
+        item_type=ItemType.sql_script,
+        name="cua-nguoi-khac",
+        display_name="Của người khác",
+        definition={"schema_version": 1, "sql": "BI MAT"},
+    )
+    await other_store.update(
+        other.id, expected_version=1, definition={"schema_version": 1, "sql": "BI MAT 2"}
+    )
+    # Tiền đề: item kia CÓ version 2 còn item của bob thì không.
+    assert await _count_versions(f.session, other.id) == 2
+    assert await _count_versions(f.session, item.id) == 1
+
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    with pytest.raises(NotVisible):
+        await store.restore_version(item.id, version=2)
+    row = await _row(f.session, item.id)
+    assert row.version == 1
+    assert row.definition["sql"] != "BI MAT 2"
+
+
+async def test_restoring_a_deleted_item_is_a_404(rbac_fixture, an_item):
+    """Restore đi qua cùng một `_lock_active` với update, nên nó chỉ chạy trên
+    item đang sống. Không có thao tác bỏ-xoá trong Giai đoạn 1b; khôi phục một
+    item đã xoá là một thao tác KHÁC và chưa tồn tại."""
+    f, item = rbac_fixture, an_item
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    await store.soft_delete(item.id)
+    with pytest.raises(NotVisible):
+        await store.restore_version(item.id, version=1)
+
+
+async def test_viewer_cannot_restore(rbac_fixture):
+    """Không dùng `an_item`: fixture đó gán bob contributor, và một người mang
+    cả hai vai trò vẫn được tính là contributor — phép kiểm sẽ không kiểm gì."""
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("workspace", f.ws_a), role=Role.viewer)
+    store = ItemStore(f.session, f.principal_bob, request_id="r1")
+    with pytest.raises(Forbidden):
+        await store.restore_version(f.item_a1, version=1)
