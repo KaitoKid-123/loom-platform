@@ -19,7 +19,7 @@ from sqlalchemy import ColumnElement, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_api.models import Item, RoleAssignment, Workspace
-from loom_core.roles import Role, max_role
+from loom_core.roles import Action, Role, allows, max_role
 from loom_core.schemas import Principal
 
 # Một CỘT SQL, không phải một giá trị. `Item.id` là InstrumentedAttribute còn
@@ -128,6 +128,38 @@ class PermissionService:
 
     async def effective_role_for_workspace(self, workspace_id: uuid.UUID) -> Role | None:
         return await self._cached("workspace", workspace_id, self._query_workspace_roles)
+
+    async def require_item(self, item_id: uuid.UUID, action: Action) -> Role:
+        role = await self.effective_role_for_item(item_id)
+        return self._enforce(role, action)
+
+    async def require_workspace(self, workspace_id: uuid.UUID, action: Action) -> Role:
+        role = await self.effective_role_for_workspace(workspace_id)
+        return self._enforce(role, action)
+
+    def _enforce(self, role: Role | None, action: Action) -> Role:
+        """Hai bậc, và thứ tự quan trọng.
+
+        Không có vai trò nào → 404: principal không ĐỌC được tài nguyên, nên với
+        họ nó không tồn tại. Trả 403 là xác nhận nó có thật.
+
+        Có vai trò nhưng không đủ cho hành động → 403: họ thấy được tài nguyên
+        rồi, nên nói 404 lúc này là gây hiểu nhầm là nó vừa biến mất.
+
+        Gộp hai nhánh thành `if role is None or not allows(...)` trông như một
+        phép rút gọn. Nó là một lỗ rò rỉ thông tin: tên item mang nội dung
+        (`acquisition_2026_finance`), và 403 cho một id đoán được là câu trả lời
+        "có, thứ đó tồn tại".
+
+        Trả về vai trò chứ không trả None: chỗ gọi thường cần biết mình được
+        phép tới đâu ngay sau khi đi qua cửa, và bắt nó hỏi lại là mời gọi một
+        lần kiểm thứ hai không khớp lần đầu.
+        """
+        if role is None:
+            raise NotVisible
+        if not allows(role, action):
+            raise Forbidden
+        return role
 
     async def _cached(
         self,

@@ -10,8 +10,8 @@ import uuid
 import pytest
 
 from loom_api.models import DEFAULT_TENANT_ID
-from loom_api.permissions import PermissionService
-from loom_core.roles import Role
+from loom_api.permissions import Forbidden, NotVisible, PermissionService
+from loom_core.roles import Action, Role
 from loom_core.schemas import Principal
 
 from .conftest import RbacFixture
@@ -338,3 +338,124 @@ async def test_two_services_in_one_request_do_not_share_a_cache(
     assert await alice.effective_role_for_item(f.item_a1) is Role.admin
     assert await bob.effective_role_for_item(f.item_a1) is None
     assert await alice.effective_role_for_item(f.item_a1) is Role.admin
+
+
+# ------------------------------------------------- Task 10: require(), 404 vs 403
+
+
+async def test_require_raises_not_visible_when_no_read_access(rbac_fixture: RbacFixture) -> None:
+    """404 chứ không 403: trả 403 cho item không được đọc là tiết lộ sự tồn tại
+    của nó, mà tên item thường mang thông tin."""
+    f = rbac_fixture
+    perms = PermissionService(f.session, f.principal_bob)
+    with pytest.raises(NotVisible) as exc:
+        await perms.require_item(f.item_a1, Action.item_read)
+    assert exc.value.status_code == 404
+
+
+async def test_require_raises_not_visible_for_an_action_the_role_would_not_allow_either(
+    rbac_fixture: RbacFixture,
+) -> None:
+    """Thứ tự hai nhánh: KHÔNG CÓ VAI TRÒ được trả lời trước, kể cả khi hành
+    động được hỏi cũng là hành động mà một vai trò bất kỳ cũng không đủ.
+
+    Gộp hai nhánh thành `if role is None or not allows(...): raise Forbidden`
+    trông như một phép rút gọn và làm chính câu này trả 403 — tức là xác nhận
+    item có thật cho một người không được phép biết điều đó.
+    """
+    f = rbac_fixture
+    perms = PermissionService(f.session, f.principal_bob)
+    with pytest.raises(NotVisible) as exc:
+        await perms.require_item(f.item_a1, Action.item_delete)
+    assert exc.value.status_code == 404
+
+
+async def test_require_raises_not_visible_for_an_id_that_does_not_exist(
+    rbac_fixture: RbacFixture,
+) -> None:
+    """Và một id không tồn tại phải KHÔNG phân biệt được với một id tồn tại mà
+    người này không được đọc — cùng ngoại lệ, cùng câu chữ. Hai câu trả lời khác
+    nhau ở đây là một oracle dò id."""
+    f = rbac_fixture
+    perms = PermissionService(f.session, f.principal_bob)
+    with pytest.raises(NotVisible) as unknown:
+        await perms.require_item(uuid.uuid4(), Action.item_read)
+    with pytest.raises(NotVisible) as hidden:
+        await perms.require_item(f.item_a1, Action.item_read)
+    assert (unknown.value.status_code, unknown.value.detail) == (
+        hidden.value.status_code,
+        hidden.value.detail,
+    )
+
+
+async def test_require_raises_forbidden_when_readable_but_not_allowed(
+    rbac_fixture: RbacFixture,
+) -> None:
+    """403 chỉ khi ĐỌC ĐƯỢC nhưng không được làm hành động đó. viewer thấy item
+    nhưng không sửa được — nói 404 ở đây là gây hiểu nhầm là item không tồn tại."""
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("item", f.item_a1), role=Role.viewer)
+    perms = PermissionService(f.session, f.principal_bob)
+    await perms.require_item(f.item_a1, Action.item_read)  # không raise
+    with pytest.raises(Forbidden) as exc:
+        await perms.require_item(f.item_a1, Action.item_update)
+    assert exc.value.status_code == 403
+
+
+async def test_require_returns_the_effective_role(rbac_fixture: RbacFixture) -> None:
+    """Giá trị trả về không phải trang trí: Giai đoạn 1b quyết định trường nào
+    được ghi ra dựa trên vai trò mà `require_*` vừa trả. Một cài đặt trả hằng số
+    `Role.viewer` đi qua mọi test chỉ kiểm ngoại lệ."""
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("workspace", f.ws_a), role=Role.member)
+    perms = PermissionService(f.session, f.principal_bob)
+    assert await perms.require_item(f.item_a1, Action.item_read) is Role.member
+    assert await perms.require_workspace(f.ws_a, Action.workspace_read) is Role.member
+
+    await f.grant(user=f.user_alice, scope=("workspace", f.ws_a), role=Role.admin)
+    alice = PermissionService(f.session, f.principal_alice)
+    assert await alice.require_item(f.item_a1, Action.item_read) is Role.admin
+
+
+async def test_require_checks_the_action_it_was_given(rbac_fixture: RbacFixture) -> None:
+    """`allows(role, action)` phải đọc ĐÚNG hành động được truyền vào. Một cài
+    đặt luôn hỏi `Action.item_read` cho phép mọi vai trò làm mọi việc, và mọi
+    test chỉ dùng item_read vẫn xanh."""
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("workspace", f.ws_a), role=Role.contributor)
+    perms = PermissionService(f.session, f.principal_bob)
+    # contributor: sửa item được, sửa workspace thì không.
+    assert await perms.require_item(f.item_a1, Action.item_update) is Role.contributor
+    with pytest.raises(Forbidden):
+        await perms.require_workspace(f.ws_a, Action.workspace_update)
+
+
+async def test_require_workspace_follows_the_same_rule(rbac_fixture: RbacFixture) -> None:
+    f = rbac_fixture
+    perms_bob = PermissionService(f.session, f.principal_bob)
+    with pytest.raises(NotVisible):
+        await perms_bob.require_workspace(f.ws_a, Action.workspace_read)
+
+    await f.grant(user=f.user_bob, scope=("workspace", f.ws_a), role=Role.member)
+    # Thực thể MỚI: `perms_bob` đã cache "không có vai trò" cho ws_a, và cache
+    # là phạm vi request có chủ đích. Xem
+    # test_a_grant_made_after_a_cached_answer_is_visible_to_the_next_request.
+    perms = PermissionService(f.session, f.principal_bob)
+    await perms.require_workspace(f.ws_a, Action.workspace_update)
+    with pytest.raises(Forbidden):
+        await perms.require_workspace(f.ws_a, Action.workspace_delete)
+
+
+async def test_require_asks_the_right_question_for_each_resource_kind(
+    rbac_fixture: RbacFixture,
+) -> None:
+    """`require_workspace` phải đi qua `effective_role_for_workspace`. Nếu nó
+    gọi nhầm sang đường item thì một quyền trên item leo lên thành quyền trên
+    workspace — và ngược lại, một workspace id đi vào truy vấn item không khớp
+    hàng nào nên mọi thứ thành 404, một lỗi dễ thấy hơn nhiều."""
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("item", f.item_a1), role=Role.admin)
+    perms = PermissionService(f.session, f.principal_bob)
+    assert await perms.require_item(f.item_a1, Action.item_read) is Role.admin
+    with pytest.raises(NotVisible):
+        await perms.require_workspace(f.ws_a, Action.workspace_read)
