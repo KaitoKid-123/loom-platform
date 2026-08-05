@@ -11,7 +11,7 @@ from loom_api.logging import configure_logging
 from loom_api.middleware import RequestContextMiddleware
 from loom_api.oidc_client import OIDCClient
 from loom_api.oidc_verifier import IdTokenClaims, OIDCVerifier
-from loom_api.routers import auth, health, items, roles, workspaces
+from loom_api.routers import auth, health, items, roles, search, workspaces
 from loom_api.user_store import PostgresUserStore, UserStore
 from loom_core.config import get_settings
 
@@ -92,4 +92,5 @@ def create_app(
     app.include_router(workspaces.router, prefix="/api/v1")
     app.include_router(items.router, prefix="/api/v1")
     app.include_router(roles.router, prefix="/api/v1")
+    app.include_router(search.router, prefix="/api/v1")
     return app

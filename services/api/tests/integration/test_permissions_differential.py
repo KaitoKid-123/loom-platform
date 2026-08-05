@@ -51,6 +51,7 @@ from loom_api.permissions import (
     visible_items_select,
     visible_workspaces_select,
 )
+from loom_api.routers.search import search_items_select
 from loom_core.roles import ACTION_MATRIX, Action, Role
 from loom_core.schemas import Principal
 
@@ -454,6 +455,57 @@ async def test_the_two_paths_keep_their_intended_containment_on_workspaces(
         i for i in via_check_items & world.listable() if world.workspace_of[i] not in via_sql_ws
     }
     assert orphans == set(), f"seed={seed}: item liệt kê được nhưng workspace của nó thì không"
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+async def test_search_agrees_with_the_per_item_check(db_session: AsyncSession, seed: int) -> None:
+    """`search` là endpoint DỄ RÒ RỈ NHẤT: không có `workspace_id` trong đường dẫn
+    nên không có gì nhắc người viết phải lọc quyền. Spec mục 6 đòi nó có mặt ở đây.
+
+    Gọi ĐÚNG `search_items_select` mà router dùng, không dựng lại biểu thức: một
+    test tự ghép `visible_items_select` với một bộ lọc văn bản chỉ chứng minh rằng
+    bản ghép trong test là đúng, và sẽ vẫn xanh sau khi ai đó sửa router thành
+    `select(Item)`.
+
+    Term `"i"` khớp MỌI item trong thế giới này — chúng được đặt tên `i{index}-…`
+    (xem `_build_world`) — nên quan hệ đúng là ĐẲNG THỨC với đường SQL, không phải
+    một quan hệ tập con. Tập con là câu mà một endpoint trả rỗng cũng thoả.
+    """
+    rng = _rng(seed)
+    world = await _build_world(db_session, rng)
+    perms = PermissionService(db_session, world.principal)
+
+    via_check = await _readable_items(perms, world)
+    listable = world.listable()
+    via_search = {
+        row.id
+        for row in (await db_session.execute(search_items_select(world.principal, "i")))
+        .scalars()
+        .all()
+    }
+
+    assert via_search == via_check & listable, (
+        f"seed={seed} search KHÔNG khớp phép kiểm từng item\n"
+        f"  chỉ search thấy: {sorted(via_search - (via_check & listable))}\n"
+        f"  search bỏ sót  : {sorted((via_check & listable) - via_search)}"
+    )
+
+    # Tiền đề của đẳng thức trên, đọc từ DỮ LIỆU THẬT: term `"i"` phải khớp mọi item
+    # mà đường SQL trả về. Nếu quy ước đặt tên trong `_build_world` đổi, bộ lọc văn
+    # bản sẽ bắt đầu loại bỏ hàng và câu khẳng định kia thoái hoá thành một quan hệ
+    # tập con — thứ mà một endpoint trả rỗng cũng thoả. Dòng này đỏ TRƯỚC, kèm lý do
+    # thật, thay vì để đẳng thức kia đỏ với một thông báo nói về phân quyền.
+    via_sql = {
+        row.id
+        for row in (await db_session.execute(visible_items_select(world.principal))).scalars().all()
+    }
+    assert via_search == via_sql, "term 'i' không còn khớp mọi item — quy ước đặt tên đã đổi"
+
+    # phủ: `search_items_select` bọc `visible_items_select`, nên nó cũng phải thừa
+    # hưởng bộ lọc `state`. Không có hai dòng này thì đẳng thức trên xanh kể cả với
+    # một bản bỏ bộ lọc đó, vì `& listable` đã trừ chúng khỏi vế phải.
+    assert world.shared_deleted_item not in via_search
+    assert world.item_in_dead_workspace not in via_search
 
 
 def test_the_differential_test_rests_on_role_monotonicity() -> None:
