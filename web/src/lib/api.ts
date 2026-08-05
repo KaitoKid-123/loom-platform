@@ -115,6 +115,23 @@ export async function apiPostJsonWithEtag<T>(
   return { data: (await response.json()) as T, etag: response.headers.get('etag') }
 }
 
+/**
+ * `PUT` trả 204 — không có thân phản hồi để đọc.
+ *
+ * Đi qua `raise()` như mọi thứ khác, nên một 403 từ cổng chống leo thang quyền thành
+ * `ProblemError` mang nguyên văn câu của server ("vai trò member không gán được vai trò
+ * admin"), thay vì một lỗi chung mà người dùng không rút ra được gì.
+ */
+export async function apiPut(path: string, body: unknown): Promise<void> {
+  const response = await fetch(path, {
+    method: 'PUT',
+    credentials: 'include',
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) await raise(response, path)
+}
+
 export async function apiDelete(path: string): Promise<void> {
   // Không body, và do đó KHÔNG Content-Type: một DELETE mang Content-Type mà không có
   // body làm vài proxy chờ đọc body trước khi chuyển tiếp. Endpoint thu quyền nhận

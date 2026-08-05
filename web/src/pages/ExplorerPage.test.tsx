@@ -297,3 +297,28 @@ describe('ExplorerPage — tên gọi của control', () => {
     expect(screen.getByLabelText('Loại item')).toHaveAttribute('id', 'new-type')
   })
 })
+
+describe('ExplorerPage — hộp thoại phân quyền', () => {
+  it('mở theo URL ?perms=1, không theo state React', async () => {
+    // Cùng lý do như hộp thoại tạo item: deep-link được và sống qua F5.
+    stubItems([item('x')])
+    renderPage('?perms=1')
+    expect(await screen.findByRole('dialog', { name: 'Phân quyền' })).toBeInTheDocument()
+  })
+
+  it('bấm Phân quyền đưa ?perms=1 vào URL', async () => {
+    stubItems([item('x')])
+    const { router } = renderPage()
+    await screen.findByText('x')
+    await userEvent.click(screen.getByRole('button', { name: 'Phân quyền' }))
+    expect(router.state.location.search).toBe('?perms=1')
+  })
+
+  it('đóng gỡ ?perms=1 và giữ nguyên bộ lọc đang có', async () => {
+    // Gỡ cả query string sẽ làm người dùng mất bộ lọc chỉ vì họ mở rồi đóng một hộp thoại.
+    stubItems([item('x', '/', 'pipeline')])
+    const { router } = renderPage('?type=pipeline&perms=1')
+    await userEvent.click(await screen.findByRole('button', { name: 'Đóng' }))
+    expect(router.state.location.search).toBe('?type=pipeline')
+  })
+})
