@@ -5,6 +5,10 @@ import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+# Cùng thư mục test, không phải package: keypair + hàm ký của test_oidc_verifier
+# dùng lại nguyên vẹn ở đây để chuỗi E2E dưới đây chạy trên một token KÝ THẬT.
+from test_oidc_verifier import make_keypair, sign
+
 from loom_api.main import create_app
 from loom_api.oidc_verifier import IdTokenClaims, InvalidIdToken
 from loom_core.schemas import Principal
@@ -263,6 +267,79 @@ async def test_me_returns_401_when_session_row_is_unreconstructable() -> None:
             client.cookies.set("loom_session", "whatever-session-id", domain="loom.localhost")
             response = await client.get("/api/v1/me")
             assert response.status_code == 401
+
+
+# --------------------------------------------------------------------------
+# Claim `groups` méo mó, đi HẾT đường thật: /auth/callback -> exchange_code ->
+# OIDCVerifier THẬT (không phải verify_id_token giả) -> user_store.
+#
+# `groups: 123` từng ném TypeError bên trong verify(), sau khối try/except của
+# nó, nên `except (TokenExchangeError, InvalidIdToken)` trong callback không
+# bắt được và người dùng nhận HTTP 500 text/plain — trên chính đường đăng nhập,
+# nơi mọi nhánh lỗi phải trả về một trang điều hướng được. Test này khoá lại
+# quy tắc đó cho MỌI hình dạng claim, không chỉ ca đã biết.
+# --------------------------------------------------------------------------
+
+# Giá trị mặc định của Settings, đúng bằng cái OIDCVerifier mà create_app() tự
+# dựng sẽ dùng. Khớp với iss/aud của token ký trong test_oidc_verifier.
+_ISSUER = "http://loom.localhost/dex"
+_CLIENT_ID = "loom"
+
+
+def _signed_transport(id_token: str, jwks: dict[str, object]) -> httpx.MockTransport:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("openid-configuration"):
+            return httpx.Response(200, json=DISCOVERY)
+        if request.url.path.endswith("/token"):
+            return httpx.Response(200, json={"id_token": id_token, "refresh_token": "rt"})
+        if request.url.path.endswith("/keys"):
+            return httpx.Response(200, json=jwks)
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handle)
+
+
+@pytest.mark.parametrize(
+    ("groups_claim", "expected_groups"),
+    [
+        ("admins", ()),  # chuỗi trần — từng thành ('a','d','i','m','n','s')
+        ("admins data-eng", ()),  # phân cách bởi dấu cách, hình dạng IdP thường gặp
+        (123, ()),  # không iterate được — từng là TypeError -> 500
+        (None, ()),  # null hợp lệ, nghĩa là không nhóm
+        ({"admins": True}, ()),  # object JSON: iterate ra KHOÁ
+        (["admins", 7, None, ""], ("admins",)),  # phần tử rác bị bỏ, phần tốt giữ lại
+        (["admins", "data-eng"], ("admins", "data-eng")),  # ca đúng, để so sánh
+    ],
+    ids=["bare-string", "space-delimited", "integer", "null", "object", "mixed-list", "valid"],
+)
+async def test_callback_survives_any_shape_of_groups_claim(
+    store: FakeUserStore, groups_claim: object, expected_groups: tuple[str, ...]
+) -> None:
+    key, jwks = make_keypair()
+    token = sign(key, iss=_ISSUER, aud=_CLIENT_ID, groups=groups_claim)
+
+    # verify_id_token KHÔNG được tiêm: create_app() dựng OIDCVerifier thật, nên
+    # chuỗi được kiểm là chuỗi chạy trong production.
+    app = create_app(
+        user_store=store,
+        oidc_http=httpx.AsyncClient(transport=_signed_transport(token, jwks)),
+    )
+    async with app.router.lifespan_context(app):
+        # raise_app_exceptions=False: một exception lọt ra khỏi handler phải
+        # hiện ra ở đây dưới dạng 500 để assert bên dưới bắt được, chứ không
+        # phải nổ ngược vào test và cho một traceback khó đọc.
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://loom.localhost") as client:
+            login = await client.get("/api/v1/auth/login")
+            state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+
+            response = await client.get(f"/api/v1/auth/callback?code=c&state={state}")
+
+    assert response.status_code != 500, response.text
+    assert response.status_code == 307
+    assert response.headers["location"] == "/"
+    assert client.cookies.get("loom_session")
+    assert store.upserts[0].groups == expected_groups
 
 
 async def test_logout_clears_session(app_client: AsyncClient) -> None:

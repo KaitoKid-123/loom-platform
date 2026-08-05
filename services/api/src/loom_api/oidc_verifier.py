@@ -46,6 +46,45 @@ class IdTokenClaims:
             raise InvalidIdToken("empty_subject")
 
 
+def _normalise_groups(raw: object) -> tuple[str, ...]:
+    """Chuẩn hoá claim `groups`. Đây là điểm DUY NHẤT nhóm đi từ IdP vào hệ thống.
+
+    Claim này KHÔNG được ép kiểu. Một chuỗi trần `"admins"` — hình dạng thường
+    gặp khi IdP phát nhóm phân cách bởi dấu cách — cũng iterate được, và
+    `{str(g) for g in raw}` biến nó thành sáu nhóm một-ký-tự trông hoàn toàn hợp
+    lệ. Chúng đi vào `user_session.groups` rồi thành principal của RBAC, nên một
+    grant cho `role_assignment.principal_group = 'a'` sẽ âm thầm khớp.
+    `Principal._normalise` có chốt cho đúng ca này, nhưng chốt đó vô dụng nếu
+    chỗ này đã làm phẳng chuỗi trước khi Principal kịp nhìn thấy nó.
+
+    Claim sai kiểu được coi là VẮNG MẶT (không nhóm) chứ không làm hỏng đăng
+    nhập. Lý do: `groups` là claim tuỳ chọn — Dex chưa phát nó tới tận Task 25,
+    và "không nhóm" vì thế đã là một trạng thái được định nghĩa sẵn, fail-closed
+    với RBAC. Biến một claim tuỳ chọn sai kiểu thành `InvalidIdToken` sẽ biến
+    một cấu hình sai ở phía IdP thành sự cố KHÔNG AI ĐĂNG NHẬP ĐƯỢC, tức là đổi
+    một lỗi phân quyền lấy một lỗi xác thực nặng hơn. Dòng log dưới đây là thứ
+    để người vận hành chẩn đoán, và nó chỉ phát ra khi claim thật sự sai kiểu —
+    `null` (hay vắng mặt) là hợp lệ và phải im lặng.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        # `list` chứ không phải `Iterable`: claim tới từ JSON, nên mảng JSON là
+        # `list` và không gì khác. str, int, dict đều rơi vào đây.
+        logger.warning("oidc.groups_claim_not_a_list", claim_type=type(raw).__name__)
+        return ()
+
+    # Phần tử không phải chuỗi (hay chuỗi rỗng) bị BỎ, không làm đăng nhập thất
+    # bại: một claim lệch chuẩn ở phía IdP không được chặn người dùng đăng nhập.
+    # Nhưng nó cũng không được ép kiểu và đi vào session — `str(None)` là
+    # `'None'` và `str(5)` là `'5'`, hai tên nhóm hợp lệ mà không ai định nghĩa,
+    # và `principal_group = ''` trong role_assignment khớp với một tên rỗng.
+    invalid = [g for g in raw if not isinstance(g, str) or not g.strip()]
+    if invalid:
+        logger.warning("oidc.groups_claim_has_invalid_entries", count=len(invalid))
+    return tuple(sorted({g.strip() for g in raw if isinstance(g, str) and g.strip()}))
+
+
 class OIDCVerifier:
     def __init__(
         self,
@@ -113,6 +152,12 @@ class OIDCVerifier:
             raise InvalidIdToken("missing_kid")
 
         key = await self._key_for(kid)
+        # Việc ĐỌC CLAIM nằm trong cùng try với jwt.decode, không phải sau nó.
+        # Claim là dữ liệu do IdP điều khiển và chưa được kiểm kiểu: `groups: 123`
+        # từng ném TypeError ở đây, tức là SAU cái catch-all bên dưới, nên nó
+        # thoát khỏi verify(), thoát tiếp qua `except (TokenExchangeError,
+        # InvalidIdToken)` trong callback và thành 500 text/plain — đúng thứ mà
+        # catch-all này tồn tại để chặn.
         try:
             payload = jwt.decode(
                 id_token,
@@ -122,8 +167,21 @@ class OIDCVerifier:
                 issuer=self._issuer,
                 options={"require": ["exp", "iat", "iss", "aud", "sub"]},
             )
+            subject = str(payload["sub"])
+            email = str(payload.get("email") or "")
+            claims = IdTokenClaims(
+                subject=subject,
+                email=email,
+                display_name=str(payload.get("name") or email or subject),
+                groups=_normalise_groups(payload.get("groups")),
+            )
         except jwt.PyJWTError as exc:
             raise InvalidIdToken("verification_failed") from exc
+        except InvalidIdToken:
+            # Đã là InvalidIdToken với lý do RIÊNG của nó (IdTokenClaims ném
+            # "empty_subject"). Nuốt nó vào catch-all bên dưới sẽ ghi đè lý do
+            # thành "unexpected_error" và xoá mất chẩn đoán trong log.
+            raise
         except Exception as exc:
             # PyJWT ném được cả thứ không phải PyJWTError (ví dụ TypeError từ
             # force_bytes khi khoá sai kiểu). Không để nó thoát ra thành 500 —
@@ -133,17 +191,4 @@ class OIDCVerifier:
             logger.warning("oidc.verify_unexpected_error", error=type(exc).__name__)
             raise InvalidIdToken("unexpected_error") from exc
 
-        subject = str(payload["sub"])
-        email = str(payload.get("email") or "")
-        # Phần tử rỗng bị BỎ, không làm đăng nhập thất bại: một claim lệch chuẩn ở
-        # phía IdP không được chặn người dùng đăng nhập. Nhưng nó cũng không được
-        # đi vào session — `principal_group = ''` trong role_assignment sẽ khớp với
-        # một nhóm tên rỗng, nên Principal từ chối hẳn cái tên đó.
-        raw_groups = payload.get("groups") or []
-        groups = tuple(sorted({str(g).strip() for g in raw_groups if str(g).strip()}))
-        return IdTokenClaims(
-            subject=subject,
-            email=email,
-            display_name=str(payload.get("name") or email or subject),
-            groups=groups,
-        )
+        return claims

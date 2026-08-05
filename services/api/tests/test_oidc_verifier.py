@@ -8,6 +8,7 @@ from typing import Any
 
 import jwt
 import pytest
+import structlog.testing
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
@@ -226,6 +227,110 @@ async def test_missing_groups_claim_means_no_groups() -> None:
     và điều đó phải là "không có nhóm", không phải một lỗi."""
     key, jwks = make_keypair()
     assert (await verifier_for(jwks).verify(sign(key))).groups == ()
+
+
+# --------------------------------------------------------------------------
+# Claim `groups` là dữ liệu do IdP điều khiển và KHÔNG có kiểu. Cả khối dưới
+# đây tồn tại vì hai lỗi thật, mỗi lỗi tìm được bằng một token ký thật:
+#
+#   `{str(g) for g in raw}` trên một chuỗi trần `"admins"` cho ra sáu nhóm
+#   một-ký-tự trông hợp lệ — chốt của Principal không cứu được vì verify() đã
+#   làm phẳng chuỗi trước khi Principal nhìn thấy nó;
+#
+#   `groups: 123` ném TypeError SAU khối try/except của jwt.decode, nên nó
+#   thoát khỏi verify() và thành 500 text/plain ở /auth/callback.
+#
+# Mỗi hình dạng dưới đây phải có một kết cục ĐƯỢC ĐỊNH NGHĨA. Không ca nào
+# được phép ném thứ gì ngoài InvalidIdToken.
+# --------------------------------------------------------------------------
+
+
+async def test_bare_string_groups_claim_is_not_split_into_characters() -> None:
+    """Lỗ hổng: `"admins"` iterate ra `('a','d','i','m','n','s')`. Sáu nhóm
+    một-ký-tự đó đi vào user_session.groups và thành principal của RBAC ở
+    Task 13 — một grant cho nhóm tên `a` sẽ âm thầm áp dụng."""
+    key, jwks = make_keypair()
+    claims = await verifier_for(jwks).verify(sign(key, groups="admins"))
+    assert claims.groups == ()
+    assert "a" not in claims.groups
+
+
+async def test_space_delimited_groups_claim_yields_no_groups() -> None:
+    """Nhóm phân cách bởi dấu cách là hình dạng claim thường gặp ở IdP. Nó
+    KHÔNG được tách thành nhóm — kể cả tách theo dấu cách, vì đoán định dạng của
+    một claim sai kiểu là tự bịa ra quyền."""
+    key, jwks = make_keypair()
+    claims = await verifier_for(jwks).verify(sign(key, groups="admins data-eng"))
+    assert claims.groups == ()
+
+
+async def test_non_iterable_groups_claim_is_invalid_id_token_not_type_error() -> None:
+    """`groups: 123` là ca đã thành HTTP 500 text/plain ở /auth/callback: một
+    TypeError, không phải InvalidIdToken, nên `except (TokenExchangeError,
+    InvalidIdToken)` của callback không bắt được."""
+    key, jwks = make_keypair()
+    claims = await verifier_for(jwks).verify(sign(key, groups=123))
+    assert claims.groups == ()
+
+
+async def test_dict_groups_claim_yields_no_groups() -> None:
+    """Một object JSON cũng iterate được — ra KHOÁ của nó. `{"admins": true}`
+    sẽ thành nhóm `admins` mà không ai cấp."""
+    key, jwks = make_keypair()
+    claims = await verifier_for(jwks).verify(sign(key, groups={"admins": True}))
+    assert claims.groups == ()
+
+
+async def test_null_groups_claim_means_no_groups_and_is_not_reported_as_malformed() -> None:
+    """`groups: null` là "không có nhóm", KHÔNG phải claim hỏng. Trước đây điều
+    này phụ thuộc vào `or []`; giờ nó là một nhánh tường minh, và test khẳng
+    định cả sự IM LẶNG — bỏ nhánh `raw is None` thì `null` rơi vào phép kiểm
+    not-a-list và bắn cảnh báo giả cho một token hoàn toàn bình thường."""
+    key, jwks = make_keypair()
+    with structlog.testing.capture_logs() as logs:
+        claims = await verifier_for(jwks).verify(sign(key, groups=None))
+    assert claims.groups == ()
+    assert [entry["event"] for entry in logs] == []
+
+
+async def test_malformed_groups_claim_is_logged_for_the_operator() -> None:
+    """Đối trọng của test trên: claim sai kiểu bị bỏ qua ÂM THẦM thì RBAC hỏng
+    theo kiểu không chẩn đoán được ("sao chẳng ai có nhóm nào?"). Kết cục là
+    fail-closed, nhưng phải có dấu vết."""
+    key, jwks = make_keypair()
+    with structlog.testing.capture_logs() as logs:
+        await verifier_for(jwks).verify(sign(key, groups="admins"))
+    assert [entry["event"] for entry in logs] == ["oidc.groups_claim_not_a_list"]
+    assert logs[0]["claim_type"] == "str"
+
+
+async def test_non_string_entries_in_the_groups_list_are_dropped_not_stringified() -> None:
+    """`str(5)` là `'5'` và `str(None)` là `'None'` — hai tên nhóm hợp lệ mà
+    không ai định nghĩa. Bỏ hẳn, giống hệt quy tắc đã có cho phần tử rỗng, và
+    KHÔNG làm đăng nhập thất bại."""
+    key, jwks = make_keypair()
+    claims = await verifier_for(jwks).verify(sign(key, groups=["admins", 5, None, True]))
+    assert claims.groups == ("admins",)
+
+
+async def test_groups_list_containing_an_empty_string_keeps_the_rest() -> None:
+    """Trùng ý với test_blank_group_names_in_the_token_are_dropped nhưng phát
+    biểu ở dạng ca biên mà review đòi: danh sách CÓ phần tử rỗng vẫn đăng nhập
+    được, và tên rỗng không đi vào session."""
+    key, jwks = make_keypair()
+    claims = await verifier_for(jwks).verify(sign(key, groups=["", "admins"]))
+    assert claims.groups == ("admins",)
+
+
+async def test_empty_subject_keeps_its_own_reason_through_the_widened_try() -> None:
+    """Việc đọc claim đã chuyển VÀO trong try của jwt.decode. Không có nhánh
+    `except InvalidIdToken: raise`, `IdTokenClaims.__post_init__` ném
+    "empty_subject" sẽ bị catch-all ghi đè thành "unexpected_error" và chẩn đoán
+    trong log biến mất."""
+    key, jwks = make_keypair()
+    with pytest.raises(InvalidIdToken) as caught:
+        await verifier_for(jwks).verify(sign(key, sub=""))
+    assert caught.value.reason == "empty_subject"
 
 
 async def test_concurrent_unknown_kid_triggers_single_fetch() -> None:
