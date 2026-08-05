@@ -272,7 +272,22 @@ class RoleAssignment(Base):
         # `name` CHỈ là phần đuôi: NAMING_CONVENTION["ck"] đã có sẵn tiền tố
         # "ck_%(table_name)s_". Truyền tên đầy đủ vào đây thì nó bị ghép hai lần
         # và constraint mang tên ck_role_assignment_ck_role_assignment_...
-        CheckConstraint("principal_type IN ('user','group')", name="principal_type"),
+        #
+        # Mạnh hơn `principal_type IN ('user','group')`: buộc principal_type
+        # khớp với CỘT nào thật sự có giá trị. Không có vế này thì
+        # principal_type='group' cùng với principal_user_id vẫn hợp lệ. Đó
+        # KHÔNG phải lỗ hổng phân quyền — effective_role khớp thẳng theo cột,
+        # không đọc principal_type — nhưng Giai đoạn 1b trả principal_type ra
+        # trong danh sách quyền, nên giao diện sẽ mô tả một grant là "của nhóm"
+        # trong khi nó cấp cho một người. Đóng lúc bảng còn rỗng thì miễn phí;
+        # đóng sau thì phải dọn dữ liệu trước.
+        CheckConstraint(
+            "(principal_type = 'user'"
+            " AND principal_user_id IS NOT NULL AND principal_group IS NULL)"
+            " OR (principal_type = 'group'"
+            " AND principal_group IS NOT NULL AND principal_user_id IS NULL)",
+            name="principal_type",
+        ),
         CheckConstraint(
             "scope_type IN ('tenant','domain','workspace','item')",
             name="scope_type",

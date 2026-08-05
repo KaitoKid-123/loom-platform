@@ -63,6 +63,18 @@ migrate:  ## Chạy migration lên head (chạy từ host tới Aiven, KHÔNG qu
 migration:  ## Sinh migration mới: make migration m="mô tả"
 	cd services/api && uv run alembic revision -m "$(m)"
 
+.PHONY: check-migrations
+check-migrations:  ## Chặn model và migration lệch nhau (cần database, LOOM_DB_* trong env)
+	@# Giai đoạn 0 từng có index trong migration mà thiếu trong model, nên
+	@# autogenerate lần sau sẽ DROP chúng. `alembic check` so model với database.
+	@#
+	@# LƯU Ý: `alembic check` KHÔNG so server_default (migrations/env.py không đặt
+	@# compare_server_default), nên xanh ở đây KHÔNG chứng minh mọi server_default
+	@# khớp. Nó cũng không so CHECK constraint. Hai khoảng đó được
+	@# tests/integration/test_migrations.py bịt bằng cách đọc thẳng pg_constraint
+	@# và bằng phép kiểm hành vi trên schema đã migrate.
+	cd services/api && uv run alembic check
+
 .PHONY: build-api
 build-api:  ## Build image loom-api
 	docker build -f services/api/Dockerfile -t loom/api:$(IMAGE_TAG) .

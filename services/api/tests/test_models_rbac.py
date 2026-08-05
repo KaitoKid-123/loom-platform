@@ -47,8 +47,28 @@ def test_role_and_scope_type_are_constrained() -> None:
     assert scope_sql.split()[0] == "scope_type"
 
     principal_sql = checks["ck_role_assignment_principal_type"]
-    for principal in ("user", "group"):
-        assert principal in principal_sql
+    assert _literals(principal_sql) == {"user", "group"}
+
+
+def test_principal_type_must_match_the_column_that_is_set() -> None:
+    """`principal_type IN ('user','group')` một mình cho phép
+    principal_type='group' trên một hàng có principal_user_id — hàng đó CẤP
+    quyền cho một người nhưng TỰ MÔ TẢ là của nhóm.
+
+    Không phải lỗ hổng phân quyền: effective_role khớp thẳng principal_user_id
+    và principal_group, nó không đọc principal_type. Nhưng danh sách quyền của
+    Giai đoạn 1b trả principal_type ra cho giao diện, nên người quản trị sẽ đọc
+    được một mô tả sai về chính cái grant họ đang xem — và im lặng.
+
+    So khớp CHÍNH XÁC chứ không tìm chuỗi con: giữ được vế 'user' mà đánh rơi
+    vế 'group' thì mọi phép kiểm chứa-chuỗi-con vẫn xanh."""
+    sql = re.sub(r"\s+", "", _checks()["ck_role_assignment_principal_type"])
+    assert sql == (
+        "(principal_type='user'"
+        "ANDprincipal_user_idISNOTNULLANDprincipal_groupISNULL)"
+        "OR(principal_type='group'"
+        "ANDprincipal_groupISNOTNULLANDprincipal_user_idISNULL)"
+    )
 
 
 def test_check_role_values_match_the_single_source_of_truth() -> None:
