@@ -345,3 +345,55 @@ async def test_revoke_of_a_missing_assignment_is_a_no_op(rbac_fixture):
     store = RoleStore(f.session, f.principal_alice)
     await store.revoke(scope=("workspace", f.ws_a), user_id=uuid.uuid4())
     assert len(await _roles_at(f.session, "workspace", f.ws_a)) == 1
+
+
+async def test_member_cannot_revoke_an_admin(rbac_fixture):
+    """QUY TẮC 3, đối xứng với quy tắc 1: chỉ thu được vai trò mình gán được.
+
+    Không có nó thì `GRANTABLE_BY` chặn member GÁN lên admin nhưng không gì chặn
+    member THU của một admin — thứ bạn không được cho, bạn lại được lấy đi.
+    Còn hai admin nên quy tắc 2 (admin cuối) KHÔNG phải là thứ chặn ở đây; test
+    này cô lập đúng quy tắc 3.
+    """
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("workspace", f.ws_a), role=Role.member)
+    await f.grant(user=f.user_alice, scope=("workspace", f.ws_a), role=Role.admin)
+    await f.grant(group="ops", scope=("workspace", f.ws_a), role=Role.admin)
+
+    store = RoleStore(f.session, f.principal_bob)
+    with pytest.raises(Forbidden):
+        await store.revoke(scope=("workspace", f.ws_a), user_id=f.user_alice)
+
+
+async def test_member_cannot_revoke_another_member(rbac_fixture):
+    """`member` không nằm trong GRANTABLE_BY[member], nên cũng không thu được."""
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("workspace", f.ws_a), role=Role.member)
+    await f.grant(user=f.user_alice, scope=("workspace", f.ws_a), role=Role.member)
+
+    store = RoleStore(f.session, f.principal_bob)
+    with pytest.raises(Forbidden):
+        await store.revoke(scope=("workspace", f.ws_a), user_id=f.user_alice)
+
+
+async def test_member_can_still_revoke_a_contributor(rbac_fixture):
+    """Chiều ngược lại — quy tắc 3 KHÔNG được chặn oan việc dọn dẹp thường ngày.
+    Member tự thêm contributor thì phải tự gỡ được, nếu không admin thành nút thắt."""
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("workspace", f.ws_a), role=Role.member)
+    await f.grant(user=f.user_alice, scope=("workspace", f.ws_a), role=Role.contributor)
+
+    store = RoleStore(f.session, f.principal_bob)
+    await store.revoke(scope=("workspace", f.ws_a), user_id=f.user_alice)
+    remaining = {r.principal_user_id for r in await store.list_roles(("workspace", f.ws_a))}
+    assert f.user_alice not in remaining
+
+
+async def test_admin_can_revoke_an_admin_when_another_remains(rbac_fixture):
+    """GRANTABLE_BY[admin] là mọi vai trò, nên quy tắc 3 không cản admin."""
+    f = rbac_fixture
+    await f.grant(user=f.user_bob, scope=("workspace", f.ws_a), role=Role.admin)
+    await f.grant(user=f.user_alice, scope=("workspace", f.ws_a), role=Role.admin)
+
+    store = RoleStore(f.session, f.principal_bob)
+    await store.revoke(scope=("workspace", f.ws_a), user_id=f.user_alice)

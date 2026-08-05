@@ -129,9 +129,35 @@ class RoleStore:
     ) -> None:
         if (user_id is None) == (group is None):
             raise HTTPException(422, "phải chỉ đúng một trong user_id hoặc group")
-        await self._require_role_grant(scope)
+        actor_role = await self._require_role_grant(scope)
         scope_type, scope_id = scope
         target = _one_principal(user_id, group)
+
+        # QUY TẮC 3 — đối xứng với quy tắc 1: chỉ thu được vai trò mình gán được.
+        #
+        # Không có nó, `GRANTABLE_BY` chặn member GÁN lên `admin` nhưng không gì
+        # chặn member THU của một admin đang có. Bất đối xứng đó nghĩa là thứ bạn
+        # không được phép cho, bạn lại được phép lấy đi. Không phải leo thang —
+        # member vẫn không thành admin được, và quy tắc 2 giữ sàn ở một admin —
+        # nhưng nó cho một member đơn phương gỡ admin của workspace xuống còn một.
+        #
+        # Dùng lại đúng `GRANTABLE_BY` của quy tắc 1, không dựng bảng thứ hai:
+        # hai bảng nói cùng một điều là hai bảng sẽ trôi khỏi nhau.
+        existing = (
+            await self._session.execute(
+                select(RoleAssignment.role).where(
+                    RoleAssignment.scope_type == scope_type,
+                    RoleAssignment.scope_id == scope_id,
+                    target,
+                )
+            )
+        ).scalars().all()
+        for role_name in existing:
+            role = Role[role_name]
+            if role not in GRANTABLE_BY[actor_role]:
+                raise Forbidden(
+                    f"vai trò {actor_role} không thu được vai trò {role}"
+                )
 
         # QUY TẮC 2, và nó phải chạy TRONG CÙNG transaction với DELETE.
         #
