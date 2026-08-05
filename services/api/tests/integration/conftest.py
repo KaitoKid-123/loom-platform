@@ -469,8 +469,20 @@ class ApiWorld:
 
 
 @pytest.fixture
-async def api_world(db_engine: AsyncEngine) -> AsyncIterator[ApiWorld]:
-    """Dữ liệu COMMIT thật, vì app mở session riêng và không thấy transaction của test."""
+async def api_world(
+    db_engine: AsyncEngine, request: pytest.FixtureRequest
+) -> AsyncIterator[ApiWorld]:
+    """Dữ liệu COMMIT thật, vì app mở session riêng và không thấy transaction của test.
+
+    Nhóm của principal nhận qua tham số gián tiếp, mặc định là không có nhóm:
+
+        @pytest.mark.parametrize("api_world", [("authors",)], indirect=True)
+
+    Cần nó vì phân quyền theo nhóm chỉ kiểm được khi phiên MANG nhóm, và mọi test
+    khác cố ý chạy với một principal không nhóm — thêm nhóm vào mặc định là sửa
+    tiền đề của những test mình chưa đọc.
+    """
+    groups: tuple[str, ...] = getattr(request, "param", ())
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     user_id, ws_a, ws_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     subject = f"api-{user_id.hex[:8]}"
@@ -506,20 +518,25 @@ async def api_world(db_engine: AsyncEngine) -> AsyncIterator[ApiWorld]:
         subject=subject,
         email="api@loom.local",
         display_name="api",
-        groups=(),
+        groups=groups,
     )
 
     async def grant(
-        scope: tuple[str, uuid.UUID], role: Role, *, user: uuid.UUID | None = None
+        scope: tuple[str, uuid.UUID],
+        role: Role,
+        *,
+        user: uuid.UUID | None = None,
+        group: str | None = None,
     ) -> None:
+        assert user is None or group is None, "đúng một trong user/group"
         async with maker() as session:
             session.add(
                 RoleAssignment(
                     id=uuid.uuid4(),
                     tenant_id=DEFAULT_TENANT_ID,
-                    principal_type="user",
-                    principal_user_id=user or user_id,
-                    principal_group=None,
+                    principal_type="group" if group else "user",
+                    principal_user_id=None if group else (user or user_id),
+                    principal_group=group,
                     scope_type=scope[0],
                     scope_id=scope[1],
                     role=str(role),

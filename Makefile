@@ -210,6 +210,11 @@ infra: check-context  ## Cài Dex (local — không có ESO). KHÔNG kèm Secret
 	@# biến hợp lệ nên envsubst bỏ qua. Đã kiểm: bản có và không có giới hạn
 	@# cho ra kết quả giống hệt nhau. Giữ giới hạn vì nó phòng tương lai.)
 	DEX_IMAGE="$(DEX_IMAGE)" envsubst '$$DEX_IMAGE' < deploy/infra/dex.yaml | kubectl apply -f -
+	@# Dex đọc config.yaml MỘT LẦN lúc khởi động. Sửa ConfigMap thôi thì `kubectl
+	@# apply` báo "configmap configured / deployment unchanged", `rollout status`
+	@# báo thành công, và Dex vẫn chạy cấu hình cũ — target nói "đã áp" trong khi
+	@# thực tế chưa. Restart vô điều kiện để "đã áp" nghĩa là "đang chạy".
+	kubectl -n $(NS) rollout restart deployment/dex
 	kubectl -n $(NS) rollout status deployment/dex --timeout=180s
 
 .PHONY: infra-eso

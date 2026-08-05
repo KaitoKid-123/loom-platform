@@ -32,7 +32,12 @@ class TokenSet:
     refresh_token: str | None
 
 
-SCOPES = "openid email profile offline_access"
+# `groups` là scope BẮT BUỘC phải yêu cầu, không phải một thứ tuỳ chọn nice-to-have.
+# OIDC không phát claim tuỳ chọn mà client không xin: thiếu nó ở đây thì Dex im lặng
+# trả một id_token không có `groups`, `_normalise_groups` nhận `None` và trả tuple
+# rỗng, và toàn bộ RBAC theo nhóm chết mà không một dòng log nào nói gì. Đó chính là
+# trạng thái của hệ thống cho tới task này.
+SCOPES = "openid email profile offline_access groups"
 
 
 class OIDCClient:

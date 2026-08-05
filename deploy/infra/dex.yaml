@@ -26,6 +26,25 @@ data:
         hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
         username: long
         userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+    connectors:
+      # Connector THỨ HAI, chỉ để kiểm RBAC theo nhóm ở local.
+      #
+      # `staticPasswords` ở trên KHÔNG phát claim `groups` — kiểu Password của Dex
+      # chỉ có email/hash/username/userID, không có chỗ nào ghi nhóm. Nghĩa là cho
+      # tới task này, phân quyền theo nhóm chưa từng chạy thật một lần nào: mọi test
+      # về nó đều dựng `Principal` bằng tay. Một tính năng không chạy thật thì lỗi
+      # của nó ẩn tới giai đoạn sau.
+      #
+      # Thêm BÊN CẠNH chứ không thay thế: `make smoke` vẫn kiểm được luồng mật khẩu,
+      # và có thêm một đường thứ hai để kiểm nhóm.
+      #
+      # ⚠️ CHO ĐĂNG NHẬP KHÔNG CẦN MẬT KHẨU. File này chỉ vào được cụm k3d local:
+      # `make infra` phụ thuộc `check-context`, và target đó thoát với mã lỗi nếu
+      # context hiện tại không phải `k3d-loom`. dev/prod đi qua `make infra-eso` và
+      # một IdP thật, không đọc file này.
+      - type: mockCallback
+        id: mock-groups
+        name: "Nhóm (chỉ local)"
 ---
 apiVersion: apps/v1
 kind: Deployment
