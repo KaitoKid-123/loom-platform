@@ -35,6 +35,12 @@ async def app_client():
     async def even(body: _EvenBody) -> dict[str, int]:
         return {"n": body.n}
 
+    @app.get("/needs-auth")
+    async def needs_auth() -> None:
+        raise HTTPException(
+            401, "chưa đăng nhập", headers={"WWW-Authenticate": 'Bearer realm="loom"'}
+        )
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
@@ -88,3 +94,38 @@ async def test_validation_error_with_unserialisable_ctx_stays_422(app_client):
     # Chỉ ba khoá an toàn. `ctx` mang ValueError, `input` vọng lại dữ liệu người
     # dùng vừa gửi — cả hai đều không được ra khỏi đây.
     assert set(err) == {"loc", "msg", "type"}
+
+
+# --------------------------------------------------------------------------
+# Header của HTTPException. Với vài mã trạng thái, header là một phần BẮT BUỘC
+# của giao thức, không phải trang trí — và handler ở trên đã im lặng đánh rơi
+# chúng kể từ khi nó giành quyền xử lý HTTPException.
+# --------------------------------------------------------------------------
+
+
+async def test_http_exception_headers_are_preserved(app_client):
+    """`WWW-Authenticate` trên 401 là BẮT BUỘC theo RFC 9110 §15.5.2. FastAPI
+    gửi nó trước Task 1; handler problem+json bỏ `exc.headers` nên nó biến mất,
+    và một 401 không có `WWW-Authenticate` là một phản hồi sai giao thức."""
+    r = await app_client.get("/needs-auth")
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"] == 'Bearer realm="loom"'
+    # Header tự thêm KHÔNG được cướp mất content-type: Starlette chỉ tự điền
+    # content-type khi headers không có sẵn khoá đó, nên phải kiểm cả hai.
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["status"] == 401
+
+
+async def test_wrong_method_on_a_real_route_still_carries_allow(client):
+    """Ca sống, trên app thật: `Allow` trên 405 là BẮT BUỘC theo RFC 9110
+    §15.5.6 — nó là thứ nói cho client biết phải thử phương thức nào. Starlette
+    ném HTTPException(405, headers={"Allow": ...}), nên header này chỉ tồn tại
+    nếu handler problem+json chuyển tiếp `exc.headers`.
+
+    Dùng fixture `client` (create_app thật) chứ không phải app đồ chơi ở trên:
+    405 do ROUTER sinh ra, không phải do endpoint nào, nên chỉ chuỗi thật mới
+    kiểm được nhánh này."""
+    response = await client.head("/api/v1/me")
+    assert response.status_code == 405
+    assert response.headers["allow"]
+    assert "GET" in response.headers["allow"]
