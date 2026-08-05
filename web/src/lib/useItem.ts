@@ -1,0 +1,69 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+
+import { UnauthorizedError, apiGet, apiGetWithEtag, apiPostJson } from './api'
+
+export interface ItemDetail {
+  id: string
+  workspace_id: string
+  type: string
+  name: string
+  display_name: string
+  folder_path: string
+  description: string | null
+  definition: Record<string, unknown>
+  version: number
+  updated_at: string
+}
+
+export interface VersionRow {
+  version: number
+  display_name: string
+  folder_path: string
+  description: string | null
+  change_note: string | null
+  created_at: string
+  created_by: string
+}
+
+function itemKey(itemId: string) {
+  return ['item', itemId] as const
+}
+
+function versionsKey(itemId: string) {
+  return ['item-versions', itemId] as const
+}
+
+export function useItem(itemId: string) {
+  return useQuery<{ data: ItemDetail; etag: string | null }, Error>({
+    queryKey: itemKey(itemId),
+    // Lấy cả ETag: đó là thứ mọi lần sửa cần gửi lại trong `If-Match`, và ETag đi cùng
+    // dữ liệu trong một lời gọi thì không có cửa sổ nào để hai thứ lệch nhau.
+    queryFn: () => apiGetWithEtag<ItemDetail>(`/api/v1/items/${itemId}`),
+    retry: (failureCount, error) => !(error instanceof UnauthorizedError) && failureCount < 2,
+    enabled: itemId !== '',
+  })
+}
+
+export function useItemVersions(itemId: string) {
+  return useQuery<{ items: VersionRow[]; next_cursor: string | null }, Error>({
+    queryKey: versionsKey(itemId),
+    queryFn: () => apiGet(`/api/v1/items/${itemId}/versions?limit=50`),
+    retry: (failureCount, error) => !(error instanceof UnauthorizedError) && failureCount < 2,
+    enabled: itemId !== '',
+  })
+}
+
+export function useRestoreVersion(itemId: string, workspaceId: string) {
+  const qc = useQueryClient()
+  return useMutation<ItemDetail, Error, number>({
+    mutationFn: (version) =>
+      apiPostJson<ItemDetail>(`/api/v1/items/${itemId}/versions/${version}/restore`, {}),
+    onSuccess: () => {
+      // Cả BA nơi: item, lịch sử version, và cây Explorer. Bỏ sót cái nào thì người dùng
+      // thấy `restore` không có tác dụng cho tới khi họ tải lại trang.
+      void qc.invalidateQueries({ queryKey: itemKey(itemId) })
+      void qc.invalidateQueries({ queryKey: versionsKey(itemId) })
+      void qc.invalidateQueries({ queryKey: ['items', workspaceId] })
+    },
+  })
+}

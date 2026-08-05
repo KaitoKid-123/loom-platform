@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Chín phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
+# Mười một phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
 # kubectl, nên chạy được với bất kỳ môi trường nào:
 #
 #     make smoke                              # local
@@ -23,7 +23,7 @@ trap 'rm -rf "$(dirname "$JAR")"' EXIT
 
 # Số phép kiểm MONG ĐỢI, khẳng định ở cuối file. Không có nó, xoá một phép kiểm
 # vẫn cho "7/7 đạt" và bản báo cáo trông y như trước.
-EXPECTED=9
+EXPECTED=11
 
 pass=0; fail=0; skipped=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; pass=$((pass+1)); }
@@ -180,6 +180,89 @@ case "$BASE" in
     skipped=$((skipped+1))
     ;;
 esac
+
+# 10 — tạo workspace rồi tạo item trong đó, trên một hệ thống ĐANG CHẠY: cổng quyền
+#      cấp tenant, cổng quyền cấp workspace, sinh storage_prefix, hash definition, hàng
+#      item_version đầu tiên, và ETag trên phản hồi tạo.
+#
+#      Phép này KHÔNG phân biệt được cổng quyền nào đang được dùng: tài khoản smoke là
+#      admin cấp tenant, nên nó thừa hưởng admin ở mọi workspace và một cổng đòi
+#      `workspace_delete` thay vì `item_create` vẫn cho qua. Đã kiểm bằng cách đổi
+#      đúng thế và thấy 11/11 vẫn xanh. Việc canh ĐÚNG cổng nào thuộc integration test
+#      (`test_a_viewer_cannot_create_an_item`); phép này canh cả chuỗi có chạy thật hay
+#      không. Nó thấy được: version đầu khác 1, thiếu ETag trên phản hồi tạo, và mọi mã
+#      trạng thái lệch — cả ba đã chứng minh đỏ.
+#
+#      Cần principal là admin cấp tenant. Nếu không phải thì báo HỎNG kèm cách sửa,
+#      KHÔNG bỏ qua im lặng: một phép kiểm không chạy được thì chưa đạt.
+tmpdir="$(dirname "$JAR")"
+smoke_ws_id=""
+smoke_item_id=""
+
+if [ "$login_ok" -eq 0 ]; then
+  bad "tạo workspace và item qua API" "bỏ qua được — đăng nhập hỏng"
+else
+  ws_payload=$(printf '{"name":"smoke-%s","display_name":"Smoke %s"}' "$$" "$$")
+  ws_code=$(curl -s -b "$JAR" -o "$tmpdir/ws.json" -w '%{http_code}' --max-time 15 \
+            -X POST -H 'Content-Type: application/json' -d "$ws_payload" \
+            "$BASE/api/v1/workspaces")
+  case "$ws_code" in
+    201)
+      smoke_ws_id=$(jq -r '.id' < "$tmpdir/ws.json")
+      item_payload='{"type":"sql_script","name":"smoke-item","display_name":"Smoke item","definition":{"schema_version":1,"sql":"SELECT 1"}}'
+      it_code=$(curl -s -b "$JAR" -D "$tmpdir/item.h" -o "$tmpdir/item.json" -w '%{http_code}' \
+                --max-time 15 -X POST -H 'Content-Type: application/json' -d "$item_payload" \
+                "$BASE/api/v1/workspaces/$smoke_ws_id/items")
+      it_etag=$(grep -i '^etag:' "$tmpdir/item.h" | tr -d '\r' | cut -d' ' -f2-)
+      if [ "$it_code" != 201 ]; then
+        bad "tạo workspace và item qua API" "tạo item trả $it_code"
+      elif ! jq -e '.version == 1' >/dev/null 2>&1 < "$tmpdir/item.json"; then
+        bad "tạo workspace và item qua API" "item mới không phải version 1"
+      elif [ "$it_etag" != 'W/"1"' ]; then
+        # ETag ngay trên phản hồi TẠO: thiếu nó thì client phải GET lại trước khi sửa
+        # được thứ mình vừa tạo.
+        bad "tạo workspace và item qua API" "ETag trên phản hồi tạo: ${it_etag:-KHÔNG CÓ}"
+      else
+        smoke_item_id=$(jq -r '.id' < "$tmpdir/item.json")
+        ok "tạo workspace và item qua API"
+      fi
+      ;;
+    403|404)
+      bad "tạo workspace và item qua API" \
+          "principal không phải admin cấp tenant (HTTP $ws_code) — chạy 'make grant-admin EMAIL=$USER_LOGIN' rồi thử lại"
+      ;;
+    *)
+      bad "tạo workspace và item qua API" "tạo workspace trả $ws_code"
+      ;;
+  esac
+fi
+
+# 11 — ETag hoạt động end-to-end: PATCH thiếu If-Match phải là ĐÚNG 428.
+#      Không nhận "4xx nào cũng được": 400 nghĩa là header bị hiểu sai, còn 412 nghĩa là
+#      server tự đoán một version thay vì đòi client nói ra.
+if [ -z "$smoke_item_id" ]; then
+  # Rỗng nghĩa là phép 10 hỏng. Báo HỎNG chứ không bỏ qua — bỏ qua thì phép 11 luôn
+  # "đạt" mỗi khi phép 10 hỏng, đúng kiểu xanh mà không kiểm gì.
+  bad "PATCH thiếu If-Match trả 428" "không có item từ phép 10 để kiểm"
+else
+  code=$(curl -s -b "$JAR" -o /dev/null -w '%{http_code}' --max-time 10 \
+         -X PATCH -H 'Content-Type: application/json' -d '{"display_name":"X"}' \
+         "$BASE/api/v1/items/$smoke_item_id")
+  if [ "$code" = 428 ]; then
+    ok "PATCH thiếu If-Match trả 428"
+  else
+    bad "PATCH thiếu If-Match trả 428" "nhận $code"
+  fi
+fi
+
+# Dọn: xoá mềm workspace do smoke tạo. Phép 10 tạo một workspace THẬT trên Aiven mỗi
+# lần chạy, nên không dọn thì hai mươi lần chạy để lại hai mươi workspace rác.
+# Xoá mềm nên lịch sử audit còn nguyên — và audit của một lần smoke là bằng chứng nó
+# đã chạy thật.
+if [ -n "$smoke_ws_id" ]; then
+  curl -s -b "$JAR" -o /dev/null -X DELETE --max-time 10 \
+    "$BASE/api/v1/workspaces/$smoke_ws_id" || true
+fi
 
 echo
 total=$((pass + fail + skipped))

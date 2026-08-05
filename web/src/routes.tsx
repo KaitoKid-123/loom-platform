@@ -3,6 +3,7 @@ import type { RouteObject } from 'react-router'
 import { AppLayout } from './components/AppLayout'
 import { ConnectionsPage } from './pages/ConnectionsPage'
 import { ExplorerPage } from './pages/ExplorerPage'
+import { ItemPage } from './pages/ItemPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { WorkspaceListPage } from './pages/WorkspaceListPage'
 
@@ -22,6 +23,10 @@ export const routeObjects: RouteObject[] = [
     children: [
       { index: true, element: <WorkspaceListPage /> },
       { path: 'workspaces/:workspaceId/items', element: <ExplorerPage /> },
+      // Không có route này thì mọi cú bấm item trong Explorer và mọi Enter trong ⌘K đều
+      // rơi vào route bắt-tất-cả và ra trang "không tìm thấy" — một hành trình vỡ, dù cả
+      // hai chỗ kia đều có test xanh.
+      { path: 'workspaces/:workspaceId/items/:itemId', element: <ItemPage /> },
       { path: 'workspaces/:workspaceId/connections', element: <ConnectionsPage /> },
       // Bắt mọi đường lạ. Đã kiểm bằng cách gỡ dòng này ra, và kết quả KHÔNG phải
       // màn hình trắng như tưởng: react-router 8 render trang lỗi mặc định của

@@ -78,3 +78,27 @@ describe('⌘K nối dây vào ứng dụng', () => {
     expect(screen.getByRole('dialog', { name: 'Bảng lệnh' })).toBeInTheDocument()
   })
 })
+
+describe('route chi tiết item', () => {
+  it('bấm một item KHÔNG ra trang không-tìm-thấy', async () => {
+    // Explorer và ⌘K đều liên kết tới đường này. Thiếu route thì cả hai hành trình vỡ,
+    // dù test riêng của chúng xanh.
+    stubFetch({
+      id: 'i1',
+      workspace_id: 'ws1',
+      type: 'sql_script',
+      name: 'x',
+      display_name: 'X',
+      folder_path: '/',
+      description: null,
+      definition: {},
+      version: 1,
+      updated_at: '2026-08-05T00:00:00Z',
+    })
+    const { container } = renderAt('/workspaces/ws1/items/i1')
+    // `stubFetch` trả cùng một payload cho mọi URL, kể cả `/versions` — nên test này
+    // cũng đi qua đúng đường mà một phản hồi sai hình dạng đi qua.
+    await screen.findByRole('heading', { name: 'X' })
+    expect(container.textContent).not.toContain('không tìm thấy trang')
+  })
+})
