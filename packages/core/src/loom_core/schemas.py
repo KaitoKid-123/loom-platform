@@ -2,6 +2,7 @@
 
 import uuid
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -77,3 +78,68 @@ class ProblemDetail(BaseModel):
     detail: str | None = None
     instance: str | None = None
     errors: list[dict[str, Any]] | None = None
+
+
+class WorkspaceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # `name` là định danh KỸ THUẬT và nó đi vào `storage_prefix` ở Giai đoạn 2.
+    # Chặn khoảng trắng và chữ hoa ngay tại biên rẻ hơn nhiều so với migrate
+    # prefix sau này.
+    name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    display_name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    domain_id: uuid.UUID | None = None
+
+
+class WorkspaceOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    display_name: str
+    description: str | None
+    domain_id: uuid.UUID | None
+    # Vai trò hiệu lực của CHÍNH người gọi, không phải vai trò cao nhất có trong
+    # workspace. Frontend dùng nó để ẩn nút mà server sẽ từ chối — thiếu nó thì
+    # người dùng bấm rồi ăn 403 mà không hiểu vì sao.
+    my_role: str
+
+
+class ItemCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    display_name: str = Field(min_length=1, max_length=255)
+    # Phải bắt đầu VÀ kết thúc bằng `/`. Nhận cả `/a/b` lẫn `/a/b/` thì cây trên
+    # UI hiện hai nhánh cho cùng một folder và không ai hiểu vì sao.
+    folder_path: str = Field(default="/", max_length=1024, pattern=r"^/([^/]+/)*$")
+    description: str | None = Field(default=None, max_length=2000)
+    definition: dict[str, Any]
+
+
+class ItemPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    folder_path: str | None = Field(default=None, max_length=1024, pattern=r"^/([^/]+/)*$")
+    description: str | None = Field(default=None, max_length=2000)
+    definition: dict[str, Any] | None = None
+    change_note: str | None = Field(default=None, max_length=500)
+
+
+class ItemOut(BaseModel):
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    type: str
+    name: str
+    display_name: str
+    folder_path: str
+    description: str | None
+    definition: dict[str, Any]
+    version: int
+    updated_at: datetime
+
+
+class PageOut(BaseModel):
+    items: list[Any]
+    next_cursor: str | None = None

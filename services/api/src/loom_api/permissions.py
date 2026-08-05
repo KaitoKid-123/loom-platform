@@ -126,6 +126,24 @@ class PermissionService:
     async def effective_role_for_item(self, item_id: uuid.UUID) -> Role | None:
         return await self._cached("item", item_id, self._query_item_roles)
 
+    async def effective_role_for_tenant(self, tenant_id: uuid.UUID) -> Role | None:
+        """Vai trò ở cấp tenant.
+
+        Chuỗi tổ tiên chỉ chạy TỪ tài nguyên LÊN, nên với tenant không có nhánh
+        nào để đi tiếp — chỉ hỏi thẳng assignment ở đúng cấp đó. Cần cho việc tạo
+        workspace: workspace chưa tồn tại nên không có scope nào thấp hơn để hỏi.
+        """
+        return await self._cached("tenant", tenant_id, self._query_tenant_roles)
+
+    async def _query_tenant_roles(self, tenant_id: uuid.UUID) -> list[Role]:
+        stmt = select(RoleAssignment.role).where(
+            principal_matches(self._principal),
+            RoleAssignment.scope_type == "tenant",
+            RoleAssignment.scope_id == tenant_id,
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [Role[r] for r in rows]
+
     async def effective_role_for_workspace(self, workspace_id: uuid.UUID) -> Role | None:
         return await self._cached("workspace", workspace_id, self._query_workspace_roles)
 

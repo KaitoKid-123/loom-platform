@@ -19,11 +19,12 @@ chỉ rollback mà không ràng buộc thứ tự chạy giữa các file.
 """
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -33,7 +34,9 @@ from sqlalchemy.ext.asyncio import (
 )
 from testcontainers.community.postgres import PostgresContainer
 
+from loom_api.db import Database
 from loom_api.item_store import ItemStore
+from loom_api.main import create_app
 from loom_api.models import (
     DEFAULT_TENANT_ID,
     AppUser,
@@ -440,3 +443,132 @@ async def committed_workspace(
             await session.execute(delete(Workspace).where(Workspace.id == ws_id))
             await session.execute(delete(AppUser).where(AppUser.id == user_id))
             await session.commit()
+
+
+@dataclass
+class ApiWorld:
+    """App thật + một principal đã xác thực, chạy trên schema đã migrate.
+
+    Khác `rbac_fixture`: ở đây request đi qua đúng đường HTTP — dependency, cổng
+    quyền, exception handler RFC 9457, header ETag. Một cổng quyền đúng ở tầng
+    store vẫn có thể bị bỏ qua ở tầng router, và chỉ test qua HTTP mới thấy.
+    """
+
+    client: AsyncClient
+    engine: AsyncEngine
+    ws_a: uuid.UUID
+    ws_b: uuid.UUID
+    user_id: uuid.UUID
+    principal: Principal
+    grant: Callable[..., Awaitable[None]]
+
+
+@pytest.fixture
+async def api_world(db_engine: AsyncEngine) -> AsyncIterator[ApiWorld]:
+    """Dữ liệu COMMIT thật, vì app mở session riêng và không thấy transaction của test."""
+    maker = async_sessionmaker(db_engine, expire_on_commit=False)
+    user_id, ws_a, ws_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    subject = f"api-{user_id.hex[:8]}"
+
+    async with maker() as session:
+        session.add(
+            AppUser(
+                id=user_id,
+                tenant_id=DEFAULT_TENANT_ID,
+                subject=subject,
+                email="api@loom.local",
+                display_name="api",
+            )
+        )
+        await session.flush()
+        for ws_id, name in ((ws_a, "a"), (ws_b, "b")):
+            session.add(
+                Workspace(
+                    id=ws_id,
+                    tenant_id=DEFAULT_TENANT_ID,
+                    domain_id=None,
+                    name=f"ws-{name}-{ws_id.hex[:6]}",
+                    display_name=f"WS {name.upper()}",
+                    storage_prefix=f"workspaces/{ws_id}",
+                    created_by=user_id,
+                    updated_by=user_id,
+                )
+            )
+        await session.commit()
+
+    principal = Principal(
+        user_id=user_id,
+        subject=subject,
+        email="api@loom.local",
+        display_name="api",
+        groups=(),
+    )
+
+    async def grant(
+        scope: tuple[str, uuid.UUID], role: Role, *, user: uuid.UUID | None = None
+    ) -> None:
+        async with maker() as session:
+            session.add(
+                RoleAssignment(
+                    id=uuid.uuid4(),
+                    tenant_id=DEFAULT_TENANT_ID,
+                    principal_type="user",
+                    principal_user_id=user or user_id,
+                    principal_group=None,
+                    scope_type=scope[0],
+                    scope_id=scope[1],
+                    role=str(role),
+                    created_by=user_id,
+                )
+            )
+            await session.commit()
+
+    class _Store:
+        """Trả về principal cố định. Xác thực OIDC đã có test riêng; ở đây ta kiểm
+        PHÂN QUYỀN, nên giả lập đúng một bước và không hơn."""
+
+        async def load_session(self, session_id: str) -> Principal | None:
+            return principal if session_id == "phien-hop-le" else None
+
+        async def upsert_user_and_create_session(self, claims: object, token: object) -> str:
+            raise NotImplementedError
+
+        async def delete_session(self, session_id: str) -> None:
+            return None
+
+    # `str(url)` CHE mật khẩu thành `***`, nên phải render tường minh — dùng
+    # str() rồi vá lại sẽ cho một URL không mật khẩu và asyncpg báo
+    # "password authentication failed", một lỗi không nói gì về nguyên nhân.
+    database = Database(
+        db_engine.url.render_as_string(hide_password=False),
+        pool_size=2,
+        max_overflow=0,
+    )
+    app = create_app(database=database, user_store=_Store())
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"loom_session": "phien-hop-le"},
+        ) as client:
+            try:
+                yield ApiWorld(client, db_engine, ws_a, ws_b, user_id, principal, grant)
+            finally:
+                async with maker() as session:
+                    # Dọn audit theo ACTOR, không theo workspace: một test có thể
+                    # tạo thêm workspace mới, và audit của nó vẫn giữ FK tới
+                    # app_user — thiếu dòng này thì lệnh xoá user vỡ vì khoá ngoại
+                    # và fixture im lặng để lại dữ liệu, đúng lỗi Task 19 đã gặp.
+                    await session.execute(delete(AuditLog).where(AuditLog.actor_user_id == user_id))
+                    for ws_id in (ws_a, ws_b):
+                        await session.execute(delete(Item).where(Item.workspace_id == ws_id))
+                        await session.execute(
+                            delete(RoleAssignment).where(RoleAssignment.scope_id == ws_id)
+                        )
+                        await session.execute(delete(Workspace).where(Workspace.id == ws_id))
+                    await session.execute(
+                        delete(RoleAssignment).where(RoleAssignment.scope_id == DEFAULT_TENANT_ID)
+                    )
+                    await session.execute(delete(AppUser).where(AppUser.id == user_id))
+                    await session.commit()
