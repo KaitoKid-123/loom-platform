@@ -1,5 +1,7 @@
 import ast
 import itertools
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -217,9 +219,15 @@ def test_action_values_are_the_dotted_wire_format() -> None:
 
 
 # Chỉ hai module stdlib này. Danh sách theo kiểu allowlist nên nó ĐÓNG: mọi
-# import mới đều đỏ, kể cả `loom_api.db`, `.storage` hay `importlib` (đường lách
-# duy nhất khỏi một phép kiểm tra AST).
+# import mới đều đỏ, kể cả `loom_api.db`, `.storage` hay `importlib`.
 _ALLOWED_IMPORT_ROOTS = frozenset({"collections", "enum"})
+
+# `import x` và `from x import y` KHÔNG phải hai cách duy nhất để nạp một
+# module. `__import__("sqlalchemy")` là một ast.Call, không phải ast.Import, và
+# nó đi thẳng qua phép kiểm bên dưới nếu chỉ nhìn hai node đó — đã kiểm tra
+# bằng cách thêm thật vào roles.py: 25 test xanh, ruff sạch, và roles.py chạm
+# tới SQLAlchemy. `eval`/`exec`/`compile` là cùng một lỗ, chỉ vòng thêm một bước.
+_DYNAMIC_IMPORT_BUILTINS = frozenset({"__import__", "eval", "exec", "compile"})
 
 
 def test_roles_module_imports_nothing_outside_the_allowlist() -> None:
@@ -230,9 +238,16 @@ def test_roles_module_imports_nothing_outside_the_allowlist() -> None:
 
     Không có test này thì `import sqlalchemy` vào roles.py vẫn xanh cả bộ — đã
     kiểm tra bằng cách thêm thật rồi xoá. Một quy ước không ai kiểm là một quy
-    ước sẽ mất."""
+    ước sẽ mất.
+
+    Phép kiểm này bắt cả import nằm TRONG thân hàm (ast.walk đi hết cây), tức là
+    thứ mà phép kiểm nạp-thật ở
+    `test_importing_roles_in_a_clean_interpreter_stays_pure` không thấy vì hàm
+    chưa được gọi. Chiều ngược lại thì phép kiểm kia mạnh hơn. Hai cái bù cho
+    nhau; không cái nào một mình là đủ."""
     source = Path(loom_core.roles.__file__).read_text(encoding="utf-8")
     found: set[str] = set()
+    dynamic: set[str] = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             found.update(alias.name.split(".")[0] for alias in node.names)
@@ -241,9 +256,56 @@ def test_roles_module_imports_nothing_outside_the_allowlist() -> None:
             # nơi tầng lưu trữ sẽ sống. Giữ nguyên dấu chấm để thông báo lỗi đọc được.
             prefix = "." * node.level
             found.add(prefix + (node.module or "").split(".")[0])
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in _DYNAMIC_IMPORT_BUILTINS
+        ):
+            dynamic.add(node.func.id)
+
+    assert not dynamic, (
+        f"roles.py gọi {sorted(dynamic)}. Đây là cách nạp module KHÔNG đi qua "
+        f"ast.Import, nên allowlist bên dưới không nhìn thấy nó. Module này phải ở "
+        f"dạng dữ liệu thuần: không có nạp module động, không có ngoại lệ."
+    )
     offenders = found - _ALLOWED_IMPORT_ROOTS
     assert not offenders, (
         f"roles.py import {sorted(offenders)}. Module này phải ở dạng dữ liệu thuần: "
         f"không SQLAlchemy, không tầng lưu trữ, không import động. Nếu import mới thật sự "
         f"vô can với lưu trữ thì thêm vào _ALLOWED_IMPORT_ROOTS một cách có ý thức."
+    )
+
+
+# Thứ mà nạp `loom_core.roles` KHÔNG được kéo theo. Không phải allowlist: một
+# denylist ở đây là cố ý, vì phép kiểm này chỉ là lưới thứ hai — lưới thứ nhất
+# (AST, allowlist đóng) mới là cái phát biểu quy tắc.
+_FORBIDDEN_TRANSITIVE_ROOTS = ("sqlalchemy", "asyncpg", "psycopg2", "alembic", "loom_api")
+
+_PURITY_PROBE = (
+    "import sys, loom_core.roles;"
+    f"forbidden = {_FORBIDDEN_TRANSITIVE_ROOTS!r};"
+    "leaked = sorted({m.split('.')[0] for m in sys.modules} & set(forbidden));"
+    "print('LEAKED:' + ','.join(leaked) if leaked else 'clean')"
+)
+
+
+def test_importing_roles_in_a_clean_interpreter_stays_pure() -> None:
+    """Đai và dây. Một phép kiểm AST về bản chất là đánh bại được — nó đọc hình
+    dạng của mã nguồn, không đọc điều mã nguồn LÀM, và mỗi lần bịt một lối lách
+    lại còn lối khác. Phép kiểm này hỏi câu hỏi thật: nạp `loom_core.roles`
+    trong một interpreter sạch xong, SQLAlchemy có nằm trong sys.modules không?
+
+    Không có nó, `test_roles_module_imports_nothing_outside_the_allowlist` là
+    lớp phòng thủ duy nhất, và nó vừa bị `__import__("sqlalchemy")` xuyên qua."""
+    result = subprocess.run(  # noqa: S603 — sys.executable, không có input từ ngoài
+        [sys.executable, "-I", "-c", _PURITY_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, f"probe không chạy được: {result.stderr}"
+    assert result.stdout.strip() == "clean", (
+        f"nạp loom_core.roles kéo theo {result.stdout.strip()}. Module này phải ở dạng "
+        f"dữ liệu thuần — kể cả khi nó đi vòng qua phép kiểm AST, chỗ này vẫn thấy."
     )
