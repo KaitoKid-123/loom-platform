@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { RouterProvider, createMemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -62,5 +63,18 @@ describe('routes', () => {
       '/workspaces/11111111-1111-1111-1111-111111111111/connections',
     )
     expect(container.textContent).not.toContain('không tìm thấy trang')
+  })
+})
+
+describe('⌘K nối dây vào ứng dụng', () => {
+  it('mở được từ màn hình gốc, không chỉ khi test riêng component', async () => {
+    // Test riêng `CommandPalette` xanh mà component không được mount ở đâu cả thì tính
+    // năng không tồn tại với người dùng. Đây là phép kiểm rằng nó CÓ trong cây.
+    stubFetch({ subject: 's', email: 'e', display_name: 'Long', groups: [] })
+    renderAt('/')
+    await screen.findByRole('heading', { name: /workspace/i })
+
+    await userEvent.keyboard('{Control>}k{/Control}')
+    expect(screen.getByRole('dialog', { name: 'Bảng lệnh' })).toBeInTheDocument()
   })
 })

@@ -62,3 +62,13 @@ describe('AppShell', () => {
     expect(screen.getByText('nội dung thật')).toBeInTheDocument()
   })
 })
+
+describe('AppShell — gợi ý ⌘K', () => {
+  it('KHÔNG còn aria-hidden: palette đã có thật từ Task 31', () => {
+    // Giai đoạn 0 đặt aria-hidden vì palette chưa tồn tại. Giữ nó sau khi palette chạy
+    // là ẩn một tính năng đang hoạt động khỏi screen reader.
+    renderShell()
+    const hint = screen.getByText('⌘K')
+    expect(hint).not.toHaveAttribute('aria-hidden')
+  })
+})
