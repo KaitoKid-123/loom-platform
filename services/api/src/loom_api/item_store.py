@@ -393,6 +393,50 @@ class ItemStore:
         await self._session.flush()
         return item
 
+    async def list_versions(
+        self, item_id: uuid.UUID, limit: int = 50, cursor: str | None = None
+    ) -> Page:
+        """Lịch sử version của một item, mới nhất trước.
+
+        Trả dict thay vì hàng ORM: `definition` đầy đủ KHÔNG đi ra đây. Với item
+        `connection` thì definition mang `secret_ref`, và một danh sách version
+        thường được hiện cho nhiều người hơn là bản thân item.
+
+        Khoá sắp xếp là `(created_at, id)` như mọi chỗ khác. `version` một mình
+        cũng duy nhất trong một item (`uq_item_version`), nhưng mọi hàng sinh trong
+        cùng một transaction chia nhau một `created_at`, nên vẫn cần `id` để có thứ
+        tự tổng — và giữ chung một mẫu keyset thì không có chỗ nào để lệch.
+        """
+        await self._perms.require_item(item_id, Action.item_read)
+        filters: dict[str, object] = {"item_id": str(item_id)}
+        stmt = select(ItemVersion).where(ItemVersion.item_id == item_id)
+        if cursor:
+            after_ts, after_id = decode_cursor(cursor, filters)
+            stmt = stmt.where(
+                (ItemVersion.created_at < after_ts)
+                | ((ItemVersion.created_at == after_ts) & (ItemVersion.id < after_id))
+            )
+        stmt = stmt.order_by(ItemVersion.created_at.desc(), ItemVersion.id.desc()).limit(limit + 1)
+        rows = list((await self._session.execute(stmt)).scalars().all())
+
+        def _cursor_of(row: ItemVersion) -> str:
+            return encode_cursor(row.created_at, row.id, filters)
+
+        page = Page.build(rows, limit, cursor_of=_cursor_of)
+        page.items = [
+            {
+                "version": r.version,
+                "display_name": r.display_name,
+                "folder_path": r.folder_path,
+                "description": r.description,
+                "change_note": r.change_note,
+                "created_at": r.created_at.isoformat(),
+                "created_by": str(r.created_by),
+            }
+            for r in page.items
+        ]
+        return page
+
     async def _require_visible_workspace(self, workspace_id: uuid.UUID) -> None:
         """Cửa cho đường DANH SÁCH, và nó CỐ Ý không phải
         `require_workspace(workspace_read)`.

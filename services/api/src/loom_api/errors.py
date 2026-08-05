@@ -11,6 +11,7 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from loom_core.schemas import ProblemDetail
@@ -117,9 +118,38 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
     )
 
 
+async def _pydantic_validation_handler(request: Request, exc: Exception) -> JSONResponse:
+    """`ValidationError` của Pydantic sinh SÂU trong tầng store, không phải lúc
+    parse request — nên `RequestValidationError` không bắt được nó.
+
+    Chuyện này xảy ra bất cứ khi nào schema khai một trường là `dict[str, Any]` và
+    để tầng dưới validate: `item.definition` là đúng trường hợp đó. Không có handler
+    này, dán một mật khẩu thật vào `secret_ref` cho ra 500 — và body của 500 CỐ Ý
+    không chứa nội dung exception, nên người dùng không học được gì cả.
+
+    Trả 422 với cùng hình dạng `errors[]` như lỗi parse request, để frontend gắn
+    được lỗi vào đúng ô input bất kể nó phát sinh ở tầng nào.
+    """
+    assert isinstance(exc, ValidationError)
+    errors = [
+        {"loc": ["body", *(str(part) for part in e["loc"])], "msg": e["msg"], "type": e["type"]}
+        for e in exc.errors()
+    ]
+    return _response(
+        ProblemDetail(
+            title=_title(422),
+            status=422,
+            detail="dữ liệu gửi lên không hợp lệ",
+            instance=str(request.url.path),
+            errors=errors,
+        )
+    )
+
+
 def install_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, _http_exception_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
+    app.add_exception_handler(ValidationError, _pydantic_validation_handler)
     # Handler cho `Exception` KHÔNG chồng lấn hai cái trên: Starlette chọn
     # handler theo kiểu cụ thể nhất, và cái này chạy ở ServerErrorMiddleware
     # (ngoài cùng) chứ không phải ExceptionMiddleware. Starlette vẫn ném lại
