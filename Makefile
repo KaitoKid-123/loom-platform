@@ -154,6 +154,15 @@ helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
 	| kubeconform -strict -summary \
 		-kubernetes-version $(KUBECONFORM_K8S_VERSION)
 
+	@echo "→ infra/minio.yaml"
+	@# Cùng lý do với dex.yaml: kiểm bản ĐÃ render, vì bản thô có `image:
+	@# $${MINIO_IMAGE}` cũng hợp lệ với kubeconform nên kiểm nó không nói lên gì.
+	@set -eo pipefail; \
+	MINIO_IMAGE="$(MINIO_IMAGE)" MINIO_MC_IMAGE="$(MINIO_MC_IMAGE)" \
+	envsubst '$$MINIO_IMAGE $$MINIO_MC_IMAGE' < deploy/infra/minio.yaml \
+	| kubeconform -strict -summary \
+		-kubernetes-version $(KUBECONFORM_K8S_VERSION)
+
 	@echo "→ argocd/"
 	@# ArgoCD Application là CRD nên không có trong catalog mặc định của
 	@# kubeconform. Cách thường thấy là thêm -ignore-missing-schemas, nhưng thế
@@ -201,7 +210,7 @@ cluster-down:  ## Xoá cụm k3d
 	k3d cluster delete $(CLUSTER)
 
 .PHONY: infra
-infra: check-context  ## Cài Dex (local — không có ESO). KHÔNG kèm Secret Aiven
+infra: check-context  ## Cài Dex + MinIO (local — không có ESO). KHÔNG kèm Secret Aiven
 	@# Dex dùng config tĩnh của chính nó, không đụng database. Gộp Secret Aiven
 	@# vào đây sẽ khiến không dựng nổi tầng đăng nhập chỉ vì chưa có credential.
 	@# `make dev` (Task 16) mới là chỗ phụ thuộc cả hai.
@@ -217,12 +226,21 @@ infra: check-context  ## Cài Dex (local — không có ESO). KHÔNG kèm Secret
 	@# biến hợp lệ nên envsubst bỏ qua. Đã kiểm: bản có và không có giới hạn
 	@# cho ra kết quả giống hệt nhau. Giữ giới hạn vì nó phòng tương lai.)
 	DEX_IMAGE="$(DEX_IMAGE)" envsubst '$$DEX_IMAGE' < deploy/infra/dex.yaml | kubectl apply -f -
+	@# MinIO CHỈ ở local — dev/prod trỏ endpoint ngoài (VPS), xem spec GĐ 2 mục 2.0.
+	MINIO_IMAGE="$(MINIO_IMAGE)" MINIO_MC_IMAGE="$(MINIO_MC_IMAGE)" \
+	envsubst '$$MINIO_IMAGE $$MINIO_MC_IMAGE' < deploy/infra/minio.yaml | kubectl apply -f -
+	kubectl -n $(NS) rollout status deployment/minio --timeout=180s
 	@# Dex đọc config.yaml MỘT LẦN lúc khởi động. Sửa ConfigMap thôi thì `kubectl
 	@# apply` báo "configmap configured / deployment unchanged", `rollout status`
 	@# báo thành công, và Dex vẫn chạy cấu hình cũ — target nói "đã áp" trong khi
 	@# thực tế chưa. Restart vô điều kiện để "đã áp" nghĩa là "đang chạy".
 	kubectl -n $(NS) rollout restart deployment/dex
 	kubectl -n $(NS) rollout status deployment/dex --timeout=180s
+
+.PHONY: minio-console
+minio-console: check-context  ## Mở console MinIO ở http://localhost:9001
+	@echo "Console: http://localhost:9001  —  loom-root / loom-root-dev-only"
+	kubectl -n $(NS) port-forward svc/minio 9001:9001
 
 .PHONY: infra-eso
 infra-eso:  ## CHỈ dev/prod: ESO + ExternalSecret. Bắt buộc: make infra-eso CONTEXT=...
