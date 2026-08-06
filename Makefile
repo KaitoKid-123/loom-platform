@@ -230,6 +230,15 @@ infra: check-context  ## Cài Dex + MinIO (local — không có ESO). KHÔNG kè
 	MINIO_IMAGE="$(MINIO_IMAGE)" MINIO_MC_IMAGE="$(MINIO_MC_IMAGE)" \
 	envsubst '$$MINIO_IMAGE $$MINIO_MC_IMAGE' < deploy/infra/minio.yaml | kubectl apply -f -
 	kubectl -n $(NS) rollout status deployment/minio --timeout=180s
+	@# Chờ Job, không chỉ chờ Deployment. Không có dòng này thì `make infra` báo
+	@# thành công kể cả khi bucket chưa từng được tạo, và lỗi chỉ lộ ra ở Task 6
+	@# dưới dạng một 404 không nói gì về nguyên nhân. Đã chứng minh đỏ được: trỏ
+	@# Job vào một host không tồn tại thì target này thoát Error 1.
+	@#
+	@# `--for=condition=complete` KHÔNG thoát sớm khi Job chuyển sang Failed — nó
+	@# chờ hết timeout. Đường thành công vẫn trả về ngay, chỉ đường hỏng mới chậm,
+	@# nên đổi lấy sự đơn giản là đáng.
+	kubectl -n $(NS) wait --for=condition=complete job/minio-bucket --timeout=300s
 	@# Dex đọc config.yaml MỘT LẦN lúc khởi động. Sửa ConfigMap thôi thì `kubectl
 	@# apply` báo "configmap configured / deployment unchanged", `rollout status`
 	@# báo thành công, và Dex vẫn chạy cấu hình cũ — target nói "đã áp" trong khi
@@ -241,6 +250,11 @@ infra: check-context  ## Cài Dex + MinIO (local — không có ESO). KHÔNG kè
 minio-console: check-context  ## Mở console MinIO ở http://localhost:9001
 	@echo "Console: http://localhost:9001  —  loom-root / loom-root-dev-only"
 	kubectl -n $(NS) port-forward svc/minio 9001:9001
+
+.PHONY: minio-s3
+minio-s3: check-context  ## Port-forward cổng S3 của MinIO ra localhost:9000
+	@echo "S3: http://localhost:9000  —  loom-root / loom-root-dev-only"
+	kubectl -n $(NS) port-forward svc/minio 9000:9000
 
 .PHONY: infra-eso
 infra-eso:  ## CHỈ dev/prod: ESO + ExternalSecret. Bắt buộc: make infra-eso CONTEXT=...

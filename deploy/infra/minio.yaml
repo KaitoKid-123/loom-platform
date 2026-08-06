@@ -40,12 +40,18 @@ kind: Deployment
 metadata:
   name: minio
   namespace: loom
+  labels: { app: minio }
 spec:
   replicas: 1
   strategy:
     # Recreate, KHÔNG RollingUpdate: PVC là ReadWriteOnce nên pod mới không mount
     # được volume khi pod cũ còn giữ. RollingUpdate sẽ treo ở ContainerCreating
     # cho tới khi hết timeout, và thông báo lỗi không hề nói về accessMode.
+    #
+    # KHÔNG có preStop/terminationGracePeriodSeconds như api và web, và đó là chủ
+    # đích: cơ chế đó vá cửa sổ pod-cũ-và-mới-cùng-nhận-traffic của RollingUpdate,
+    # mà `Recreate` ở dưới không có cửa sổ đó. Khách của MinIO là SDK S3 phía
+    # backend, tự retry lỗi kết nối tạm thời — khác traffic trình duyệt qua Traefik.
     type: Recreate
   selector:
     matchLabels: { app: minio }
@@ -53,6 +59,10 @@ spec:
     metadata:
       labels: { app: minio }
     spec:
+      securityContext:
+        # PVC mount vào mặc định thuộc root. Không có fsGroup thì uid 1000 không
+        # ghi nổi vào /data và MinIO chết ngay lúc khởi động.
+        fsGroup: 1000
       containers:
         - name: minio
           image: ${MINIO_IMAGE}
@@ -62,11 +72,6 @@ spec:
               valueFrom: { secretKeyRef: { name: minio-root, key: root-user } }
             - name: MINIO_ROOT_PASSWORD
               valueFrom: { secretKeyRef: { name: minio-root, key: root-password } }
-            # BẮT BUỘC cho STS AssumeRole. Không có nó, MinIO trả
-            # "InvalidParameterValue: Invalid arn" và toàn bộ Task 5 không chạy.
-            # Đặt rỗng nghĩa là dùng chính identity nội bộ, không cần OIDC/LDAP.
-            - name: MINIO_IDENTITY_OPENID_CONFIG_URL
-              value: ""
           ports:
             - { containerPort: 9000, name: s3 }
             - { containerPort: 9001, name: console }
@@ -75,6 +80,17 @@ spec:
           resources:
             requests: { cpu: 50m, memory: 256Mi }
             limits: { memory: 320Mi }
+          securityContext:
+            # Đã kiểm với đúng image pin: MinIO khởi động sạch dưới uid 1000 với
+            # rootfs read-only. `/data` là PVC nên vẫn ghi được, và MinIO không
+            # cần ghi vào chỗ nào khác.
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           readinessProbe:
             httpGet: { path: /minio/health/ready, port: 9000 }
             initialDelaySeconds: 5
@@ -108,6 +124,11 @@ spec:
   # ttl thì lần apply thứ hai đỏ với "field is immutable". ttl 60s để Job tự dọn.
   ttlSecondsAfterFinished: 60
   backoffLimit: 10
+  # Vòng `until` bên dưới nuốt mọi lỗi kết nối, nên `backoffLimit` KHÔNG cứu được
+  # trường hợp MinIO không bao giờ Ready — Job sẽ lặp mãi mãi. Deadline là thứ
+  # duy nhất biến "treo" thành "hỏng", và chỉ khi hỏng thì `kubectl wait` trong
+  # `make infra` mới có gì để bắt.
+  activeDeadlineSeconds: 300
   template:
     spec:
       restartPolicy: OnFailure
