@@ -59,6 +59,10 @@ database:
   # ssl=require (mã hoá, không xác thực server) là chưa đủ — cần verify-full.
   caKey: ca.pem
   sslMode: verify-full
+  # Lakekeeper dùng một database RIÊNG trên CÙNG Aiven service. Tên nó đến từ
+  # chính Secret này, không từ values: mọi tham số kết nối khác đều ở đây, và
+  # tách một cái ra chỗ khác là chia thông tin kết nối làm hai nơi.
+  lakekeeperNameKey: lakekeeper_dbname
 
 oidc:
   issuer: http://loom.localhost/dex
@@ -80,3 +84,31 @@ app:
 
 migration:
   enabled: true
+
+lakekeeper:
+  # Iceberg REST catalog (OSS). Khác MinIO — nó là thành phần của ỨNG DỤNG nên
+  # nằm trong chart, chạy ở cả ba môi trường.
+  enabled: true
+  image: quay.io/lakekeeper/catalog
+  tag: v0.9.2
+  replicas: 1
+  # Lakekeeper mã hoá credential mà nó lưu. Ở local là hằng số; dev/prod lấy từ
+  # Vault qua External Secrets, cùng đường với loom-db-app.
+  encryptionSecret: ""
+  encryptionKeyLocal: local-dev-only-not-a-real-key
+  resources:
+    requests: { cpu: 25m, memory: 96Mi }
+    limits: { memory: 192Mi }
+
+storage:
+  # Endpoint S3 mà icebergkit và loom-query dùng. Ở local là MinIO trong cụm
+  # (deploy/infra/minio.yaml). Ở dev/prod là endpoint ngoài — VPS riêng theo kế
+  # hoạch của chủ dự án, xem spec Giai đoạn 2 mục 2.0.
+  endpoint: http://minio.loom.svc.cluster.local:9000
+  bucket: loom-local
+  region: us-east-1
+  # Credential GỐC, chỉ dùng để gọi STS AssumeRole. Thứ phát ra từ đó mới là cái
+  # mà mã ứng dụng cầm, và nó không bao giờ rộng hơn một workspace.
+  existingSecret: minio-root
+  accessKeyKey: root-user
+  secretKeyKey: root-password

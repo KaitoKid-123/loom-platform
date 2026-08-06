@@ -1,0 +1,21 @@
+{{- if .Values.lakekeeper.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "loom.fullname" . }}-lakekeeper
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: lakekeeper
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  # ClusterIP: catalog KHÔNG lộ ra ingress. Nó không có mô hình quyền của Loom,
+  # nên bất kỳ ai với tới nó là bỏ qua toàn bộ RBAC của Giai đoạn 1.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: lakekeeper
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: 8181
+      targetPort: 8181
+{{- end }}

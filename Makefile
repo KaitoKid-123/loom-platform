@@ -163,6 +163,23 @@ helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
 	| kubeconform -strict -summary \
 		-kubernetes-version $(KUBECONFORM_K8S_VERSION)
 
+	@echo "→ lakekeeper: initContainer và container phải cùng database"
+	@# helm lint và kubeconform đều KHÔNG thấy được lỗi này, mà nó là lỗi tệ nhất
+	@# có thể xảy ra: initContainer `migrate` trỏ nhầm sang database của control
+	@# plane sẽ chạy migration của Lakekeeper lên schema của loom-api.
+	@set -eo pipefail; \
+	keys=$$(helm template loom deploy/helm/loom -n $(NS) \
+		-f deploy/envs/values-local.yaml \
+		| grep -A4 'name: LAKEKEEPER__PG_DATABASE' \
+		| grep 'key:' | awk '{print $$2}' | sort -u); \
+	nkeys=$$(echo "$$keys" | grep -c .); \
+	test "$$nkeys" -eq 1 || { \
+		echo "initContainer và container trỏ KHÁC database: $$keys"; exit 1; }; \
+	want=$$(grep 'lakekeeperNameKey:' deploy/helm/loom/values.yaml | awk '{print $$2}'); \
+	test "$$keys" = "$$want" || { \
+		echo "khoá database sai: dùng '$$keys', values.yaml khai '$$want'"; exit 1; }; \
+	echo "  cả hai dùng khoá $$keys"
+
 	@echo "→ argocd/"
 	@# ArgoCD Application là CRD nên không có trong catalog mặc định của
 	@# kubeconform. Cách thường thấy là thêm -ignore-missing-schemas, nhưng thế
