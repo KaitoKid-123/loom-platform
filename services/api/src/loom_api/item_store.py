@@ -394,6 +394,31 @@ class ItemStore:
         await self._session.flush()
         return item
 
+    async def get_version(self, item_id: uuid.UUID, version: int) -> ItemVersion:
+        """Nội dung ĐẦY ĐỦ của một version, kể cả `definition`.
+
+        Khác `list_versions`, hàm này CÓ trả `definition`: người dùng cần đọc nội dung
+        cũ trước khi quyết định phục hồi, và một nút "Restore" bấm mù là cách chắc chắn
+        để họ khôi phục nhầm bản.
+
+        Cùng cổng quyền `item_read` như đọc item — không nới, không siết: ai đọc được
+        item thì đọc được lịch sử của nó, và ai không đọc được item thì `require_item`
+        đã trả 404 trước khi tới đây.
+        """
+        await self._perms.require_item(item_id, Action.item_read)
+        row = (
+            await self._session.execute(
+                select(ItemVersion).where(
+                    ItemVersion.item_id == item_id, ItemVersion.version == version
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            # 404 chứ không 422: với client thì một version không tồn tại và một item
+            # không tồn tại là cùng một chuyện — "không có thứ bạn vừa xin".
+            raise NotVisible
+        return row
+
     async def list_versions(
         self, item_id: uuid.UUID, limit: int = 50, cursor: str | None = None
     ) -> Page:

@@ -28,7 +28,7 @@ from testcontainers.community.postgres import PostgresContainer
 
 from loom_api.models import DEFAULT_TENANT_ID
 
-from .pg_support import POSTGRES_IMAGE, run_alembic, sync_url
+from .pg_support import POSTGRES_IMAGE, head_revision, run_alembic, sync_url
 
 pytestmark = pytest.mark.integration
 
@@ -138,7 +138,7 @@ def test_migration_creates_schema_and_seeds_tenant(
         version = connection.execute(
             sa.text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-        assert version == "0003"
+        assert version == head_revision()
 
 
 def test_partial_and_nulls_not_distinct_survive_into_the_real_schema(
@@ -244,7 +244,7 @@ def test_downgrade_removes_exactly_the_new_tables_and_upgrade_restores_them() ->
 
         before = snapshot()
         assert before[0] >= NEW_TABLES
-        assert before[2] == "0003"
+        assert before[2] == head_revision()
 
         assert run_alembic(pg, "downgrade", "0002").returncode == 0
         after_down = snapshot()

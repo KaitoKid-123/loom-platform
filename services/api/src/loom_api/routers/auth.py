@@ -117,6 +117,11 @@ async def logout(request: Request, response: Response) -> Response:
 async def me(principal: Principal = PrincipalDep) -> CurrentUser:
     # Không còn đọc cookie ở đây: xem loom_api.deps. Handler nào cũng tự đọc
     # cookie thì chỉ cần một handler quên là có một endpoint công khai.
+    #
+    # KHÔNG chạm database, và giữ đúng như thế. Đã thử đặt `tenant_role` vào đây và đó là
+    # sai chỗ: `/me` gọi mỗi lần tải trang, nên nó thành một round trip nữa cho một câu
+    # hỏi mà endpoint danh sách workspace trả lời được miễn phí — nó đã chạm database rồi
+    # và giao diện đã gọi nó ở đúng trang cần biết. Xem `WorkspaceListOut.tenant_role`.
     return CurrentUser(
         subject=principal.subject,
         email=principal.email,

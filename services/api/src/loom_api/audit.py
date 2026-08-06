@@ -71,12 +71,24 @@ class AuditReader:
         self._perms = PermissionService(session, principal)
 
     async def list_for_workspace(
-        self, workspace_id: uuid.UUID, limit: int = 50, cursor: str | None = None
+        self,
+        workspace_id: uuid.UUID,
+        limit: int = 50,
+        cursor: str | None = None,
+        resource_id: uuid.UUID | None = None,
     ) -> Page:
         await self._perms.require_workspace(workspace_id, Action.audit_read)
 
+        # `resource_id` nằm TRONG dấu vết bộ lọc của cursor: đổi bộ lọc mà giữ cursor cũ
+        # cho ra một trang lấy từ giữa một tập khác, và `decode_cursor` từ chối đúng vì
+        # thế. Xem `pagination.py`.
         filters: dict[str, Any] = {"workspace_id": str(workspace_id)}
         stmt = select(AuditLog).where(AuditLog.workspace_id == workspace_id)
+        if resource_id is not None:
+            # Lọc THÊM, không thay: `workspace_id` vẫn ở đó, nên một `resource_id` của
+            # workspace khác cho ra rỗng chứ không cho đọc chéo.
+            filters["resource_id"] = str(resource_id)
+            stmt = stmt.where(AuditLog.resource_id == resource_id)
         if cursor:
             after_ts, after_id = decode_cursor(cursor, filters)
             # Cùng mẫu keyset như item: `created_at` một mình KHÔNG duy nhất — mọi

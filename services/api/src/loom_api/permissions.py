@@ -18,7 +18,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import ColumnElement, Select, and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom_api.models import ACTIVE, Item, RoleAssignment, Workspace
+from loom_api.models import ACTIVE, DEFAULT_TENANT_ID, Item, RoleAssignment, Workspace
 from loom_core.roles import Action, Role, allows, max_role
 from loom_core.schemas import Principal
 
@@ -147,12 +147,43 @@ class PermissionService:
     async def effective_role_for_workspace(self, workspace_id: uuid.UUID) -> Role | None:
         return await self._cached("workspace", workspace_id, self._query_workspace_roles)
 
+    async def effective_role_for_domain(self, domain_id: uuid.UUID) -> Role | None:
+        """Vai trò ở cấp domain, tính cả assignment thừa hưởng từ tenant.
+
+        Chuỗi tổ tiên của một domain có đúng HAI bậc — `domain` và `tenant` — chứ không
+        bốn: domain không nằm trong domain nào, và workspace nằm DƯỚI nó chứ không trên.
+        Nên đây không dùng lại `_chain_conditions` được, và viết thẳng hai vế là trung
+        thực hơn là ép một hàm bốn bậc nhận hai giá trị `None`.
+        """
+        return await self._cached("domain", domain_id, self._query_domain_roles)
+
+    async def _query_domain_roles(self, domain_id: uuid.UUID) -> list[Role]:
+        stmt = select(RoleAssignment.role).where(
+            principal_matches(self._principal),
+            or_(
+                and_(
+                    RoleAssignment.scope_type == "domain",
+                    RoleAssignment.scope_id == domain_id,
+                ),
+                and_(
+                    RoleAssignment.scope_type == "tenant",
+                    RoleAssignment.scope_id == DEFAULT_TENANT_ID,
+                ),
+            ),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [Role[r] for r in rows]
+
     async def require_item(self, item_id: uuid.UUID, action: Action) -> Role:
         role = await self.effective_role_for_item(item_id)
         return self._enforce(role, action)
 
     async def require_workspace(self, workspace_id: uuid.UUID, action: Action) -> Role:
         role = await self.effective_role_for_workspace(workspace_id)
+        return self._enforce(role, action)
+
+    async def require_domain(self, domain_id: uuid.UUID, action: Action) -> Role:
+        role = await self.effective_role_for_domain(domain_id)
         return self._enforce(role, action)
 
     def _enforce(self, role: Role | None, action: Action) -> Role:

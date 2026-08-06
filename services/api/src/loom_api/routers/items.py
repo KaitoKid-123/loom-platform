@@ -1,10 +1,10 @@
-import re
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_api.deps import PrincipalDep, SessionDep
+from loom_api.etag import etag_for, parse_if_match
 from loom_api.item_store import ItemStore
 from loom_api.models import Item
 from loom_core.item_definitions import ItemType
@@ -13,29 +13,6 @@ from loom_core.schemas import ItemCreate, ItemOut, ItemPatch, PageOut, Principal
 router = APIRouter(tags=["items"])
 
 _MAX_LIMIT = 200
-
-# Nhận cả `W/"7"` và `7`. Client HTTP và proxy viết lại ETag thường xuyên, và biến
-# một chi tiết định dạng thành 412 là cách chắc chắn để người dùng tin rằng công
-# việc của họ vừa bị mất.
-_ETAG_RE = re.compile(r'^(?:W/)?"?(\d+)"?\Z')
-
-
-def _parse_if_match(raw: str | None) -> int:
-    if not raw:
-        # 428 chứ không 400: nó nói cho client biết CHÍNH XÁC phải thêm header nào,
-        # và một client tử tế sẽ tự thử lại đúng cách.
-        raise HTTPException(
-            status.HTTP_428_PRECONDITION_REQUIRED,
-            "missing If-Match header — load the item to get its ETag, then send it back",
-        )
-    match = _ETAG_RE.match(raw.strip())
-    if not match:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"malformed If-Match header: {raw}")
-    return int(match.group(1))
-
-
-def _etag(version: int) -> str:
-    return f'W/"{version}"'
 
 
 def _out(item: Item) -> ItemOut:
@@ -111,7 +88,7 @@ async def create_item(
     await session.commit()
     # ETag ngay trên phản hồi tạo: không có nó, client phải GET lại trước khi sửa
     # được thứ mình vừa tạo.
-    response.headers["ETag"] = _etag(out.version)
+    response.headers["ETag"] = etag_for(out.version)
     return out
 
 
@@ -125,7 +102,7 @@ async def get_item(
 ) -> ItemOut:
     store = _store(request, session, principal)
     item = await store.get(item_id)
-    response.headers["ETag"] = _etag(item.version)
+    response.headers["ETag"] = etag_for(item.version)
     return _out(item)
 
 
@@ -138,7 +115,7 @@ async def patch_item(
     principal: Principal = PrincipalDep,
     session: AsyncSession = SessionDep,
 ) -> ItemOut:
-    expected = _parse_if_match(request.headers.get("if-match"))
+    expected = parse_if_match(request.headers.get("if-match"))
     store = _store(request, session, principal)
     item = await store.update(
         item_id,
@@ -151,7 +128,7 @@ async def patch_item(
     )
     out = _out(item)
     await session.commit()
-    response.headers["ETag"] = _etag(out.version)
+    response.headers["ETag"] = etag_for(out.version)
     return out
 
 
@@ -182,6 +159,30 @@ async def list_versions(
     return PageOut(items=page.items, next_cursor=page.next_cursor)
 
 
+@router.get("/items/{item_id}/versions/{version}")
+async def get_version(
+    request: Request,
+    item_id: uuid.UUID,
+    version: int,
+    principal: Principal = PrincipalDep,
+    session: AsyncSession = SessionDep,
+) -> dict[str, object]:
+    store = _store(request, session, principal)
+    row = await store.get_version(item_id, version)
+    return {
+        "version": row.version,
+        "display_name": row.display_name,
+        "folder_path": row.folder_path,
+        "description": row.description,
+        "change_note": row.change_note,
+        "created_at": row.created_at.isoformat(),
+        "created_by": str(row.created_by),
+        # `definition` CHỈ ở đây, không ở danh sách: danh sách hiện cho nhiều người hơn,
+        # và với item `connection` thì definition mang `secret_ref`.
+        "definition": row.definition,
+    }
+
+
 @router.post("/items/{item_id}/versions/{version}/restore", response_model=ItemOut)
 async def restore_version(
     request: Request,
@@ -195,5 +196,5 @@ async def restore_version(
     item = await store.restore_version(item_id, version=version)
     out = _out(item)
     await session.commit()
-    response.headers["ETag"] = _etag(out.version)
+    response.headers["ETag"] = etag_for(out.version)
     return out

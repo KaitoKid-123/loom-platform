@@ -113,3 +113,37 @@ async def test_the_audit_of_another_workspace_never_leaks(api_world):
     rows = (await w.client.get(f"/api/v1/workspaces/{w.ws_a}/audit")).json()["items"]
     ids = {r["resource_id"] for r in rows}
     assert str(uuid.UUID(b.json()["id"])) not in ids
+
+
+async def test_audit_filters_by_resource_id(api_world):
+    """Spec mục 6 đòi lọc theo `resource_id` — không có nó thì không xem được lịch sử
+    của MỘT item, phải đọc cả workspace rồi tự lọc bằng mắt."""
+    w = api_world
+    await w.grant(("workspace", w.ws_a), Role.admin)
+    first, _ = await _make_item(w, "item-mot")
+    second, _ = await _make_item(w, "item-hai")
+
+    rows = (
+        await w.client.get(f"/api/v1/workspaces/{w.ws_a}/audit", params={"resource_id": str(first)})
+    ).json()["items"]
+    assert {r["resource_id"] for r in rows} == {str(first)}
+    assert str(second) not in {r["resource_id"] for r in rows}
+
+
+async def test_resource_id_of_another_workspace_returns_nothing(api_world):
+    """Lọc THÊM, không thay: `workspace_id` vẫn ở trong đường dẫn, nên một `resource_id`
+    thuộc workspace khác cho ra rỗng chứ không cho đọc chéo."""
+    w = api_world
+    await w.grant(("workspace", w.ws_a), Role.admin)
+    await w.grant(("workspace", w.ws_b), Role.admin)
+    await _make_item(w, "cua-a")
+    other = await w.client.post(
+        f"/api/v1/workspaces/{w.ws_b}/items",
+        json={"type": "sql_script", "name": "cua-b", "display_name": "cua-b", "definition": _SQL},
+    )
+    other_id = other.json()["id"]
+
+    rows = (
+        await w.client.get(f"/api/v1/workspaces/{w.ws_a}/audit", params={"resource_id": other_id})
+    ).json()["items"]
+    assert rows == []

@@ -22,6 +22,27 @@ from loom_core.roles import Action, Role
 from loom_core.schemas import Principal
 
 _WORKSPACE_NAME_INDEX = "uq_workspace_active_name"
+_WORKSPACE_DOMAIN_FK = "fk_workspace_domain_id_domain"
+
+
+class VersionMismatch(HTTPException):
+    def __init__(self, current: int) -> None:
+        # 412, không phải 409 — cùng lý do như item: `If-Match` là một ĐIỀU KIỆN TIÊN
+        # QUYẾT của request, và thông báo nói bản hiện tại là mấy để người dùng hiểu
+        # chuyện gì vừa xảy ra thay vì chỉ biết là hỏng.
+        super().__init__(
+            status.HTTP_412_PRECONDITION_FAILED,
+            f"somebody else changed this workspace (current version is {current}) "
+            "— reload and try again",
+        )
+
+
+class UnknownDomain(HTTPException):
+    def __init__(self, domain_id: uuid.UUID) -> None:
+        super().__init__(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"there is no domain {domain_id}",
+        )
 
 
 class NameTaken(HTTPException):
@@ -117,6 +138,77 @@ class WorkspaceStore:
             if constraint_of(exc) != _WORKSPACE_NAME_INDEX:
                 raise
             raise NameTaken(name) from exc
+        return ws
+
+    async def update(
+        self,
+        workspace_id: uuid.UUID,
+        expected_version: int,
+        display_name: str | None = None,
+        description: str | None = None,
+        domain_id: uuid.UUID | None = None,
+        clear_domain: bool = False,
+    ) -> Workspace:
+        """Sửa workspace, có kiểm `If-Match`.
+
+        `clear_domain` tách khỏi `domain_id=None` vì hai thứ đó khác nhau: `None` nghĩa
+        là "không đổi domain", còn `clear_domain` nghĩa là "gỡ khỏi domain". Gộp chúng
+        thì không có cách nào gỡ một workspace ra khỏi domain của nó.
+        """
+        await self._perms.require_workspace(workspace_id, Action.workspace_update)
+        ws = (
+            await self._session.execute(
+                select(Workspace)
+                .where(Workspace.id == workspace_id, Workspace.state == ACTIVE)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if ws is None:
+            raise NotVisible
+        if ws.version != expected_version:
+            raise VersionMismatch(ws.version)
+
+        new_display = display_name if display_name is not None else ws.display_name
+        new_desc = description if description is not None else ws.description
+        new_domain = None if clear_domain else (domain_id if domain_id else ws.domain_id)
+
+        # No-op KHÔNG bump version và KHÔNG chạm `updated_at`: bump thì ETag của mọi
+        # client khác hết hạn vô cớ, còn chạm `updated_at` thì workspace nhảy lên đầu
+        # danh sách trong khi không ai đổi gì.
+        changed = [
+            field
+            for field, old, new in (
+                ("display_name", ws.display_name, new_display),
+                ("description", ws.description, new_desc),
+                ("domain_id", ws.domain_id, new_domain),
+            )
+            if old != new
+        ]
+        if not changed:
+            return ws
+
+        ws.display_name = new_display
+        ws.description = new_desc
+        ws.domain_id = new_domain
+        ws.version += 1
+        ws.updated_by = self._principal.user_id
+        ws.updated_at = datetime.now(UTC)
+        self._audit.record(
+            action="workspace.update",
+            resource_type="workspace",
+            resource_id=ws.id,
+            workspace_id=ws.id,
+            summary={"changed": changed},
+        )
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            # FK `domain_id` trỏ vào domain không tồn tại. Báo đúng chuyện đó thay vì
+            # để client nhận 500 với một thân phản hồi cố ý không nói gì.
+            if constraint_of(exc) == _WORKSPACE_DOMAIN_FK and domain_id is not None:
+                raise UnknownDomain(domain_id) from exc
+            raise
         return ws
 
     async def soft_delete(self, workspace_id: uuid.UUID) -> None:

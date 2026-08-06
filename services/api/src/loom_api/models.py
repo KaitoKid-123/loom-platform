@@ -165,6 +165,9 @@ class Workspace(Base, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text)
     # Giai đoạn 2 dùng. NOT NULL từ giờ để Giai đoạn 2 không phải backfill.
     storage_prefix: Mapped[str] = mapped_column(String(255), nullable=False)
+    # ETag của workspace, cùng cơ chế `item.version`. Xem migration 0004 để biết vì sao
+    # không dùng `updated_at`.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     resource_profile: Mapped[dict[str, object]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )

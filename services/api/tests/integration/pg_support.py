@@ -59,3 +59,21 @@ def run_alembic(pg: PostgresContainer, *args: str) -> subprocess.CompletedProces
         text=True,
         check=False,
     )
+
+
+def head_revision() -> str:
+    """Revision head mà MÃ NGUỒN khai, đọc thẳng từ thư mục migration.
+
+    Không viết cứng "0003" trong test: điều cần khẳng định là "database đứng ở head",
+    không phải "head là 0003". Viết cứng thì mọi migration mới đều làm đỏ hai test không
+    liên quan gì tới nó, và người sửa sẽ sửa con số — tức là sửa phép kiểm cho khớp thực
+    tế thay vì ngược lại.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(API_DIR / "alembic.ini"))
+    # Đường dẫn TUYỆT ĐỐI: `script_location` trong ini là tương đối, và alembic giải nó
+    # theo thư mục làm việc — mà pytest chạy từ gốc repo, không phải từ `services/api`.
+    config.set_main_option("script_location", str(API_DIR / "migrations"))
+    return ScriptDirectory.from_config(config).get_current_head() or ""

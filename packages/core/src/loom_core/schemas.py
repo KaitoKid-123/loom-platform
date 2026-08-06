@@ -82,6 +82,35 @@ class ProblemDetail(BaseModel):
     errors: list[dict[str, Any]] | None = None
 
 
+class DomainCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    display_name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class DomainPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class DomainOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    display_name: str
+    description: str | None
+    # Số workspace đang thuộc domain. Một domain rỗng trông giống một domain mới tạo và
+    # một domain vừa bị dọn sạch; con số này phân biệt hai thứ đó.
+    workspace_count: int
+    # Vai trò hiệu lực của NGƯỜI GỌI ở cấp domain — `None` khi họ không có vai trò nào.
+    # Khác `WorkspaceOut.my_role` (chuỗi rỗng) vì ở đây "không có vai trò" là trạng thái
+    # bình thường: ai cũng thấy được danh sách domain.
+    my_role: str | None
+
+
 class WorkspaceCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -94,16 +123,42 @@ class WorkspaceCreate(BaseModel):
     domain_id: uuid.UUID | None = None
 
 
+class WorkspacePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    domain_id: uuid.UUID | None = None
+    # Tách khỏi `domain_id=None`: `None` nghĩa là "không đổi", còn cờ này nghĩa là "gỡ
+    # khỏi domain". Gộp hai thứ thì không có cách nào gỡ workspace ra khỏi domain.
+    clear_domain: bool = False
+
+
 class WorkspaceOut(BaseModel):
     id: uuid.UUID
     name: str
     display_name: str
     description: str | None
     domain_id: uuid.UUID | None
+    # ETag của workspace. Client cần nó để gửi `If-Match` khi sửa.
+    version: int = 1
     # Vai trò hiệu lực của CHÍNH người gọi, không phải vai trò cao nhất có trong
     # workspace. Frontend dùng nó để ẩn nút mà server sẽ từ chối — thiếu nó thì
     # người dùng bấm rồi ăn 403 mà không hiểu vì sao.
     my_role: str
+
+
+class WorkspaceListOut(BaseModel):
+    items: list[WorkspaceOut]
+    next_cursor: str | None = None
+    # Vai trò của người gọi ở cấp TENANT, hoặc None. `WorkspaceOut.my_role` chỉ nói vai
+    # trò trong MỘT workspace, nên không có trường này thì giao diện không biết người
+    # dùng có tạo được workspace mới hay không — và đó đúng là lý do trang danh sách
+    # workspace từng không có nút tạo nào, dù `POST /workspaces` đã có từ Task 21.
+    #
+    # Ở ĐÂY chứ không ở `/me`: `/me` cố ý không chạm database và được gọi mỗi lần tải
+    # trang, còn endpoint này đã truy vấn sẵn và giao diện đã gọi nó ở đúng trang cần biết.
+    tenant_role: str | None = None
 
 
 class ItemCreate(BaseModel):

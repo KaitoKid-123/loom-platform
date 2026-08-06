@@ -43,11 +43,17 @@ async def list_audit(
     workspace_id: uuid.UUID,
     cursor: str | None = None,
     limit: int = 50,
+    # Spec mục 6 viết endpoint này là `/audit?resource_id=&workspace_id=`. Ở đây
+    # `workspace_id` nằm trong ĐƯỜNG DẪN có chủ đích: một endpoint audit phẳng là đúng
+    # hình dạng đã làm `search` thành chỗ dễ rò rỉ nhất của API — không có gì trong
+    # đường dẫn nhắc người viết phải lọc quyền. Với workspace trên path thì cổng quyền
+    # là điều đầu tiên đập vào mắt người đọc handler.
+    resource_id: uuid.UUID | None = None,
     principal: Principal = PrincipalDep,
     session: AsyncSession = SessionDep,
 ) -> PageOut:
     reader = AuditReader(session, principal)
     page = await reader.list_for_workspace(
-        workspace_id, limit=min(limit, _MAX_LIMIT), cursor=cursor
+        workspace_id, limit=min(limit, _MAX_LIMIT), cursor=cursor, resource_id=resource_id
     )
     return PageOut(items=[_out(r) for r in page.items], next_cursor=page.next_cursor)

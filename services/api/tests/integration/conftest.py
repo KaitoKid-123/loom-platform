@@ -624,6 +624,12 @@ async def api_world(
                         await session.execute(
                             delete(AuditLog).where(AuditLog.actor_user_id.in_(extra_users))
                         )
+                    # Domain do test tạo trỏ tới `app_user` qua `created_by`, nên phải
+                    # đi TRƯỚC lệnh xoá user — đúng lớp lỗi khoá ngoại mà audit đã gặp
+                    # ở Task 19, và nó cũng im lặng y như thế: lệnh xoá user vỡ, fixture
+                    # để lại dữ liệu, và test sau đỏ ở một chỗ không liên quan.
+                    actors = [user_id, *extra_users]
+                    await session.execute(delete(Domain).where(Domain.created_by.in_(actors)))
                     await session.execute(delete(AppUser).where(AppUser.id == user_id))
                     if extra_users:
                         await session.execute(delete(AppUser).where(AppUser.id.in_(extra_users)))

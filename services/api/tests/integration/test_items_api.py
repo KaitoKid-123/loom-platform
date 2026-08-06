@@ -270,3 +270,37 @@ async def test_a_stranger_listing_items_gets_404(api_world):
     không tồn tại, và một trang rỗng lại khẳng định là nó có."""
     r = await api_world.client.get(f"/api/v1/workspaces/{api_world.ws_a}/items")
     assert r.status_code == 404
+
+
+async def test_reading_one_version_returns_its_definition(contributor):
+    """`GET /items/{id}/versions/{n}` — spec mục 6 liệt kê nó và nó chưa từng tồn tại.
+    Danh sách version CỐ Ý không trả `definition`; không có endpoint này thì người dùng
+    bấm "Restore" mù, không đọc được nội dung cũ trước khi quyết định."""
+    item_id, etag = await _make_item(contributor)
+    await contributor.client.patch(
+        f"/api/v1/items/{item_id}",
+        json={"definition": {"schema_version": 1, "sql": "SELECT 2"}},
+        headers={"If-Match": etag},
+    )
+
+    r = await contributor.client.get(f"/api/v1/items/{item_id}/versions/1")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["version"] == 1
+    assert body["definition"]["sql"] == "SELECT 1"
+
+    # Và danh sách vẫn KHÔNG trả definition — endpoint mới không được làm rò rỉ nó ra
+    # chỗ hiện cho nhiều người hơn.
+    rows = (await contributor.client.get(f"/api/v1/items/{item_id}/versions")).json()["items"]
+    assert all("definition" not in row for row in rows)
+
+
+async def test_an_unknown_version_is_404(contributor):
+    item_id, _ = await _make_item(contributor)
+    assert (await contributor.client.get(f"/api/v1/items/{item_id}/versions/99")).status_code == 404
+
+
+async def test_a_stranger_cannot_read_a_version(api_world):
+    """Cùng cổng `item_read` như đọc item. Endpoint mới là chỗ dễ quên nhất."""
+    r = await api_world.client.get(f"/api/v1/items/{uuid.uuid4()}/versions/1")
+    assert r.status_code == 404
