@@ -67,3 +67,20 @@ def test_expires_at_must_be_timezone_aware() -> None:
             # datetime naive là ĐIỀU đang kiểm, không phải một sơ suất.
             expires_at=datetime(2030, 1, 1),
         )
+
+
+def test_provider_satisfies_the_protocol() -> None:
+    """`issubclass`, KHÔNG phải một chú thích kiểu.
+
+    Bản đầu của phép này viết `provider: type[StorageCredentials] = MinioStsProvider`
+    rồi assert nó không None. Đã kiểm: đổi tên `for_workspace` thành `for_ws` thì
+    phép đó vẫn XANH, vì chú thích kiểu không kiểm gì lúc chạy — và mypy cũng
+    không thấy, vì `mypy.files` chỉ gồm `src`. Hai phép canh cùng mù một chỗ.
+
+    `issubclass` trên một Protocol `runtime_checkable` kiểm sự CÓ MẶT của phương
+    thức, nên nó đỏ thật khi tên lệch. Chữ ký thì mypy canh, qua khối
+    `TYPE_CHECKING` trong chính `minio_sts.py`.
+    """
+    from loom_storage import MinioStsProvider, StorageCredentials
+
+    assert issubclass(MinioStsProvider, StorageCredentials)

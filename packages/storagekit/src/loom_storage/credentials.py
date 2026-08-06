@@ -9,7 +9,7 @@ cần một đường thứ hai để xoay credential mà không sửa chỗ g�
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 def prefix_for_workspace(workspace_id: uuid.UUID) -> str:
@@ -55,7 +55,21 @@ class S3Credentials:
         return datetime.now(UTC) >= self.expires_at
 
 
+@runtime_checkable
 class StorageCredentials(Protocol):
-    """Credential đọc/ghi trong đúng prefix của một workspace."""
+    """Credential đọc/ghi trong đúng prefix của một workspace.
+
+    `runtime_checkable` để `issubclass` dùng được — và đó KHÔNG phải trang trí.
+    Không có nó, phép kiểm hợp lệ duy nhất là một chú thích kiểu, mà chú thích
+    kiểu thì:
+
+      - mypy KHÔNG thấy nếu nó nằm trong file test (`mypy.files` chỉ gồm `src`);
+      - lúc chạy KHÔNG kiểm gì cả, vì `x: type[Proto] = Cls` chỉ là annotation.
+
+    Đã kiểm bằng thực nghiệm: đổi tên `for_workspace` thành `for_ws` thì cả mypy
+    lẫn pytest đều xanh. Hai phép canh, không phép nào nhìn thấy thứ nó đặt tên.
+    `issubclass` là thứ thật sự đỏ được lúc chạy; chú thích trong `minio_sts.py`
+    dưới `TYPE_CHECKING` là thứ thật sự đỏ được lúc kiểm kiểu.
+    """
 
     def for_workspace(self, workspace_id: uuid.UUID) -> S3Credentials: ...

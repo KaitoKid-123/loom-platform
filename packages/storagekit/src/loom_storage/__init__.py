@@ -11,8 +11,10 @@ from loom_storage.credentials import (
     prefix_for_lakehouse,
     prefix_for_workspace,
 )
+from loom_storage.minio_sts import MinioStsProvider
 
 __all__ = [
+    "MinioStsProvider",
     "S3Credentials",
     "StorageCredentials",
     "prefix_for_lakehouse",
