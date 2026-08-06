@@ -29,14 +29,17 @@ function defaultDefinition(type: ItemType): Record<string, unknown> {
 
 interface Props {
   workspaceId: string
+  /** Folder đang mở. Item mới rơi vào ĐÂY, không phải gốc — tạo trong `/staging/`
+   *  rồi thấy nó nhảy về gốc là thứ người dùng phải sửa tay ngay sau đó. */
+  folderPath?: string
   onClose: () => void
 }
 
-export function NewItemDialog({ workspaceId, onClose }: Props) {
+export function NewItemDialog({ workspaceId, folderPath: initialFolder = '/', onClose }: Props) {
   const [type, setType] = useState<ItemType>('sql_script')
   const [name, setName] = useState('')
   const [displayName, setDisplayName] = useState('')
-  const [folderPath, setFolderPath] = useState('/')
+  const [folderPath, setFolderPath] = useState(initialFolder)
   const [kind, setKind] = useState<(typeof CONNECTION_KINDS)[number]>('postgres')
   const [host, setHost] = useState('')
   const [port, setPort] = useState('5432')
@@ -82,7 +85,7 @@ export function NewItemDialog({ workspaceId, onClose }: Props) {
       role="dialog"
       aria-modal="true"
       aria-labelledby="new-item-title"
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-8"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-8"
       // Escape đóng: một hộp thoại không đóng được bằng bàn phím là một cái bẫy cho
       // người dùng không dùng chuột.
       onKeyDown={(e) => {
@@ -94,18 +97,18 @@ export function NewItemDialog({ workspaceId, onClose }: Props) {
           e.preventDefault()
           submit()
         }}
-        className="w-full max-w-lg space-y-3 rounded-lg border border-line bg-surface p-6"
+        className="my-auto w-full max-w-lg space-y-3 rounded-lg border border-line-strong bg-surface p-5 shadow-2xl shadow-ink/20"
       >
-        <h2 id="new-item-title" className="text-lg font-medium">
-          Tạo item
+        <h2 id="new-item-title" className="text-[15px] font-semibold">
+          New item
         </h2>
 
-        <Field label="Loại item" htmlFor="new-type">
+        <Field label="Item type" htmlFor="new-type">
           <select
             id="new-type"
             value={type}
             onChange={(e) => setType(e.target.value as ItemType)}
-            className="w-full rounded border border-line bg-surface px-2 py-1 text-sm"
+            className="h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px]"
           >
             {TYPES.map((t) => (
               <option key={t} value={t}>
@@ -115,7 +118,7 @@ export function NewItemDialog({ workspaceId, onClose }: Props) {
           </select>
         </Field>
 
-        <Field label="Tên kỹ thuật" htmlFor="new-name" error={fieldErrors.name}>
+        <Field label="Name" htmlFor="new-name" error={fieldErrors.name}>
           <input
             id="new-name"
             value={name}
@@ -124,19 +127,19 @@ export function NewItemDialog({ workspaceId, onClose }: Props) {
             // phép kiểm: server vẫn là chỗ chặn. Sai khác giữa hai bên chỉ làm người
             // dùng bị từ chối ở một chỗ mà bên kia cho qua.
             pattern="[a-z0-9][a-z0-9-]*"
-            title="chữ thường, số và dấu gạch ngang; không bắt đầu bằng gạch ngang"
+            title="lowercase letters, digits and hyphens; cannot start with a hyphen"
             required
-            className="w-full rounded border border-line bg-surface px-2 py-1 text-sm"
+            className="h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px]"
           />
         </Field>
 
-        <Field label="Tên hiển thị" htmlFor="new-display" error={fieldErrors.display_name}>
+        <Field label="Display name" htmlFor="new-display" error={fieldErrors.display_name}>
           <input
             id="new-display"
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
-            placeholder="mặc định lấy theo tên kỹ thuật"
-            className="w-full rounded border border-line bg-surface px-2 py-1 text-sm"
+            placeholder="defaults to the name"
+            className="h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px]"
           />
         </Field>
 
@@ -146,21 +149,21 @@ export function NewItemDialog({ workspaceId, onClose }: Props) {
             value={folderPath}
             onChange={(e) => setFolderPath(e.target.value)}
             pattern="/([^/]+/)*"
-            title="phải bắt đầu và kết thúc bằng /"
-            className="w-full rounded border border-line bg-surface px-2 py-1 text-sm"
+            title="must start and end with /"
+            className="h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px]"
           />
         </Field>
 
         {type === 'connection' && (
-          <fieldset className="space-y-3 rounded border border-line p-3">
-            <legend className="px-1 text-sm text-dim">Kết nối</legend>
+          <fieldset className="space-y-3 rounded border border-line bg-raised p-3">
+            <legend className="px-1 text-[12px] text-dim">Connection</legend>
 
-            <Field label="Loại nguồn" htmlFor="new-kind" error={fieldErrors.kind}>
+            <Field label="Source" htmlFor="new-kind" error={fieldErrors.kind}>
               <select
                 id="new-kind"
                 value={kind}
                 onChange={(e) => setKind(e.target.value as typeof kind)}
-                className="w-full rounded border border-line bg-surface px-2 py-1 text-sm"
+                className="h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px]"
               >
                 {CONNECTION_KINDS.map((k) => (
                   <option key={k} value={k}>
@@ -176,7 +179,7 @@ export function NewItemDialog({ workspaceId, onClose }: Props) {
                 value={host}
                 onChange={(e) => setHost(e.target.value)}
                 required
-                className="w-full rounded border border-line bg-surface px-2 py-1 text-sm"
+                className="h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px]"
               />
             </Field>
 
@@ -189,7 +192,7 @@ export function NewItemDialog({ workspaceId, onClose }: Props) {
                 value={port}
                 onChange={(e) => setPort(e.target.value)}
                 required
-                className="w-full rounded border border-line bg-surface px-2 py-1 text-sm"
+                className="h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px]"
               />
             </Field>
 
@@ -198,11 +201,11 @@ export function NewItemDialog({ workspaceId, onClose }: Props) {
                 id="new-database"
                 value={database}
                 onChange={(e) => setDatabase(e.target.value)}
-                className="w-full rounded border border-line bg-surface px-2 py-1 text-sm"
+                className="h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px]"
               />
             </Field>
 
-            <Field label="Secret ref" htmlFor="new-secret" error={fieldErrors.secret_ref}>
+            <Field label="Secret reference" htmlFor="new-secret" error={fieldErrors.secret_ref}>
               <input
                 id="new-secret"
                 // CỐ Ý không `type="password"`. Đây là một THAM CHIẾU tới secret, không
@@ -212,11 +215,12 @@ export function NewItemDialog({ workspaceId, onClose }: Props) {
                 onChange={(e) => setSecretRef(e.target.value)}
                 placeholder="vault://path#key hoặc k8s://namespace/name#key"
                 required
-                className="w-full rounded border border-line bg-surface px-2 py-1 font-mono text-sm"
+                className="h-7 w-full rounded border border-line-strong bg-surface px-2 font-mono text-[13px]"
               />
-              <p className="mt-1 text-xs text-dim">
-                Đường dẫn tới secret, không phải mật khẩu. Mật khẩu dán vào đây sẽ bị từ
-                chối — và nếu lọt thì nó đi vào lịch sử version, audit và Git.
+              <p className="mt-1 text-[12px] leading-relaxed text-dim">
+                A path to the secret, not a password. Loom stores no credentials; a password
+                pasted here is rejected, and if one ever got through it would land in the
+                version history, the audit log and Git.
               </p>
             </Field>
           </fieldset>
@@ -232,16 +236,16 @@ export function NewItemDialog({ workspaceId, onClose }: Props) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-3 py-1 text-sm text-dim hover:bg-muted"
+            className="h-7 rounded px-3 text-[13px] text-dim hover:bg-hover"
           >
-            Huỷ
+            Cancel
           </button>
           <button
             type="submit"
             disabled={create.isPending}
-            className="rounded border border-line px-3 py-1 text-sm hover:bg-muted disabled:opacity-50"
+            className="h-7 rounded border border-accent bg-accent px-3 text-[13px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
           >
-            {create.isPending ? 'Đang tạo…' : 'Tạo'}
+            {create.isPending ? 'Creating…' : 'Create'}
           </button>
         </div>
       </form>
@@ -262,12 +266,12 @@ function Field({
 }) {
   return (
     <div>
-      <label htmlFor={htmlFor} className="mb-1 block text-sm">
+      <label htmlFor={htmlFor} className="mb-1 block text-[12px] font-medium text-dim">
         {label}
       </label>
       {children}
       {error && (
-        <p role="alert" className="mt-1 text-xs text-red-400">
+        <p role="alert" className="mt-1 text-[12px] text-danger">
           {error}
         </p>
       )}

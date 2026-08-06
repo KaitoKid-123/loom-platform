@@ -38,10 +38,10 @@ describe('AppShell', () => {
 
   it('nav chỉ có những mục ĐÃ có trang', () => {
     renderShell()
-    expect(screen.getByRole('link', { name: 'Workspace' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Workspaces' })).toBeInTheDocument()
     // Bốn mục cũ bị bỏ có chủ đích: một mục nav dẫn tới trang trắng tệ hơn là không
     // có mục đó. Khẳng định chúng KHÔNG còn, để ai thêm lại phải thêm cả trang.
-    for (const label of ['Trang chủ', 'Monitor', 'Catalog', 'Admin']) {
+    for (const label of ['Home', 'Monitor', 'Catalog', 'Admin']) {
       expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument()
     }
   })
@@ -53,7 +53,7 @@ describe('AppShell', () => {
         <AppShell user={user} onLogout={onLogout} />
       </MemoryRouter>,
     )
-    await userEvent.click(screen.getByRole('button', { name: 'Đăng xuất' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }))
     expect(onLogout).toHaveBeenCalledOnce()
   })
 

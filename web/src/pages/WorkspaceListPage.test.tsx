@@ -66,29 +66,29 @@ describe('WorkspaceListPage', () => {
     stubJson({ items: [], next_cursor: null })
     renderPage()
     // Không chỉ "Không có gì" — phải nói người dùng làm GÌ tiếp.
-    expect(await screen.findByText(/nhờ quản trị viên/i)).toBeInTheDocument()
+    expect(await screen.findByText(/ask an administrator/i)).toBeInTheDocument()
     // Và nhắc tới nhóm: vai trò gán cho nhóm cấp quyền y như gán cho cá nhân, và
     // người dùng không tự biết điều đó.
-    expect(screen.getByText(/nhóm/i)).toBeInTheDocument()
+    expect(screen.getByText(/group/i)).toBeInTheDocument()
   })
 
   it('ẩn nút tạo item khi vai trò là viewer', async () => {
     stubJson({ items: [{ ...WS, my_role: 'viewer' }], next_cursor: null })
     renderPage()
     await screen.findByText('Retail')
-    expect(screen.queryByRole('button', { name: /tạo item/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /new item/i })).not.toBeInTheDocument()
   })
 
   it('hiện nút tạo item khi vai trò là contributor', async () => {
     stubJson({ items: [WS], next_cursor: null })
     renderPage()
-    expect(await screen.findByRole('button', { name: /tạo item/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /new item/i })).toBeInTheDocument()
   })
 
   it('nút tạo item mở hộp thoại QUA URL, không qua state React', async () => {
     stubJson({ items: [WS], next_cursor: null })
     const { router } = renderPage()
-    await userEvent.click(await screen.findByRole('button', { name: /tạo item/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /new item/i }))
     // `?new=1` trong URL là thứ làm hộp thoại deep-link và F5 được (spec mục 7.4).
     expect(router.state.location.pathname).toBe(`/workspaces/${WS.id}/items`)
     expect(router.state.location.search).toBe('?new=1')

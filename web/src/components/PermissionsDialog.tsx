@@ -36,7 +36,7 @@ export function PermissionsDialog({ scopeType, scopeId, onClose }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/30"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-ink/30"
       onKeyDown={(e) => {
         if (e.key === 'Escape') onClose()
       }}
@@ -44,14 +44,14 @@ export function PermissionsDialog({ scopeType, scopeId, onClose }: Props) {
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Phân quyền"
-        className="w-full max-w-lg rounded-lg border border-line bg-surface p-6"
+        aria-label="Permissions"
+        className="w-full max-w-lg rounded-lg border border-line-strong bg-surface p-5 shadow-2xl shadow-ink/20"
       >
-        <h2 className="text-lg font-medium">Phân quyền</h2>
+        <h2 className="text-[15px] font-semibold">Permissions</h2>
 
-        {isPending && <p className="mt-4 text-sm text-dim">Đang tải…</p>}
+        {isPending && <p className="mt-4 text-[13px] text-dim">Loading…</p>}
         {error && (
-          <p role="alert" className="mt-4 text-sm">
+          <p role="alert" className="mt-4 text-[13px] text-danger">
             {error.message}
           </p>
         )}
@@ -59,7 +59,7 @@ export function PermissionsDialog({ scopeType, scopeId, onClose }: Props) {
         {data && (
           <>
             {rows.length === 0 && (
-              <p className="mt-4 text-sm text-dim">Chưa có ai được gán quyền ở phạm vi này.</p>
+              <p className="mt-4 text-[13px] text-dim">Nobody has a role in this scope yet.</p>
             )}
             <ul className="mt-4 space-y-2">
               {rows.map((row) => {
@@ -67,11 +67,11 @@ export function PermissionsDialog({ scopeType, scopeId, onClose }: Props) {
                 return (
                   <li
                     key={`${row.principal_type}:${row.user_id ?? row.group}`}
-                    className="flex items-center gap-3 text-sm"
+                    className="flex items-center gap-2.5 rounded border border-line px-2.5 py-1.5 text-[13px]"
                   >
                     <span aria-hidden>{row.principal_type === 'group' ? '👥' : '👤'}</span>
                     <span className="truncate">{row.group ?? row.user_id}</span>
-                    <span className="rounded bg-muted px-2 py-0.5 text-xs">{row.role}</span>
+                    <span className="rounded bg-raised px-1.5 py-0.5 text-[11px] text-dim">{row.role}</span>
                     <div className="flex-1" />
                     <button
                       type="button"
@@ -81,36 +81,36 @@ export function PermissionsDialog({ scopeType, scopeId, onClose }: Props) {
                       // bật — người dùng bấm mãi không được và không học được gì.
                       aria-describedby={isLastAdmin ? reasonId : undefined}
                       onClick={() => revoke.mutate(principalOf(row))}
-                      className="rounded border border-line px-2 py-1 text-xs disabled:opacity-40"
+                      className="rounded border border-line-strong px-2 py-0.5 text-[12px] text-dim transition-colors hover:bg-hover hover:text-ink disabled:opacity-40"
                     >
-                      Thu quyền
+                      Remove
                     </button>
                   </li>
                 )
               })}
             </ul>
             {adminCount <= 1 && rows.some((r) => r.role === 'admin') && (
-              <p id={reasonId} className="mt-2 text-xs text-dim">
-                Không thu được admin cuối cùng của phạm vi này — gán admin khác trước.
+              <p id={reasonId} className="mt-2 text-[12px] text-dim">
+                You cannot remove the last admin of this scope — grant another admin first.
               </p>
             )}
 
             <div className="mt-6 flex items-end gap-2">
-              <label className="flex-1 text-sm">
-                Người dùng hoặc nhóm
+              <label className="flex-1 text-[12px] font-medium text-dim">
+                User or group
                 <input
                   value={principal}
                   onChange={(e) => setPrincipal(e.target.value)}
-                  placeholder="tên nhóm, hoặc UUID người dùng"
-                  className="mt-1 w-full rounded border border-line bg-surface px-2 py-1"
+                  placeholder="group name, or a user UUID"
+                  className="mt-1 h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px] font-normal text-ink"
                 />
               </label>
-              <label className="text-sm">
-                Vai trò
+              <label className="text-[12px] font-medium text-dim">
+                Role
                 <select
                   value={role}
                   onChange={(e) => setRole(e.target.value)}
-                  className="mt-1 block rounded border border-line bg-surface px-2 py-1"
+                  className="mt-1 block h-7 rounded border border-line-strong bg-surface px-2 text-[13px] font-normal text-ink"
                 >
                   <option value="">—</option>
                   {/* CHỈ những vai trò server cho phép, không một danh sách cứng bốn
@@ -134,9 +134,9 @@ export function PermissionsDialog({ scopeType, scopeId, onClose }: Props) {
                     { onSuccess: () => setPrincipal('') },
                   )
                 }}
-                className="rounded border border-line px-3 py-1 text-sm disabled:opacity-40"
+                className="h-7 rounded border border-accent bg-accent px-3 text-[13px] font-medium text-white hover:bg-accent-hover disabled:opacity-40"
               >
-                Gán
+                Grant
               </button>
             </div>
 
@@ -144,12 +144,12 @@ export function PermissionsDialog({ scopeType, scopeId, onClose }: Props) {
                 trò nào. Đây cũng là thứ chứng minh lớp chặn thật vẫn hoạt động — hai
                 trường dưới đây là lớp thứ hai, không phải chỗ chặn. */}
             {grant.isError && grant.error && (
-              <p role="alert" className="mt-2 text-sm">
+              <p role="alert" className="mt-2 rounded border border-line bg-danger-soft px-2.5 py-1.5 text-[13px] text-danger">
                 {describeError(grant.error)}
               </p>
             )}
             {revoke.isError && revoke.error && (
-              <p role="alert" className="mt-2 text-sm">
+              <p role="alert" className="mt-2 rounded border border-line bg-danger-soft px-2.5 py-1.5 text-[13px] text-danger">
                 {describeError(revoke.error)}
               </p>
             )}
@@ -160,9 +160,9 @@ export function PermissionsDialog({ scopeType, scopeId, onClose }: Props) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-3 py-1 text-sm hover:bg-muted"
+            className="h-7 rounded px-3 text-[13px] text-dim hover:bg-hover"
           >
-            Đóng
+            Close
           </button>
         </div>
       </div>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 
 import { useSearch } from '../lib/useSearch'
+import { OPEN_PALETTE_EVENT } from './AppShell'
 
 interface Command {
   id: string
@@ -29,8 +30,16 @@ export function CommandPalette() {
       }
       if (event.key === 'Escape') setOpen(false)
     }
+    // Nút tìm kiếm trên header mở bảng lệnh qua một window event, không qua context:
+    // bảng lệnh nằm trong `AppLayout` còn nút nằm trong `AppShell`, và một context chỉ
+    // để nối hai thứ đó là ba file nữa cho một mũi tên một chiều.
+    const onOpen = () => setOpen(true)
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener(OPEN_PALETTE_EVENT, onOpen)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener(OPEN_PALETTE_EVENT, onOpen)
+    }
   }, [])
 
   useEffect(() => {
@@ -52,7 +61,7 @@ export function CommandPalette() {
       run: () => navigate(`/workspaces/${hit.workspace_id}/items/${hit.id}`),
     }))
     const actions: Command[] = [
-      { id: 'go:workspaces', label: 'Đi tới danh sách workspace', run: () => navigate('/') },
+      { id: 'go:workspaces', label: 'Go to workspaces', run: () => navigate('/') },
     ]
     // Hành động lọc theo CÙNG chuỗi tìm kiếm, để palette không đẩy một hành động không
     // liên quan lên trên kết quả người dùng đang tìm.
@@ -64,17 +73,17 @@ export function CommandPalette() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-ink/25 pt-[12vh] backdrop-blur-[1px]"
       onClick={() => setOpen(false)}
     >
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Bảng lệnh"
+        aria-label="Command palette"
         // Chặn nổi bọt: bấm bên TRONG bảng không được đóng nó, còn bấm ra ngoài thì có.
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-xl overflow-hidden rounded-lg border border-line bg-surface shadow-xl"
+        className="w-full max-w-xl overflow-hidden rounded-lg border border-line-strong bg-surface shadow-2xl shadow-ink/20"
       >
         <input
           ref={inputRef}
@@ -99,13 +108,13 @@ export function CommandPalette() {
               setOpen(false)
             }
           }}
-          placeholder="Tìm item hoặc chạy lệnh…"
-          aria-label="Tìm item hoặc chạy lệnh"
-          className="w-full border-b border-line bg-transparent px-4 py-3 outline-none"
+          placeholder="Search items or run a command…"
+          aria-label="Search items or run a command"
+          className="w-full border-b border-line bg-transparent px-4 py-3 text-[14px] outline-none placeholder:text-faint"
         />
-        <ul role="listbox" aria-label="Kết quả" className="max-h-80 overflow-auto py-1">
+        <ul role="listbox" aria-label="Results" className="max-h-[52vh] overflow-auto py-1">
           {commands.length === 0 && (
-            <li className="px-4 py-3 text-sm text-dim">
+            <li className="px-4 py-6 text-center text-[13px] text-dim">
               {/* "đang tìm" và "không có gì" là HAI chuyện, và gộp lại làm người dùng
                   kết luận item của mình không tồn tại ngay khi request còn đang bay.
                   Lỗi lại là chuyện thứ ba: "Không có kết quả" khi server đang lỗi là
@@ -114,7 +123,7 @@ export function CommandPalette() {
                   KHÔNG có nhánh "nhập để tìm": lúc chuỗi rỗng thì danh sách hành động
                   vẫn hiện, nên nhánh đó không bao giờ tới được — và mở bảng ra thấy sẵn
                   các lệnh hữu ích hơn một câu bảo người dùng gõ. */}
-              {error ? error.message : isFetching ? 'Đang tìm…' : 'Không có kết quả'}
+              {error ? error.message : isFetching ? 'Searching…' : 'No results'}
             </li>
           )}
           {commands.map((command, index) => (
@@ -128,13 +137,13 @@ export function CommandPalette() {
                   command.run()
                   setOpen(false)
                 }}
-                className={`flex w-full items-center gap-3 px-4 py-2 text-left text-sm ${
-                  index === cursor ? 'bg-muted' : ''
+                className={`flex w-full items-center gap-3 px-4 py-2 text-left text-[13px] ${
+                  index === cursor ? 'bg-selected' : ''
                 }`}
               >
-                <span className="truncate">{command.label}</span>
+                <span className="truncate font-medium">{command.label}</span>
                 {command.hint && (
-                  <span className="ml-auto shrink-0 text-xs text-dim">{command.hint}</span>
+                  <span className="ml-auto shrink-0 font-mono text-[11px] text-faint">{command.hint}</span>
                 )}
               </button>
             </li>

@@ -44,7 +44,7 @@ describe('PermissionsDialog', () => {
   it('member KHÔNG thấy tuỳ chọn admin', async () => {
     stubRoles(['viewer', 'contributor'])
     renderDialog()
-    const select = await screen.findByLabelText(/vai trò/i)
+    const select = await screen.findByLabelText(/role/i)
     const options = Array.from(select.querySelectorAll('option'))
       .map((o) => o.textContent)
       .filter((t) => t !== '—')
@@ -55,7 +55,7 @@ describe('PermissionsDialog', () => {
     // Vế đối: không có nó, một bản cài đặt trả danh sách rỗng vẫn thoả test trên.
     stubRoles(['viewer', 'contributor', 'member', 'admin'])
     renderDialog()
-    const select = await screen.findByLabelText(/vai trò/i)
+    const select = await screen.findByLabelText(/role/i)
     const options = Array.from(select.querySelectorAll('option'))
       .map((o) => o.textContent)
       .filter((t) => t !== '—')
@@ -65,20 +65,20 @@ describe('PermissionsDialog', () => {
   it('nút thu bị vô hiệu KÈM LÝ DO khi là admin cuối cùng', async () => {
     stubRoles(['viewer', 'contributor', 'member', 'admin'], [ADMIN_USER])
     renderDialog()
-    const button = await screen.findByRole('button', { name: /thu quyền/i })
+    const button = await screen.findByRole('button', { name: /remove/i })
     expect(button).toBeDisabled()
     // Vô hiệu mà không nói lý do tệ hơn không vô hiệu: người dùng bấm mãi không được và
     // không biết vì sao.
-    expect(button).toHaveAccessibleDescription(/admin cuối cùng/i)
+    expect(button).toHaveAccessibleDescription(/last admin/i)
   })
 
   it('nút thu bật lại khi có admin thứ hai LÀ MỘT NHÓM', async () => {
     // Chỉ đếm người thì nút này vẫn bị vô hiệu oan, và không ai gỡ được admin nào cả.
     stubRoles(['viewer', 'contributor', 'member', 'admin'], [ADMIN_USER, ADMIN_GROUP])
     renderDialog()
-    const buttons = await screen.findAllByRole('button', { name: /thu quyền/i })
+    const buttons = await screen.findAllByRole('button', { name: /remove/i })
     expect(buttons[0]).toBeEnabled()
-    expect(buttons[0]).not.toHaveAccessibleDescription(/admin cuối cùng/i)
+    expect(buttons[0]).not.toHaveAccessibleDescription(/last admin/i)
   })
 
   it('viewer KHÔNG phải admin cuối cùng — nút thu của họ vẫn bật', async () => {
@@ -89,7 +89,7 @@ describe('PermissionsDialog', () => {
       [ADMIN_USER, { principal_type: 'user', user_id: 'u2', group: null, role: 'viewer' }],
     )
     renderDialog()
-    const buttons = await screen.findAllByRole('button', { name: /thu quyền/i })
+    const buttons = await screen.findAllByRole('button', { name: /remove/i })
     expect(buttons[0]).toBeDisabled()
     expect(buttons[1]).toBeEnabled()
   })
@@ -115,11 +115,13 @@ describe('PermissionsDialog', () => {
       }),
     )
     renderDialog()
-    await screen.findByLabelText(/vai trò/i)
-    await userEvent.type(screen.getByLabelText(/người dùng hoặc nhóm/i), 'ops')
-    await userEvent.selectOptions(screen.getByLabelText(/vai trò/i), 'viewer')
-    await userEvent.click(screen.getByRole('button', { name: 'Gán' }))
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/không gán được/i))
+    await screen.findByLabelText(/role/i)
+    await userEvent.type(screen.getByLabelText(/user or group/i), 'ops')
+    await userEvent.selectOptions(screen.getByLabelText(/role/i), 'viewer')
+    await userEvent.click(screen.getByRole('button', { name: 'Grant' }))
+    await waitFor(() => expect(screen.getByRole('alert')).// Nguyên văn câu của SERVER, và câu đó vẫn tiếng Việt: nhãn giao diện đổi sang
+    // tiếng Anh không kéo theo thông báo lỗi backend.
+      toHaveTextContent(/không gán được/i))
   })
 
   it('409 admin cuối cùng từ server vẫn hiện, kể cả khi UI đã cố chặn', async () => {
@@ -142,7 +144,7 @@ describe('PermissionsDialog', () => {
       }),
     )
     renderDialog()
-    const buttons = await screen.findAllByRole('button', { name: /thu quyền/i })
+    const buttons = await screen.findAllByRole('button', { name: /remove/i })
     await userEvent.click(buttons[0])
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/gán admin khác/i))
   })
@@ -152,20 +154,20 @@ describe('PermissionsDialog', () => {
     // gửi gì, nên việc chọn phải xảy ra ở đây.
     const mock = stubRoles(['viewer'])
     renderDialog()
-    await screen.findByLabelText(/vai trò/i)
-    await userEvent.selectOptions(screen.getByLabelText(/vai trò/i), 'viewer')
+    await screen.findByLabelText(/role/i)
+    await userEvent.selectOptions(screen.getByLabelText(/role/i), 'viewer')
 
     // Lọc theo METHOD: `onSuccess` nạp lại danh sách, nên lần gọi cuối cùng là một GET
     // không có body — `calls.at(-1)` sẽ đọc nhầm request đó.
     const puts = () => mock.mock.calls.filter((c) => c[1]?.method === 'PUT')
 
-    await userEvent.type(screen.getByLabelText(/người dùng hoặc nhóm/i), USER)
-    await userEvent.click(screen.getByRole('button', { name: 'Gán' }))
+    await userEvent.type(screen.getByLabelText(/user or group/i), USER)
+    await userEvent.click(screen.getByRole('button', { name: 'Grant' }))
     await waitFor(() => expect(puts()).toHaveLength(1))
     expect(JSON.parse(String(puts()[0][1]?.body))).toEqual({ role: 'viewer', user_id: USER })
 
-    await userEvent.type(screen.getByLabelText(/người dùng hoặc nhóm/i), 'data-eng')
-    await userEvent.click(screen.getByRole('button', { name: 'Gán' }))
+    await userEvent.type(screen.getByLabelText(/user or group/i), 'data-eng')
+    await userEvent.click(screen.getByRole('button', { name: 'Grant' }))
     await waitFor(() => expect(puts()).toHaveLength(2))
     expect(JSON.parse(String(puts()[1][1]?.body))).toEqual({ role: 'viewer', group: 'data-eng' })
   })
@@ -175,7 +177,7 @@ describe('PermissionsDialog', () => {
     // lược body là yêu cầu thiếu đúng phần nói THU CỦA AI.
     const mock = stubRoles(['admin'], [ADMIN_USER, ADMIN_GROUP])
     renderDialog()
-    const buttons = await screen.findAllByRole('button', { name: /thu quyền/i })
+    const buttons = await screen.findAllByRole('button', { name: /remove/i })
     await userEvent.click(buttons[1])
     await waitFor(() => expect(mock.mock.calls.length).toBeGreaterThan(1))
     const [url, init] = mock.mock.calls.find((c) => c[1]?.method === 'DELETE') ?? []
@@ -186,14 +188,14 @@ describe('PermissionsDialog', () => {
   it('nút Gán bị vô hiệu khi thiếu principal hoặc vai trò', async () => {
     stubRoles(['viewer'])
     renderDialog()
-    await screen.findByLabelText(/vai trò/i)
-    expect(screen.getByRole('button', { name: 'Gán' })).toBeDisabled()
+    await screen.findByLabelText(/role/i)
+    expect(screen.getByRole('button', { name: 'Grant' })).toBeDisabled()
 
-    await userEvent.type(screen.getByLabelText(/người dùng hoặc nhóm/i), 'ops')
-    expect(screen.getByRole('button', { name: 'Gán' })).toBeDisabled()
+    await userEvent.type(screen.getByLabelText(/user or group/i), 'ops')
+    expect(screen.getByRole('button', { name: 'Grant' })).toBeDisabled()
 
-    await userEvent.selectOptions(screen.getByLabelText(/vai trò/i), 'viewer')
-    expect(screen.getByRole('button', { name: 'Gán' })).toBeEnabled()
+    await userEvent.selectOptions(screen.getByLabelText(/role/i), 'viewer')
+    expect(screen.getByRole('button', { name: 'Grant' })).toBeEnabled()
   })
 
   it('403 khi ĐỌC danh sách quyền hiện thông báo thay vì bảng rỗng', async () => {

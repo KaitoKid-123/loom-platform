@@ -39,7 +39,7 @@ describe('App', () => {
   it('hiển thị trạng thái đang tải trước khi biết người dùng là ai', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
     renderApp()
-    expect(screen.getByRole('status')).toHaveTextContent('Đang tải')
+    expect(screen.getByRole('status')).toHaveTextContent('Loading')
   })
 
   it('chuyển hướng sang trang đăng nhập khi chưa xác thực', async () => {
@@ -77,7 +77,7 @@ describe('App', () => {
       vi.fn(async () => new Response('boom', { status: 500 })),
     )
     renderApp()
-    expect(await screen.findByRole('alert')).toHaveTextContent(/không kết nối được/i)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/cannot reach/i)
   })
 
   it('KHÔNG tự chuyển hướng lại khi vừa đăng nhập hỏng — chặn vòng lặp câm', async () => {
@@ -92,8 +92,8 @@ describe('App', () => {
 
     renderApp()
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(/không thành công/i)
-    expect(screen.getByRole('link', { name: /thử lại/i })).toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toHaveTextContent(/sign-in failed/i)
+    expect(screen.getByRole('link', { name: /try again/i })).toBeInTheDocument()
     expect(navigateTo).not.toHaveBeenCalled()
   })
 })

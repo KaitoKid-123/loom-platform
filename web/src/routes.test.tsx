@@ -16,7 +16,18 @@ function renderAt(path: string) {
   )
 }
 
-function stubFetch(body: unknown = { items: [] }) {
+/** Mặc định là một phản hồi `/me` HỢP LỆ kèm `items: []` cho các endpoint danh sách:
+ *  `AppLayout` render `AppShell` với người dùng này ở mọi route, nên một `/me` sai hình
+ *  dạng làm mọi test trong file đỏ vì một lý do không liên quan đến route. */
+function stubFetch(
+  body: unknown = {
+    subject: 's',
+    email: 'e@loom.local',
+    display_name: 'Kilgore Trout',
+    groups: [],
+    items: [],
+  },
+) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })),
@@ -37,7 +48,7 @@ describe('routes', () => {
   it('đường lạ hiện trang không tìm thấy, KHÔNG phải màn hình trắng', async () => {
     stubFetch()
     renderAt('/duong/khong/ton/tai')
-    expect(await screen.findByText(/không tìm thấy trang/i)).toBeInTheDocument()
+    expect(await screen.findByText(/page not found/i)).toBeInTheDocument()
   })
 
   it('trang không tìm thấy nói tới khả năng mất quyền', async () => {
@@ -45,7 +56,7 @@ describe('routes', () => {
     // nói riêng "trang không tồn tại" sẽ khiến người dùng tưởng dữ liệu bị xoá.
     stubFetch()
     renderAt('/duong/khong/ton/tai')
-    expect(await screen.findByText(/không còn quyền/i)).toBeInTheDocument()
+    expect(await screen.findByText(/no longer have permission/i)).toBeInTheDocument()
   })
 
   it('bộ lọc Explorer nằm trong query string để deep-link được', async () => {
@@ -54,7 +65,7 @@ describe('routes', () => {
       '/workspaces/11111111-1111-1111-1111-111111111111/items?folder=/staging/&type=pipeline',
     )
     // Không khẳng định nội dung ở đây — chỉ khẳng định route KHỚP và không nổ.
-    expect(container.textContent).not.toContain('không tìm thấy trang')
+    expect(container.textContent).not.toContain('Page not found')
   })
 
   it('route connections của một workspace khớp', async () => {
@@ -62,7 +73,7 @@ describe('routes', () => {
     const { container } = renderAt(
       '/workspaces/11111111-1111-1111-1111-111111111111/connections',
     )
-    expect(container.textContent).not.toContain('không tìm thấy trang')
+    expect(container.textContent).not.toContain('Page not found')
   })
 })
 
@@ -75,7 +86,7 @@ describe('⌘K nối dây vào ứng dụng', () => {
     await screen.findByRole('heading', { name: /workspace/i })
 
     await userEvent.keyboard('{Control>}k{/Control}')
-    expect(screen.getByRole('dialog', { name: 'Bảng lệnh' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Command palette' })).toBeInTheDocument()
   })
 })
 
@@ -99,6 +110,6 @@ describe('route chi tiết item', () => {
     // `stubFetch` trả cùng một payload cho mọi URL, kể cả `/versions` — nên test này
     // cũng đi qua đúng đường mà một phản hồi sai hình dạng đi qua.
     await screen.findByRole('heading', { name: 'X' })
-    expect(container.textContent).not.toContain('không tìm thấy trang')
+    expect(container.textContent).not.toContain('Page not found')
   })
 })

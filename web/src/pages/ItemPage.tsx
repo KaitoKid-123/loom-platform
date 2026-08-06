@@ -1,5 +1,8 @@
 import { Link, useParams } from 'react-router'
 
+import { ItemTypeIcon, typeLabel } from '../components/ItemTypeIcon'
+import { PageHeader } from '../components/PageHeader'
+
 import { describeError } from '../lib/useItemMutations'
 import { useItem, useItemVersions, useRestoreVersion } from '../lib/useItem'
 
@@ -18,25 +21,25 @@ export function ItemPage() {
 
   if (isPending) {
     return (
-      <div data-testid="item-skeleton" className="space-y-3">
-        <div className="h-8 w-1/3 animate-pulse rounded bg-muted" />
-        <div className="h-32 animate-pulse rounded bg-muted" />
+      <div data-testid="item-skeleton" className="space-y-3 p-5">
+        <div className="h-8 w-1/3 animate-pulse rounded bg-hover" />
+        <div className="h-32 animate-pulse rounded bg-hover" />
       </div>
     )
   }
 
   if (error || !data) {
     return (
-      <div role="alert" className="rounded-lg border border-line p-6">
-        <p className="font-medium">Không mở được item</p>
+      <div role="alert" className="m-5 rounded-md border border-line bg-surface p-6">
+        <p className="font-medium">Could not open this item</p>
         {/* Backend trả 404 cho cả "không tồn tại" và "không được đọc" (spec mục 4.5), nên
             nói thêm khả năng mất quyền là trung thực. */}
-        <p className="mt-1 text-sm text-dim">{error?.message}</p>
-        <p className="mt-2 text-sm text-dim">
-          Item có thể đã bị xoá, hoặc bạn không còn quyền xem nó.
+        <p className="mt-1 text-[13px] text-dim">{error?.message}</p>
+        <p className="mt-2 rounded border border-line bg-danger-soft px-2.5 py-1.5 text-[13px] text-danger">
+          The item may have been deleted, or you may no longer have permission to see it.
         </p>
-        <Link to={`/workspaces/${workspaceId}/items`} className="mt-4 inline-block text-sm underline">
-          Về cây item
+        <Link to={`/workspaces/${workspaceId}/items`} className="mt-4 inline-block text-[13px] text-accent underline">
+          Back to all items
         </Link>
       </div>
     )
@@ -45,47 +48,57 @@ export function ItemPage() {
   const item = data.data
 
   return (
-    <div className="space-y-6">
-      <div>
-        <Link to={`/workspaces/${workspaceId}/items`} className="text-sm text-dim underline">
-          ← Cây item
-        </Link>
-        {/* Nhãn nằm NGOÀI `h1`. Trong `h1` thì accessible name là chuỗi nối liền —
-            "Xsql_scriptv1" — vì JSX bỏ khoảng trắng giữa các phần tử, và screen reader
-            đọc nó thành một từ vô nghĩa. Đã gặp thật khi một test không khớp được tên. */}
-        <div className="mt-2 flex items-center gap-3">
-          <h1 className="text-lg font-medium">{item.display_name}</h1>
-          <span className="rounded bg-muted px-2 py-0.5 text-xs text-dim">{item.type}</span>
-          {/* Version hiện ra vì nó CHÍNH LÀ ETag: khi một lần sửa ăn 412, người dùng đọc
-              được ở đây bản hiện tại là mấy. */}
-          <span
-            aria-label={`version ${item.version}`}
-            className="rounded bg-muted px-2 py-0.5 text-xs text-dim"
-          >
-            v{item.version}
+    <>
+      <PageHeader
+        crumbs={[
+          { label: 'Workspaces', to: '/' },
+          { label: 'All items', to: `/workspaces/${workspaceId}/items` },
+          { label: item.display_name },
+        ]}
+        title={
+          <span className="flex items-center gap-2">
+            <ItemTypeIcon type={item.type} size={18} />
+            {item.display_name}
           </span>
-        </div>
-        <p className="mt-1 font-mono text-xs text-dim">
-          {item.folder_path}
-          {item.name}
-        </p>
-        {item.description && <p className="mt-2 text-sm">{item.description}</p>}
-      </div>
+        }
+        actions={
+          <>
+            <span className="rounded bg-raised px-1.5 py-0.5 text-[12px] text-dim">
+              {typeLabel(item.type)}
+            </span>
+            {/* Version hiện ra vì nó CHÍNH LÀ ETag: khi một lần sửa ăn 412, người dùng
+                đọc được ở đây bản hiện tại là mấy. */}
+            <span
+              aria-label={`version ${item.version}`}
+              className="tabular rounded bg-raised px-1.5 py-0.5 text-[12px] text-dim"
+            >
+              v{item.version}
+            </span>
+          </>
+        }
+      />
+
+    <div className="space-y-6 p-5">
+      <p className="font-mono text-[12px] text-faint">
+        {item.folder_path}
+        {item.name}
+      </p>
+      {item.description && <p className="text-[13px]">{item.description}</p>}
 
       <section>
-        <h2 className="mb-2 text-sm font-medium">Definition</h2>
+        <h2 className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-dim">Definition</h2>
         {/* Chỉ đọc, và cố ý: trình soạn thảo thuộc Giai đoạn 2. Một ô sửa được mà không
             lưu được thì tệ hơn một ô chỉ đọc. */}
-        <pre className="overflow-auto rounded border border-line bg-muted p-3 text-xs">
+        <pre className="overflow-auto rounded-md border border-line bg-surface p-3 font-mono text-[12px] leading-relaxed">
           {JSON.stringify(item.definition, null, 2)}
         </pre>
       </section>
 
       <section>
-        <h2 className="mb-2 text-sm font-medium">Lịch sử version</h2>
-        {versions.isPending && <p className="text-sm text-dim">Đang tải…</p>}
+        <h2 className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-dim">Version history</h2>
+        {versions.isPending && <p className="text-[13px] text-dim">Loading…</p>}
         {versions.error && (
-          <p role="alert" className="text-sm text-dim">
+          <p role="alert" className="text-[13px] text-dim">
             {versions.error.message}
           </p>
         )}
@@ -97,15 +110,15 @@ export function ItemPage() {
             {(versions.data.items ?? []).map((row) => (
               <li
                 key={row.version}
-                className="flex items-center gap-3 rounded border border-line px-3 py-2 text-sm"
+                className="flex items-center gap-3 rounded border border-line bg-surface px-3 py-1.5 text-[13px]"
               >
-                <span className="w-10 shrink-0 font-mono text-xs">v{row.version}</span>
+                <span className="tabular w-9 shrink-0 font-mono text-[12px] text-dim">v{row.version}</span>
                 <span className="min-w-0 flex-1 truncate">{row.display_name}</span>
                 {row.change_note && (
-                  <span className="truncate text-xs text-dim">{row.change_note}</span>
+                  <span className="truncate text-[12px] text-faint">{row.change_note}</span>
                 )}
-                <span className="shrink-0 text-xs text-dim">
-                  {new Date(row.created_at).toLocaleString('vi-VN')}
+                <span className="tabular shrink-0 text-[12px] text-dim">
+                  {new Date(row.created_at).toLocaleString('en-GB')}
                 </span>
                 <button
                   type="button"
@@ -113,25 +126,27 @@ export function ItemPage() {
                   // mới nội dung y hệt, cùng một dòng audit vô nghĩa.
                   disabled={row.version === item.version || restore.isPending}
                   onClick={() => restore.mutate(row.version)}
-                  className="shrink-0 rounded border border-line px-2 py-0.5 text-xs disabled:opacity-40"
+                  className="shrink-0 rounded border border-line-strong px-2 py-0.5 text-[12px] text-dim transition-colors hover:bg-hover hover:text-ink disabled:opacity-40"
                 >
-                  Phục hồi
+                  Restore
                 </button>
               </li>
             ))}
           </ul>
         )}
         {restore.isError && restore.error && (
-          <p role="alert" className="mt-2 text-sm text-dim">
+          <p role="alert" className="mt-2 rounded border border-line bg-danger-soft px-2.5 py-1.5 text-[13px] text-danger">
             {describeError(restore.error)}
           </p>
         )}
         {/* Nói rõ `restore` LÀM GÌ. Người dùng tưởng nó ghi đè lịch sử là một hiểu nhầm
             đắt: nó sinh version MỚI mang nội dung cũ, nên không mất gì cả. */}
-        <p className="mt-2 text-xs text-dim">
-          Phục hồi tạo một version mới mang nội dung của version cũ — lịch sử không mất gì.
+        <p className="mt-2 text-[12px] text-dim">
+          Restoring creates a new version carrying the old content — nothing is lost from the
+          history.
         </p>
       </section>
     </div>
+    </>
   )
 }

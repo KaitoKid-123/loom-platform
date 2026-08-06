@@ -92,7 +92,9 @@ describe('ItemPage', () => {
     // `aria-label` riêng cho nhãn version: "v3" một mình bị screen reader đọc là
     // "vê ba" mà không nói đó là gì.
     expect(screen.getByLabelText('version 3')).toBeInTheDocument()
-    expect(screen.getByText('sql_script')).toBeInTheDocument()
+    // Nhãn NGƯỜI ĐỌC ĐƯỢC, không phải slug: `typeLabel` đổi `sql_script` thành
+    // "SQL script". Slug kỹ thuật chỉ nên xuất hiện ở chỗ nó là dữ liệu.
+    expect(screen.getByText('SQL script')).toBeInTheDocument()
   })
 
   it('hiện definition dưới dạng chỉ đọc, không phải ô nhập', async () => {
@@ -113,7 +115,7 @@ describe('ItemPage', () => {
     // Bấm nó chỉ sinh một version mới nội dung y hệt, kèm một dòng audit vô nghĩa.
     renderPage()
     await screen.findByText('v2')
-    const buttons = screen.getAllByRole('button', { name: 'Phục hồi' })
+    const buttons = screen.getAllByRole('button', { name: 'Restore' })
     expect(buttons[0]).toBeDisabled()
     expect(buttons[1]).toBeEnabled()
   })
@@ -121,7 +123,7 @@ describe('ItemPage', () => {
   it('phục hồi gọi đúng endpoint restore', async () => {
     const { mock } = renderPage()
     await screen.findByText('v2')
-    await userEvent.click(screen.getAllByRole('button', { name: 'Phục hồi' })[1])
+    await userEvent.click(screen.getAllByRole('button', { name: 'Restore' })[1])
     await waitFor(() =>
       expect(
         mock.mock.calls.some((c) => String(c[0]).endsWith('/versions/2/restore')),
@@ -132,7 +134,7 @@ describe('ItemPage', () => {
   it('nói rõ phục hồi sinh version MỚI, không ghi đè lịch sử', async () => {
     renderPage()
     await screen.findByText('v2')
-    expect(screen.getByText(/lịch sử không mất gì/i)).toBeInTheDocument()
+    expect(screen.getByText(/nothing is lost/i)).toBeInTheDocument()
   })
 
   it('404 nói tới khả năng mất quyền, không chỉ "không tồn tại"', async () => {
@@ -152,6 +154,6 @@ describe('ItemPage', () => {
         <RouterProvider router={router} />
       </QueryClientProvider>,
     )
-    expect(await screen.findByRole('alert')).toHaveTextContent(/không còn quyền/i)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no longer have permission/i)
   })
 })

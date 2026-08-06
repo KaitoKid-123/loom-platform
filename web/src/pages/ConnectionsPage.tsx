@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { useParams } from 'react-router'
 
+import { ItemTypeIcon } from '../components/ItemTypeIcon'
+import { PageHeader, ToolbarButton } from '../components/PageHeader'
+
 import type { TreeItem } from '../lib/folderTree'
 import { ProblemError } from '../lib/problem'
 import { useCreateItem } from '../lib/useItemMutations'
@@ -49,38 +52,38 @@ export function ConnectionsPage() {
   const items = data?.items ?? []
 
   return (
-    <div>
-      <div className="mb-4 flex items-center gap-2">
-        <h1 className="text-lg font-medium">Connections</h1>
-        <div className="flex-1" />
-        <button
-          type="button"
-          onClick={() => setAdding((v) => !v)}
-          className="rounded border border-line px-3 py-1 text-sm hover:bg-muted"
-        >
-          Thêm connection
-        </button>
-      </div>
+    <>
+      <PageHeader
+        crumbs={[{ label: 'Workspaces', to: '/' }, { label: 'Connections' }]}
+        title="Connections"
+        actions={
+          <ToolbarButton variant="primary" onClick={() => setAdding((v) => !v)}>
+            Add connection
+          </ToolbarButton>
+        }
+      />
+
+      <div className="p-5">
 
       {isPending && (
         <div data-testid="connections-skeleton" className="space-y-2">
           {[0, 1].map((i) => (
-            <div key={i} className="h-12 animate-pulse rounded bg-muted" />
+            <div key={i} className="h-14 animate-pulse rounded-md border border-line bg-surface" />
           ))}
         </div>
       )}
 
       {error && (
-        <div role="alert" className="rounded-lg border border-line p-6 text-sm">
+        <div role="alert" className="rounded-md border border-line bg-surface p-6 text-[13px]">
           {error.message}
         </div>
       )}
 
       {data && items.length === 0 && !adding && (
-        <div className="rounded-lg border border-dashed border-line p-8 text-center">
-          <p className="text-sm">Workspace này chưa có connection nào.</p>
-          <p className="mt-2 text-sm text-dim">
-            Thêm một connection để pipeline và SQL script trỏ tới nguồn dữ liệu.
+        <div className="rounded-md border border-dashed border-line-strong bg-surface p-12 text-center">
+          <p className="text-[14px] font-medium">No connections in this workspace</p>
+          <p className="mx-auto mt-1.5 max-w-sm text-[13px] text-dim">
+            Add one so pipelines and SQL scripts have a data source to point at.
           </p>
         </div>
       )}
@@ -90,13 +93,13 @@ export function ConnectionsPage() {
           {items.map((item) => {
             const def = definitionOf(item)
             return (
-              <li key={item.id} className="rounded-lg border border-line p-4 text-sm">
+              <li key={item.id} className="rounded-md border border-line bg-surface p-3.5 text-[13px]">
                 <div className="flex items-center gap-3">
-                  <span aria-hidden>🔌</span>
+                  <ItemTypeIcon type="connection" />
                   <span className="font-medium">{item.display_name}</span>
-                  <span className="rounded bg-muted px-2 py-0.5 text-xs text-dim">{def.kind}</span>
+                  <span className="rounded bg-raised px-1.5 py-0.5 text-[11px] text-dim">{def.kind}</span>
                   <div className="flex-1" />
-                  <span className="text-xs text-dim">
+                  <span className="tabular text-[12px] text-dim">
                     {def.host}
                     {def.port ? `:${def.port}` : ''}
                     {def.database ? `/${def.database}` : ''}
@@ -105,7 +108,7 @@ export function ConnectionsPage() {
                 {/* Hiện NGUYÊN VĂN. Đây là một đường dẫn, không phải bí mật; che nó bằng
                     dấu sao là nói ngược lại kiến trúc, và người vận hành cần đọc được
                     đúng đường dẫn để biết secret nằm ở đâu. */}
-                <p className="mt-2 font-mono text-xs text-dim">{def.secret_ref}</p>
+                <p className="mt-2 font-mono text-[12px] text-faint">{def.secret_ref}</p>
               </li>
             )
           })}
@@ -141,32 +144,32 @@ export function ConnectionsPage() {
               },
             )
           }}
-          className="mt-6 space-y-3 rounded-lg border border-line p-4"
+          className="mt-5 max-w-lg space-y-3 rounded-md border border-line bg-surface p-4"
         >
-          <h2 className="font-medium">Connection mới</h2>
+          <h2 className="text-[14px] font-semibold">New connection</h2>
 
-          <label className="block text-sm">
-            Tên
+          <label className="block text-[12px] font-medium text-dim">
+            Name
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               pattern="[a-z0-9][a-z0-9-]*"
               required
-              className="mt-1 w-full rounded border border-line bg-surface px-2 py-1"
+              className="mt-1 h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px] font-normal text-ink"
             />
             {fieldErrors.name && (
-              <span role="alert" className="mt-1 block text-xs">
+              <span role="alert" className="mt-1 block text-[12px] font-normal text-danger">
                 {fieldErrors.name}
               </span>
             )}
           </label>
 
-          <label className="block text-sm">
-            Loại nguồn
+          <label className="block text-[12px] font-medium text-dim">
+            Source
             <select
               value={kind}
               onChange={(e) => setKind(e.target.value as typeof kind)}
-              className="mt-1 w-full rounded border border-line bg-surface px-2 py-1"
+              className="mt-1 h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px] font-normal text-ink"
             >
               {KINDS.map((k) => (
                 <option key={k} value={k}>
@@ -176,23 +179,23 @@ export function ConnectionsPage() {
             </select>
           </label>
 
-          <label className="block text-sm">
-            Máy chủ
+          <label className="block text-[12px] font-medium text-dim">
+            Host
             <input
               value={host}
               onChange={(e) => setHost(e.target.value)}
               required
-              className="mt-1 w-full rounded border border-line bg-surface px-2 py-1"
+              className="mt-1 h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px] font-normal text-ink"
             />
             {fieldErrors.host && (
-              <span role="alert" className="mt-1 block text-xs">
+              <span role="alert" className="mt-1 block text-[12px] font-normal text-danger">
                 {fieldErrors.host}
               </span>
             )}
           </label>
 
-          <label className="block text-sm">
-            Cổng
+          <label className="block text-[12px] font-medium text-dim">
+            Port
             <input
               type="number"
               min={1}
@@ -200,21 +203,21 @@ export function ConnectionsPage() {
               value={port}
               onChange={(e) => setPort(e.target.value)}
               required
-              className="mt-1 w-full rounded border border-line bg-surface px-2 py-1"
+              className="mt-1 h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px] font-normal text-ink"
             />
           </label>
 
-          <label className="block text-sm">
+          <label className="block text-[12px] font-medium text-dim">
             Database
             <input
               value={database}
               onChange={(e) => setDatabase(e.target.value)}
-              className="mt-1 w-full rounded border border-line bg-surface px-2 py-1"
+              className="mt-1 h-7 w-full rounded border border-line-strong bg-surface px-2 text-[13px] font-normal text-ink"
             />
           </label>
 
-          <label className="block text-sm">
-            Tham chiếu secret
+          <label className="block text-[12px] font-medium text-dim">
+            Secret reference
             {/* `type="text"`, KHÔNG phải `"password"`. Đây là một ĐƯỜNG DẪN tới nơi chứa
                 secret, không phải bản thân secret. Dùng `type=password` là nói với người
                 dùng "nhập mật khẩu vào đây", và họ sẽ làm đúng thế — rồi credential nằm
@@ -227,22 +230,22 @@ export function ConnectionsPage() {
               onChange={(e) => setSecretRef(e.target.value)}
               placeholder="vault://loom/prod/db#password"
               required
-              className="mt-1 w-full rounded border border-line bg-surface px-2 py-1 font-mono"
+              className="mt-1 h-7 w-full rounded border border-line-strong bg-surface px-2 font-mono text-[13px] font-normal text-ink"
             />
             {fieldErrors.secret_ref && (
-              <span role="alert" className="mt-1 block text-xs">
+              <span role="alert" className="mt-1 block text-[12px] font-normal text-danger">
                 {fieldErrors.secret_ref}
               </span>
             )}
           </label>
 
-          <p className="rounded border border-line bg-muted px-3 py-2 text-xs text-dim">
-            Loom không lưu mật khẩu. Ô trên là đường dẫn tới nơi chứa credential (Vault
-            hoặc Kubernetes Secret); chỉ pod chạy task đọc được giá trị thật.
+          <p className="rounded border border-line bg-raised px-3 py-2 text-[12px] leading-relaxed text-dim">
+            Loom stores no passwords. The field above is a path to where the credential lives
+            (Vault or a Kubernetes Secret); only the pod running a task can read the real value.
           </p>
 
           {generalError && (
-            <p role="alert" className="text-sm">
+            <p role="alert" className="text-[13px] text-danger">
               {generalError}
             </p>
           )}
@@ -251,20 +254,21 @@ export function ConnectionsPage() {
             <button
               type="button"
               onClick={() => setAdding(false)}
-              className="rounded px-3 py-1 text-sm text-dim hover:bg-muted"
+              className="h-7 rounded px-3 text-[13px] text-dim hover:bg-hover"
             >
-              Huỷ
+              Cancel
             </button>
             <button
               type="submit"
               disabled={create.isPending}
-              className="rounded border border-line px-3 py-1 text-sm hover:bg-muted disabled:opacity-50"
+              className="h-7 rounded border border-accent bg-accent px-3 text-[13px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
             >
-              Tạo
+              {create.isPending ? 'Creating…' : 'Create'}
             </button>
           </div>
         </form>
       )}
-    </div>
+      </div>
+    </>
   )
 }

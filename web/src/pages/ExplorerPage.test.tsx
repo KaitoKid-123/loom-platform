@@ -62,19 +62,19 @@ describe('ExplorerPage', () => {
   it('trạng thái rỗng của workspace nói bước tiếp theo', async () => {
     stubItems([])
     renderPage()
-    expect(await screen.findByText(/chưa có item nào/i)).toBeInTheDocument()
+    expect(await screen.findByText(/no items yet/i)).toBeInTheDocument()
     // Gợi ý trỏ tới nút, và nút có thật — hai khẳng định riêng, vì một trạng thái rỗng
     // bảo người dùng bấm một nút không tồn tại còn tệ hơn không gợi ý gì.
-    expect(screen.getByText(/để bắt đầu/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Tạo item' })).toBeInTheDocument()
+    expect(screen.getByText(/to get started/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'New item' })).toBeInTheDocument()
   })
 
   it('trạng thái rỗng khi LỌC nói khác với khi workspace trống', async () => {
     // Gộp hai câu làm người dùng vừa đặt bộ lọc tưởng workspace của mình trống.
     stubItems([])
     renderPage('?type=pipeline')
-    expect(await screen.findByText(/không có item nào thuộc loại pipeline/i)).toBeInTheDocument()
-    expect(screen.queryByText(/chưa có item nào/i)).not.toBeInTheDocument()
+    expect(await screen.findByText(/no pipeline items here/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no items yet/i)).not.toBeInTheDocument()
   })
 
   it('dựng cây và hiện item', async () => {
@@ -84,24 +84,33 @@ describe('ExplorerPage', () => {
     expect(screen.getByRole('button', { name: /staging/ })).toBeInTheDocument()
   })
 
-  it('folder đóng thì item bên trong KHÔNG hiện', async () => {
+  it('item trong folder con KHÔNG hiện ở cấp gốc; mở folder mới thấy', async () => {
+    // Bảng hiện ĐÚNG một cấp, như mọi trình duyệt tệp. Đổ phẳng cả cây vào một bảng
+    // làm cột "Name" mất nghĩa: hai item cùng tên ở hai folder khác nhau trông y hệt.
     stubItems([item('an-trong-folder', '/staging/')])
-    renderPage()
-    const folder = await screen.findByRole('button', { name: /staging/ })
-    expect(folder).toHaveAttribute('aria-expanded', 'false')
+    const { router } = renderPage()
+    await screen.findByRole('button', { name: /staging/ })
     expect(screen.queryByText('an-trong-folder')).not.toBeInTheDocument()
 
-    await userEvent.click(folder)
-    expect(folder).toHaveAttribute('aria-expanded', 'true')
-    expect(screen.getByText('an-trong-folder')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /staging/ }))
+    // Folder đang mở nằm trong URL, nên gửi được đường dẫn và F5 không mất chỗ.
+    expect(router.state.location.search).toBe('?folder=%2Fstaging%2F')
+    expect(await screen.findByText('an-trong-folder')).toBeInTheDocument()
   })
 
-  it('deep-link vào một folder mở sẵn nhánh đó', async () => {
-    // Không có nó thì đường dẫn vừa được đồng nghiệp gửi hiện ra một cây đóng kín và
-    // người dùng phải tự bấm mở lại đúng nhánh đã nằm trong URL.
+  it('deep-link vào một folder mở thẳng cấp đó', async () => {
+    // Đường dẫn đồng nghiệp gửi phải mở đúng chỗ họ đang đứng, không phải gốc.
     stubItems([item('sau-hai-tang', '/a/b/')])
     renderPage('?folder=/a/b/')
     expect(await screen.findByText('sau-hai-tang')).toBeInTheDocument()
+  })
+
+  it('folder gõ sai trong URL nói ra, không hiện bảng rỗng', async () => {
+    // Một bảng rỗng trông y hệt một folder thật đang rỗng, nên người dùng tưởng dữ liệu
+    // của mình biến mất thay vì hiểu là mình gõ sai.
+    stubItems([item('x')])
+    renderPage('?folder=/khong-co/')
+    expect(await screen.findByRole('alert')).toHaveTextContent('/khong-co/')
   })
 
   it('đổi bộ lọc đổi URL, không chỉ đổi giao diện', async () => {
@@ -109,10 +118,10 @@ describe('ExplorerPage', () => {
     const { router } = renderPage()
     await screen.findByText('x')
 
-    await userEvent.selectOptions(screen.getByLabelText('Loại'), 'pipeline')
+    await userEvent.selectOptions(screen.getByLabelText('Type'), 'pipeline')
     expect(router.state.location.search).toBe('?type=pipeline')
 
-    await userEvent.selectOptions(screen.getByLabelText('Loại'), '')
+    await userEvent.selectOptions(screen.getByLabelText('Type'), '')
     expect(router.state.location.search).toBe('')
   })
 
@@ -132,7 +141,7 @@ describe('ExplorerPage', () => {
     await screen.findByText('x')
     const before = router.state.historyAction
 
-    await userEvent.selectOptions(screen.getByLabelText('Loại'), 'pipeline')
+    await userEvent.selectOptions(screen.getByLabelText('Type'), 'pipeline')
     expect(router.state.historyAction).toBe('REPLACE')
     expect(before).not.toBe('REPLACE')
   })
@@ -142,7 +151,7 @@ describe('ExplorerPage', () => {
     // trông y như một cây đầy đủ.
     stubItems([item('x')], 'con-nua')
     renderPage()
-    expect(await screen.findByRole('status')).toHaveTextContent(/hơn 200 item/)
+    expect(await screen.findByRole('status')).toHaveTextContent(/more than 200 items/)
   })
 
   it('KHÔNG cảnh báo khi đã tải hết', async () => {
@@ -184,14 +193,14 @@ describe('ExplorerPage — tạo item', () => {
     stubItems([item('x')])
     const { router } = renderPage()
     await screen.findByText('x')
-    await userEvent.click(screen.getByRole('button', { name: 'Tạo item' }))
+    await userEvent.click(screen.getByRole('button', { name: 'New item' }))
     expect(router.state.location.search).toBe('?new=1')
   })
 
   it('đóng hộp thoại gỡ ?new=1 khỏi URL', async () => {
     stubItems([item('x')])
     const { router } = renderPage('?new=1')
-    await userEvent.click(await screen.findByRole('button', { name: 'Huỷ' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
     expect(router.state.location.search).toBe('')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
@@ -200,11 +209,11 @@ describe('ExplorerPage — tạo item', () => {
     stubItems([item('x')])
     renderPage('?new=1')
     await screen.findByRole('dialog')
-    expect(screen.queryByLabelText('Secret ref')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Secret reference')).not.toBeInTheDocument()
 
-    await userEvent.selectOptions(screen.getByLabelText('Loại item'), 'connection')
-    expect(screen.getByLabelText('Secret ref')).toBeInTheDocument()
-    expect(screen.getByLabelText('Host')).toBeInTheDocument()
+    await userEvent.selectOptions(screen.getByLabelText('Item type'), 'connection')
+    expect(screen.getByLabelText('Secret reference')).toBeInTheDocument()
+    expect(screen.getByLabelText(/^host$/i)).toBeInTheDocument()
   })
 
   it('ô secret_ref KHÔNG bị che như mật khẩu', async () => {
@@ -213,9 +222,9 @@ describe('ExplorerPage — tạo item', () => {
     stubItems([item('x')])
     renderPage('?new=1')
     await screen.findByRole('dialog')
-    await userEvent.selectOptions(screen.getByLabelText('Loại item'), 'connection')
-    expect(screen.getByLabelText('Secret ref')).not.toHaveAttribute('type', 'password')
-    expect(screen.getByText(/không phải mật khẩu/i)).toBeInTheDocument()
+    await userEvent.selectOptions(screen.getByLabelText('Item type'), 'connection')
+    expect(screen.getByLabelText('Secret reference')).not.toHaveAttribute('type', 'password')
+    expect(screen.getByText(/not a password/i)).toBeInTheDocument()
   })
 
   it('lỗi 422 của backend gắn vào ĐÚNG ô input', async () => {
@@ -223,7 +232,7 @@ describe('ExplorerPage — tạo item', () => {
     renderPage('?new=1')
     await screen.findByRole('dialog')
 
-    await userEvent.type(screen.getByLabelText('Tên kỹ thuật'), 'Ten Sai')
+    await userEvent.type(screen.getByLabelText('Name'), 'Ten Sai')
     vi.stubGlobal(
       'fetch',
       vi.fn<typeof fetch>(
@@ -239,7 +248,7 @@ describe('ExplorerPage — tạo item', () => {
           ),
       ),
     )
-    await userEvent.click(screen.getByRole('button', { name: 'Tạo' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }))
 
     // Thông báo nằm cạnh ô `name`, không phải một câu chung ở cuối form: với sáu ô thì
     // "dữ liệu không hợp lệ" bắt người dùng tự đoán ô nào sai.
@@ -252,9 +261,9 @@ describe('ExplorerPage — đổi tên và xoá trong cây', () => {
   it('đổi tên dùng ETag dựng từ version, không cần GET thêm', async () => {
     const mock = stubItems([{ ...item('x'), version: 7 }])
     renderPage()
-    await userEvent.click(await screen.findByRole('button', { name: 'Đổi tên' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
 
-    const input = screen.getByLabelText('Tên hiển thị')
+    const input = screen.getByLabelText('Display name')
     await userEvent.clear(input)
     await userEvent.type(input, 'Tên mới{Enter}')
 
@@ -266,10 +275,10 @@ describe('ExplorerPage — đổi tên và xoá trong cây', () => {
   it('Escape huỷ đổi tên mà KHÔNG gửi gì', async () => {
     const mock = stubItems([item('x')])
     renderPage()
-    await userEvent.click(await screen.findByRole('button', { name: 'Đổi tên' }))
-    await userEvent.type(screen.getByLabelText('Tên hiển thị'), 'nửa đường{Escape}')
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByLabelText('Display name'), 'nửa đường{Escape}')
 
-    expect(screen.queryByLabelText('Tên hiển thị')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Display name')).not.toBeInTheDocument()
     expect(mock.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PATCH')).toBe(false)
   })
 
@@ -278,10 +287,10 @@ describe('ExplorerPage — đổi tên và xoá trong cây', () => {
     // cả nhóm cho tới khi có người khôi phục.
     const mock = stubItems([item('x')])
     renderPage()
-    await userEvent.click(await screen.findByRole('button', { name: 'Xoá' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete' }))
     expect(mock.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE')).toBe(false)
 
-    await userEvent.click(screen.getByRole('button', { name: 'Xác nhận xoá' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     expect(mock.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'DELETE')).toBe(true)
   })
 })
@@ -293,8 +302,8 @@ describe('ExplorerPage — tên gọi của control', () => {
     stubItems([item('x')])
     renderPage('?new=1')
     await screen.findByRole('dialog')
-    expect(screen.getByLabelText('Loại')).toHaveAttribute('id', 'type-filter')
-    expect(screen.getByLabelText('Loại item')).toHaveAttribute('id', 'new-type')
+    expect(screen.getByLabelText('Type')).toHaveAttribute('id', 'type-filter')
+    expect(screen.getByLabelText('Item type')).toHaveAttribute('id', 'new-type')
   })
 })
 
@@ -303,14 +312,14 @@ describe('ExplorerPage — hộp thoại phân quyền', () => {
     // Cùng lý do như hộp thoại tạo item: deep-link được và sống qua F5.
     stubItems([item('x')])
     renderPage('?perms=1')
-    expect(await screen.findByRole('dialog', { name: 'Phân quyền' })).toBeInTheDocument()
+    expect(await screen.findByRole('dialog', { name: 'Permissions' })).toBeInTheDocument()
   })
 
   it('bấm Phân quyền đưa ?perms=1 vào URL', async () => {
     stubItems([item('x')])
     const { router } = renderPage()
     await screen.findByText('x')
-    await userEvent.click(screen.getByRole('button', { name: 'Phân quyền' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Permissions' }))
     expect(router.state.location.search).toBe('?perms=1')
   })
 
@@ -318,21 +327,11 @@ describe('ExplorerPage — hộp thoại phân quyền', () => {
     // Gỡ cả query string sẽ làm người dùng mất bộ lọc chỉ vì họ mở rồi đóng một hộp thoại.
     stubItems([item('x', '/', 'pipeline')])
     const { router } = renderPage('?type=pipeline&perms=1')
-    await userEvent.click(await screen.findByRole('button', { name: 'Đóng' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Close' }))
     expect(router.state.location.search).toBe('?type=pipeline')
   })
 })
 
-describe('ExplorerPage — đường tới Connections', () => {
-  it('có liên kết tới trang Connections của cùng workspace', async () => {
-    // Không có liên kết nào thì route `/connections` không tới được, và trang đó là code
-    // chết dù test riêng của nó xanh.
-    stubItems([item('x')])
-    renderPage()
-    await screen.findByText('x')
-    expect(screen.getByRole('link', { name: 'Connections' })).toHaveAttribute(
-      'href',
-      `/workspaces/${WS}/connections`,
-    )
-  })
-})
+// Đường tới Connections chuyển sang `WorkspacePane` (panel trái của vỏ ứng dụng), nên
+// phép kiểm nó nằm ở `WorkspacePane.test.tsx` — đặt ở đây sẽ phải dựng cả vỏ chỉ để
+// khẳng định một liên kết.

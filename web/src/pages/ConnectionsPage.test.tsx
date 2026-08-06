@@ -51,14 +51,14 @@ describe('ConnectionsPage', () => {
     // `type=password` nói với người dùng "nhập mật khẩu vào đây", và họ sẽ làm đúng thế
     // — rồi credential nằm trong definition và đi vào item_version, audit và Git.
     renderPage()
-    await userEvent.click(await screen.findByRole('button', { name: /thêm connection/i }))
-    expect(screen.getByLabelText(/tham chiếu secret/i)).toHaveAttribute('type', 'text')
+    await userEvent.click(await screen.findByRole('button', { name: /add connection/i }))
+    expect(screen.getByLabelText(/secret reference/i)).toHaveAttribute('type', 'text')
   })
 
   it('nói rõ Loom không giữ credential', async () => {
     renderPage()
-    await userEvent.click(await screen.findByRole('button', { name: /thêm connection/i }))
-    expect(screen.getByText(/loom không lưu mật khẩu/i)).toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: /add connection/i }))
+    expect(screen.getByText(/loom stores no passwords/i)).toBeInTheDocument()
   })
 
   it('không có nút kiểm tra kết nối ở Giai đoạn 1', async () => {
@@ -66,7 +66,7 @@ describe('ConnectionsPage', () => {
     // hứa một tính năng không tồn tại.
     renderPage([PG])
     await screen.findByText('PG')
-    expect(screen.queryByRole('button', { name: /kiểm tra kết nối/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /test connection/i })).not.toBeInTheDocument()
   })
 
   it('hiện secret_ref nguyên văn — nó là đường dẫn, không phải bí mật', async () => {
@@ -92,11 +92,11 @@ describe('ConnectionsPage', () => {
     // `loc` là `['body','definition','secret_ref']` — khoá phải là phần CUỐI, nếu không
     // thông báo không tìm được ô nào và người dùng đọc một câu chung.
     renderPage()
-    await userEvent.click(await screen.findByRole('button', { name: /thêm connection/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /add connection/i }))
 
-    await userEvent.type(screen.getByLabelText(/^tên$/i), 'pg')
-    await userEvent.type(screen.getByLabelText(/máy chủ/i), 'db.local')
-    await userEvent.type(screen.getByLabelText(/tham chiếu secret/i), 'mat-khau-that-cua-toi')
+    await userEvent.type(screen.getByLabelText(/^name$/i), 'pg')
+    await userEvent.type(screen.getByLabelText(/^host$/i), 'db.local')
+    await userEvent.type(screen.getByLabelText(/secret reference/i), 'mat-khau-that-cua-toi')
 
     vi.stubGlobal(
       'fetch',
@@ -119,18 +119,18 @@ describe('ConnectionsPage', () => {
           ),
       ),
     )
-    await userEvent.click(screen.getByRole('button', { name: 'Tạo' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }))
 
     expect(await screen.findByText(/vault:\/\/path#key/)).toBeInTheDocument()
   })
 
   it('gửi definition đúng hình dạng backend chờ', async () => {
     const { mock } = renderPage()
-    await userEvent.click(await screen.findByRole('button', { name: /thêm connection/i }))
-    await userEvent.type(screen.getByLabelText(/^tên$/i), 'pg')
-    await userEvent.type(screen.getByLabelText(/máy chủ/i), 'db.local')
-    await userEvent.type(screen.getByLabelText(/tham chiếu secret/i), 'vault://loom/db#password')
-    await userEvent.click(screen.getByRole('button', { name: 'Tạo' }))
+    await userEvent.click(await screen.findByRole('button', { name: /add connection/i }))
+    await userEvent.type(screen.getByLabelText(/^name$/i), 'pg')
+    await userEvent.type(screen.getByLabelText(/^host$/i), 'db.local')
+    await userEvent.type(screen.getByLabelText(/secret reference/i), 'vault://loom/db#password')
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }))
 
     const post = mock.mock.calls.find((c) => c[1]?.method === 'POST')
     expect(post).toBeDefined()
@@ -149,8 +149,8 @@ describe('ConnectionsPage', () => {
 
   it('trạng thái rỗng nói bước tiếp theo', async () => {
     renderPage([])
-    expect(await screen.findByText(/chưa có connection nào/i)).toBeInTheDocument()
-    expect(screen.getByText(/pipeline và SQL script/i)).toBeInTheDocument()
+    expect(await screen.findByText(/no connections in this workspace/i)).toBeInTheDocument()
+    expect(screen.getByText(/pipelines and SQL scripts/i)).toBeInTheDocument()
   })
 
   it('skeleton khi đang tải, không spinner toàn trang', () => {

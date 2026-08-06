@@ -32,9 +32,9 @@ export function App() {
   if (needsLogin && loginFailed) {
     return (
       <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 text-sm">
-        <p>Đăng nhập không thành công.</p>
+        <p className="text-[14px]">Sign-in failed.</p>
         <a href={LOGIN_URL} className="text-accent underline">
-          Thử lại
+          Try again
         </a>
       </div>
     )
@@ -43,7 +43,7 @@ export function App() {
   if (isPending || needsLogin) {
     return (
       <div role="status" className="flex h-full items-center justify-center text-sm">
-        Đang tải…
+        Loading…
       </div>
     )
   }
@@ -51,7 +51,7 @@ export function App() {
   if (error || !user) {
     return (
       <div role="alert" className="flex h-full items-center justify-center p-8 text-sm">
-        Không kết nối được tới máy chủ Loom. Kiểm tra `kubectl -n loom get pods`.
+        Cannot reach the Loom server. Check `kubectl -n loom get pods`.
       </div>
     )
   }

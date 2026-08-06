@@ -5,6 +5,7 @@ import { navigateTo } from '../lib/navigate'
 import { useCurrentUser } from '../lib/useCurrentUser'
 import { AppShell } from './AppShell'
 import { CommandPalette } from './CommandPalette'
+import { WorkspacePane } from './WorkspacePane'
 
 /**
  * Nối `AppShell` với router.
@@ -28,6 +29,7 @@ export function AppLayout() {
   return (
     <AppShell
       user={user}
+      sidebar={<WorkspacePane />}
       onLogout={async () => {
         await apiPost('/api/v1/auth/logout')
         navigateTo('/api/v1/auth/login')

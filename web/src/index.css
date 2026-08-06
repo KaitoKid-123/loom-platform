@@ -1,18 +1,113 @@
 @import 'tailwindcss';
 
+/* Font TỰ HOST qua @fontsource, không gọi Google Fonts: Loom là nền tảng nội bộ và
+   nhiều cụm không cho trình duyệt ra Internet. Một font tải hỏng làm cả giao diện tụt
+   về font hệ thống, và không ai biết vì sao nó vừa xấu đi.
+
+   IBM Plex Sans chứ không Inter/Roboto: nó được thiết kế cho công cụ kỹ thuật và phân
+   biệt rõ 1/l/I, 0/O ở cỡ nhỏ — thứ quan trọng khi màn hình đầy id, đường dẫn và tên
+   bảng. IBM Plex Mono cho những chỗ ký tự phải xếp thẳng cột: folder_path, secret_ref,
+   JSON definition, số version. */
+@import '@fontsource-variable/ibm-plex-sans';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
 /* Tailwind v4 sinh sẵn utility từ các biến trong @theme:
    --color-surface → bg-surface / text-surface / border-surface, v.v. */
 @theme {
+  /* ── Nền và bề mặt ────────────────────────────────────────────────────────
+     BA tầng, không hai: `canvas` là nền cửa sổ, `surface` là thẻ/bảng nổi lên
+     trên nó, `raised` cho thanh công cụ và hàng tiêu đề. Chỉ hai tầng thì bảng
+     chìm vào nền và mắt không biết đâu là vùng nội dung. */
+  --color-canvas: #f1f2f4;
   --color-surface: #ffffff;
-  --color-muted: #f6f7f9;
-  --color-line: #e3e6ea;
-  --color-ink: #16191d;
-  --color-dim: #616a75;
-  --color-accent: #2f6feb;
+  --color-raised: #f7f8f9;
+  --color-hover: #eef0f2;
+  --color-selected: #e4f2f1;
+
+  /* ── Đường kẻ ─────────────────────────────────────────────────────────────
+     Hai độ đậm. `line` cho viền thẻ, `line-strong` cho chân header và đường chia
+     bảng — chỗ mắt cần một mốc chắc chắn. */
+  --color-line: #e1e4e8;
+  --color-line-strong: #cdd2d8;
+
+  /* ── Chữ ──────────────────────────────────────────────────────────────────
+     `ink` ngả lạnh chứ không đen tuyệt đối: #000 trên trắng tạo quầng và mỏi mắt
+     trên một màn hình người ta nhìn cả ngày. */
+  --color-ink: #14181d;
+  --color-dim: #5b6570;
+  --color-faint: #8a949f;
+
+  /* ── Màu nhấn ─────────────────────────────────────────────────────────────
+     Teal, không phải xanh dương. Đây là màu thương hiệu của chính Fabric, và nó
+     tách Loom khỏi biển công cụ dữ liệu dùng xanh dương mặc định. `accent` đủ tối
+     để chữ trắng trên nó đạt tương phản 4.5:1. */
+  --color-accent: #0f6d68;
+  --color-accent-hover: #0b5551;
+  --color-accent-soft: #d7ecea;
+  --color-accent-line: #7fb8b4;
+
+  /* ── Trạng thái ───────────────────────────────────────────────────────────*/
+  --color-danger: #9f2d20;
+  --color-danger-soft: #fbe9e7;
+  --color-warn: #8a5a00;
+  --color-warn-soft: #fdf3dc;
+
+  /* ── Màu theo LOẠI ITEM ───────────────────────────────────────────────────
+     Mỗi loại một màu riêng, giống Fabric. Không phải trang trí: trong một bảng ba
+     mươi dòng, màu là thứ mắt bắt trước cả chữ, nên nó là cách nhanh nhất để thấy
+     "cái nào là pipeline". */
+  --color-type-lakehouse: #1d6fa5;
+  --color-type-pipeline: #7a4bbd;
+  --color-type-sql: #0f6d68;
+  --color-type-connection: #a5641d;
+
+  --font-sans: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* Bo góc NHỎ có chủ đích. Bo lớn làm giao diện trông như trang tiếp thị; công cụ
+     vận hành cần cảm giác chính xác, và 4px cho điều đó. */
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
 }
 
 html,
 body,
 #root {
   height: 100%;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  /* Chữ nhỏ và dày đặc cần render mảnh hơn, nếu không nó bết lại. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Số xếp THẲNG CỘT ở mọi bảng và mọi số version. Không có nó, cột "Modified" và "v12"
+   nhảy trái phải giữa các dòng và mắt không dò dọc được. */
+table,
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Vòng lấy nét dùng chung, hiện CHỈ khi điều hướng bằng bàn phím. `outline: none` trần
+   là lý do phổ biến nhất khiến một ứng dụng không dùng nổi bằng Tab. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+
+/* Tôn trọng người đã tắt hiệu ứng chuyển động ở cấp hệ điều hành. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

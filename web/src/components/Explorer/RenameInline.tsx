@@ -32,7 +32,7 @@ export function RenameInline({ workspaceId, itemId, etag, current, onDone }: Pro
         // eslint-disable-next-line jsx-a11y/no-autofocus -- ô này xuất hiện do người
         // dùng vừa chọn "Đổi tên"; không lấy nét thì họ phải bấm thêm một lần nữa.
         autoFocus
-        aria-label="Tên hiển thị"
+        aria-label="Display name"
         value={value}
         disabled={rename.isPending}
         onChange={(e) => setValue(e.target.value)}
@@ -43,12 +43,12 @@ export function RenameInline({ workspaceId, itemId, etag, current, onDone }: Pro
         // `onBlur` KHÔNG lưu. Mất nét là chuyện xảy ra vì nhiều lý do — bấm ra ngoài,
         // đổi tab, một hộp thoại khác mở ra — và lưu trong những lúc đó biến một cú
         // bấm lạc tay thành một lần đổi tên không ai định làm.
-        className="rounded border border-line bg-surface px-2 py-1 text-sm disabled:opacity-50"
+        className="h-7 min-w-64 rounded border border-accent bg-surface px-2 text-[13px] disabled:opacity-50"
       />
       {rename.isError && rename.error && (
         // `role="alert"` để screen reader đọc ngay: người dùng vừa gõ xong và cần biết
         // rằng thứ họ gõ KHÔNG được lưu.
-        <span role="alert" className="text-sm text-dim">
+        <span role="alert" className="text-[12px] text-danger">
           {describeError(rename.error)}
         </span>
       )}

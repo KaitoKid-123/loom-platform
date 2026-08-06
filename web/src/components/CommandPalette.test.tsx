@@ -50,14 +50,14 @@ describe('CommandPalette', () => {
     renderPalette()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     await userEvent.keyboard('{Control>}k{/Control}')
-    expect(screen.getByRole('dialog', { name: 'Bảng lệnh' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Command palette' })).toBeInTheDocument()
   })
 
   it('⌘K (metaKey) cũng mở — nếu không thì mọi người dùng macOS mất tính năng', async () => {
     stubHits([])
     renderPalette()
     await userEvent.keyboard('{Meta>}k{/Meta}')
-    expect(screen.getByRole('dialog', { name: 'Bảng lệnh' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Command palette' })).toBeInTheDocument()
   })
 
   it('Escape đóng', async () => {
@@ -74,17 +74,17 @@ describe('CommandPalette', () => {
     stubHits([HIT])
     renderPalette()
     await userEvent.keyboard('{Control>}k{/Control}')
-    await userEvent.type(screen.getByLabelText(/tìm item/i), 'bao')
+    await userEvent.type(screen.getByLabelText(/search items/i), 'bao')
     await userEvent.keyboard('{Escape}')
     await userEvent.keyboard('{Control>}k{/Control}')
-    expect(screen.getByLabelText(/tìm item/i)).toHaveValue('')
+    expect(screen.getByLabelText(/search items/i)).toHaveValue('')
   })
 
   it('mở ra là thấy sẵn lệnh, không phải một câu bảo người dùng gõ', async () => {
     stubHits([])
     renderPalette()
     await userEvent.keyboard('{Control>}k{/Control}')
-    expect(screen.getByRole('option', { name: /danh sách workspace/i })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /go to workspaces/i })).toBeInTheDocument()
   })
 
   it('"đang tìm" và "không có kết quả" phân biệt được', async () => {
@@ -104,18 +104,18 @@ describe('CommandPalette', () => {
     await userEvent.keyboard('{Control>}k{/Control}')
 
     // `khong-co` không khớp hành động nào, nên danh sách rỗng thật.
-    await userEvent.type(screen.getByLabelText(/tìm item/i), 'khong-co')
-    await waitFor(() => expect(screen.getByText('Đang tìm…')).toBeInTheDocument())
+    await userEvent.type(screen.getByLabelText(/search items/i), 'khong-co')
+    await waitFor(() => expect(screen.getByText('Searching…')).toBeInTheDocument())
 
     release(new Response(JSON.stringify({ items: [] }), { status: 200 }))
-    await waitFor(() => expect(screen.getByText('Không có kết quả')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('No results')).toBeInTheDocument())
   })
 
   it('hiện kết quả kèm loại và folder để phân biệt hai item cùng tên', async () => {
     stubHits([HIT])
     renderPalette()
     await userEvent.keyboard('{Control>}k{/Control}')
-    await userEvent.type(screen.getByLabelText(/tìm item/i), 'bao')
+    await userEvent.type(screen.getByLabelText(/search items/i), 'bao')
     expect(await screen.findByText('Báo cáo doanh thu')).toBeInTheDocument()
     expect(screen.getByText('sql_script · /staging/')).toBeInTheDocument()
   })
@@ -124,7 +124,7 @@ describe('CommandPalette', () => {
     stubHits([HIT])
     const { router } = renderPalette()
     await userEvent.keyboard('{Control>}k{/Control}')
-    await userEvent.type(screen.getByLabelText(/tìm item/i), 'bao')
+    await userEvent.type(screen.getByLabelText(/search items/i), 'bao')
     await screen.findByText('Báo cáo doanh thu')
 
     await userEvent.keyboard('{Enter}')
@@ -136,7 +136,7 @@ describe('CommandPalette', () => {
     stubHits([HIT, { ...HIT, id: 'i2', display_name: 'Báo cáo chi phí' }])
     const { router } = renderPalette()
     await userEvent.keyboard('{Control>}k{/Control}')
-    await userEvent.type(screen.getByLabelText(/tìm item/i), 'bao')
+    await userEvent.type(screen.getByLabelText(/search items/i), 'bao')
     await screen.findByText('Báo cáo doanh thu')
 
     const options = screen.getAllByRole('option')
@@ -154,13 +154,13 @@ describe('CommandPalette', () => {
     stubHits([HIT, { ...HIT, id: 'i2', display_name: 'Báo cáo chi phí' }])
     renderPalette()
     await userEvent.keyboard('{Control>}k{/Control}')
-    await userEvent.type(screen.getByLabelText(/tìm item/i), 'bao')
+    await userEvent.type(screen.getByLabelText(/search items/i), 'bao')
     await screen.findByText('Báo cáo doanh thu')
 
     await userEvent.keyboard('{ArrowDown}')
     expect(screen.getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true')
 
-    await userEvent.type(screen.getByLabelText(/tìm item/i), 'o')
+    await userEvent.type(screen.getByLabelText(/search items/i), 'o')
     await waitFor(() => expect(screen.getAllByRole('option')[0]).toHaveAttribute('aria-selected', 'true'))
   })
 
@@ -179,9 +179,9 @@ describe('CommandPalette', () => {
     )
     renderPalette()
     await userEvent.keyboard('{Control>}k{/Control}')
-    await userEvent.type(screen.getByLabelText(/tìm item/i), 'bao')
+    await userEvent.type(screen.getByLabelText(/search items/i), 'bao')
     await waitFor(() => expect(screen.getByText(/Bad Gateway/)).toBeInTheDocument())
-    expect(screen.queryByText('Không có kết quả')).not.toBeInTheDocument()
+    expect(screen.queryByText('No results')).not.toBeInTheDocument()
   })
 
   it('bấm ra ngoài đóng, bấm bên trong thì không', async () => {
