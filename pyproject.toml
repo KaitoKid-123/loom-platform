@@ -63,5 +63,8 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages", "services"]
-markers = ["integration: cần Docker (testcontainers)"]
+markers = [
+    "integration: cần Docker (testcontainers)",
+    "benchmark: phép ĐO, không phải phép kiểm — chậm, chạy bằng make measure-*",
+]
 addopts = "-m 'not integration'"

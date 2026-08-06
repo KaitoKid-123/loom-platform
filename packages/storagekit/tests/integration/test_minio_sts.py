@@ -15,12 +15,12 @@ from botocore.exceptions import ClientError
 
 from loom_storage import MinioStsProvider, S3Credentials
 
-from .conftest import BUCKET, pinned_image
-
 pytestmark = pytest.mark.integration
 
 
-def test_container_runs_the_same_minio_as_the_cluster(minio: object) -> None:
+def test_container_runs_the_same_minio_as_the_cluster(
+    minio: object, pinned_minio_image: str
+) -> None:
     """Contract test bên dưới chỉ có giá trị nếu nó chạy đúng MinIO mà cụm chạy.
 
     Bản đầu của conftest để `MinioContainer` dùng image mặc định của nó —
@@ -32,8 +32,8 @@ def test_container_runs_the_same_minio_as_the_cluster(minio: object) -> None:
     (hoặc ngược lại) thì nó đỏ ngay.
     """
     running = getattr(minio, "image", None)
-    assert running == pinned_image("MINIO_IMAGE"), (
-        f"container chạy {running!r} nhưng cụm chạy {pinned_image('MINIO_IMAGE')!r} — "
+    assert running == pinned_minio_image, (
+        f"container chạy {running!r} nhưng cụm chạy {pinned_minio_image!r} — "
         "contract test đang khẳng định về một MinIO khác với MinIO giữ dữ liệu"
     )
 
@@ -50,29 +50,38 @@ def _client(endpoint: str, creds: S3Credentials) -> Any:
 
 
 def test_credentials_read_their_own_prefix(
-    provider: MinioStsProvider, endpoint: str, two_workspaces: tuple[uuid.UUID, uuid.UUID]
+    provider: MinioStsProvider,
+    endpoint: str,
+    bucket: str,
+    two_workspaces: tuple[uuid.UUID, uuid.UUID],
 ) -> None:
     """Vế KHẲNG ĐỊNH. Không có nó, một policy từ chối tất cả cũng làm mọi phép
     kiểm từ chối bên dưới xanh hết."""
     ws_a, _ = two_workspaces
     client = _client(endpoint, provider.for_workspace(ws_a))
-    body = client.get_object(Bucket=BUCKET, Key=f"workspaces/{ws_a}/Tables/t/data.parquet")
+    body = client.get_object(Bucket=bucket, Key=f"workspaces/{ws_a}/Tables/t/data.parquet")
     assert body["Body"].read() == b"du lieu cua A"
 
 
 def test_credentials_cannot_read_another_workspace(
-    provider: MinioStsProvider, endpoint: str, two_workspaces: tuple[uuid.UUID, uuid.UUID]
+    provider: MinioStsProvider,
+    endpoint: str,
+    bucket: str,
+    two_workspaces: tuple[uuid.UUID, uuid.UUID],
 ) -> None:
     """Vế PHỦ ĐỊNH — hợp đồng thật sự."""
     ws_a, ws_b = two_workspaces
     client = _client(endpoint, provider.for_workspace(ws_a))
     with pytest.raises(ClientError) as caught:
-        client.get_object(Bucket=BUCKET, Key=f"workspaces/{ws_b}/Tables/t/data.parquet")
+        client.get_object(Bucket=bucket, Key=f"workspaces/{ws_b}/Tables/t/data.parquet")
     assert caught.value.response["Error"]["Code"] == "AccessDenied"
 
 
 def test_credentials_cannot_write_into_another_workspace(
-    provider: MinioStsProvider, endpoint: str, two_workspaces: tuple[uuid.UUID, uuid.UUID]
+    provider: MinioStsProvider,
+    endpoint: str,
+    bucket: str,
+    two_workspaces: tuple[uuid.UUID, uuid.UUID],
 ) -> None:
     """Ghi tách riêng khỏi đọc: policy cấp `GetObject` và `PutObject` bằng hai mục
     trong cùng một Action list, nên một bản sửa làm hỏng đúng một trong hai là
@@ -80,12 +89,15 @@ def test_credentials_cannot_write_into_another_workspace(
     ws_a, ws_b = two_workspaces
     client = _client(endpoint, provider.for_workspace(ws_a))
     with pytest.raises(ClientError) as caught:
-        client.put_object(Bucket=BUCKET, Key=f"workspaces/{ws_b}/xam-pham", Body=b"x")
+        client.put_object(Bucket=bucket, Key=f"workspaces/{ws_b}/xam-pham", Body=b"x")
     assert caught.value.response["Error"]["Code"] == "AccessDenied"
 
 
 def test_listing_shows_only_the_own_prefix(
-    provider: MinioStsProvider, endpoint: str, two_workspaces: tuple[uuid.UUID, uuid.UUID]
+    provider: MinioStsProvider,
+    endpoint: str,
+    bucket: str,
+    two_workspaces: tuple[uuid.UUID, uuid.UUID],
 ) -> None:
     """Cái bẫy `ListBucket` từ Task 4, lần này kiểm trên MinIO thật.
 
@@ -96,10 +108,10 @@ def test_listing_shows_only_the_own_prefix(
     ws_a, ws_b = two_workspaces
     client = _client(endpoint, provider.for_workspace(ws_a))
     with pytest.raises(ClientError) as caught:
-        client.list_objects_v2(Bucket=BUCKET)
+        client.list_objects_v2(Bucket=bucket)
     assert caught.value.response["Error"]["Code"] == "AccessDenied"
 
-    scoped = client.list_objects_v2(Bucket=BUCKET, Prefix=f"workspaces/{ws_a}/")
+    scoped = client.list_objects_v2(Bucket=bucket, Prefix=f"workspaces/{ws_a}/")
     keys = [o["Key"] for o in scoped.get("Contents", [])]
     assert keys == [f"workspaces/{ws_a}/Tables/t/data.parquet"]
     assert all(str(ws_b) not in k for k in keys)
@@ -118,7 +130,7 @@ def test_credentials_are_short_lived(
 
 
 def test_expired_credentials_are_rejected_by_the_server(
-    endpoint: str, two_workspaces: tuple[uuid.UUID, uuid.UUID]
+    endpoint: str, bucket: str, two_workspaces: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
     """Không đợi 15 phút — hỏi thẳng MinIO bằng một session token BỊA.
 
@@ -140,7 +152,7 @@ def test_expired_credentials_are_rejected_by_the_server(
     )
     client = _client(endpoint, forged)
     with pytest.raises(ClientError) as caught:
-        client.get_object(Bucket=BUCKET, Key=f"workspaces/{ws_a}/Tables/t/data.parquet")
+        client.get_object(Bucket=bucket, Key=f"workspaces/{ws_a}/Tables/t/data.parquet")
     assert caught.value.response["Error"]["Code"] in {
         "InvalidAccessKeyId",
         "AccessDenied",

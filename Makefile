@@ -43,7 +43,9 @@ test:  ## Unit test (không cần Docker)
 
 .PHONY: test-int
 test-int:  ## Integration test (cần Docker)
-	uv run pytest -m integration -o addopts=""
+	@# `not benchmark`: phép đo mất vài phút và không khẳng định gì — nó thuộc
+	@# `make measure-scan`, không thuộc cổng kiểm chạy mỗi lần push.
+	uv run pytest -m "integration and not benchmark" -o addopts=""
 
 .PHONY: check-context
 check-context:  ## Chặn mọi lệnh kubectl chạy nhầm vào cụm khác
@@ -351,3 +353,10 @@ measure-spill:  ## Phép đo 1 mục 3 (CỬA CHẶN) — DuckDB trong cgroup 38
 	docker run --rm --memory=384m --memory-swap=384m \
 		-v "$(PWD):/w" -w /w python:3.12-slim \
 		sh -c "pip install --quiet duckdb && python scripts/measure_duckdb_spill.py"
+
+.PHONY: measure-scan
+measure-scan:  ## Phép đo 1 mục 1 — thời gian lập kế hoạch quét bảng Iceberg
+	@# Dùng chính bộ container mà integration test dùng, không dựng bộ thứ hai:
+	@# một môi trường khác cho ra một con số nói về hệ thống không ai chạy.
+	uv run pytest -m benchmark -o addopts="" -s \
+		packages/icebergkit/tests/integration/test_scan_planning_benchmark.py

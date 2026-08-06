@@ -48,6 +48,24 @@ def pinned_image(key: str) -> str:
 
 
 @pytest.fixture(scope="session")
+def bucket() -> str:
+    """Tên bucket, qua FIXTURE chứ không qua import tương đối.
+
+    `from .conftest import BUCKET` đòi thư mục này phải là package, và một
+    `__init__.py` ở đây làm nó cùng tên module `integration.conftest` với
+    `services/api/tests/integration/` — `make test-int` chết ở bước collect với
+    `ImportPathMismatchError`. Đã dính đúng thế một lần.
+    """
+    return BUCKET
+
+
+@pytest.fixture(scope="session")
+def pinned_minio_image() -> str:
+    """Cùng lý do như `bucket`: đưa qua fixture thay vì import tương đối."""
+    return pinned_image("MINIO_IMAGE")
+
+
+@pytest.fixture(scope="session")
 def minio() -> Iterator[MinioContainer]:
     container = MinioContainer(
         image=pinned_image("MINIO_IMAGE"),
