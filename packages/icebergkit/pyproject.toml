@@ -7,6 +7,7 @@ dependencies = [
     "loom-storage",
     "pyiceberg[pyarrow]>=0.10",
     "pyarrow>=18.0",
+    "httpx>=0.28",
 ]
 
 [tool.uv.sources]

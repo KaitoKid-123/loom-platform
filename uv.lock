@@ -923,6 +923,7 @@ name = "loom-iceberg"
 version = "0.1.0"
 source = { editable = "packages/icebergkit" }
 dependencies = [
+    { name = "httpx" },
     { name = "loom-storage" },
     { name = "pyarrow" },
     { name = "pyiceberg", extra = ["pyarrow"] },
@@ -930,6 +931,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
     { name = "loom-storage", editable = "packages/storagekit" },
     { name = "pyarrow", specifier = ">=18.0" },
     { name = "pyiceberg", extras = ["pyarrow"], specifier = ">=0.10" },
