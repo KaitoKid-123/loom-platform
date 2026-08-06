@@ -13,12 +13,20 @@ dev = [
     "testcontainers[postgres]>=4.9",
     "cryptography>=44.0",
     "psycopg2-binary>=2.9",  # driver sync chỉ dùng để verify schema trong test_migrations.py
+    "boto3-stubs[s3,sts]>=1.35",
+    "duckdb>=1.1",
+    "testcontainers[minio]>=4.9",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["packages/core/src", "services/api/src"]
+src = [
+    "packages/core/src",
+    "packages/storagekit/src",
+    "packages/icebergkit/src",
+    "services/api/src",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "S", "RUF"]
@@ -30,13 +38,21 @@ ignore = ["S101"]  # assert được phép trong test
 [tool.mypy]
 python_version = "3.12"
 strict = true
-# mypy lỗi cứng nếu đường dẫn không tồn tại, nên danh sách này lớn dần theo repo:
-# Từ đây trở đi danh sách này không đổi nữa.
-files = ["packages/core/src", "services/api/src", "services/api/migrations"]
+# mypy lỗi cứng nếu đường dẫn không tồn tại, nên danh sách này lớn dần theo repo.
+# (Giai đoạn 1 từng ghi "từ đây không đổi nữa" — sai, Giai đoạn 2a thêm hai
+# package. Câu đó đã bị gỡ chứ không phải quên.)
+files = [
+    "packages/core/src",
+    "packages/storagekit/src",
+    "packages/icebergkit/src",
+    "services/api/src",
+    "services/api/migrations",
+    "scripts",
+]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["testcontainers.*"]
+module = ["testcontainers.*", "pyiceberg.*", "duckdb.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
