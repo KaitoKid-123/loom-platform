@@ -1,32 +1,36 @@
-"""DuckDB không biết cgroup. Phép kiểm này canh đúng chỗ đó.
+"""DuckDB không biết cgroup, và nhu cầu bộ nhớ của nó co giãn theo SỐ LUỒNG.
 
-SỬA SO VỚI PLAN — dựa trên số đo, không dựa trên giả định:
+Hai sự thật đó quyết định cấu hình của `loom-query` ở Giai đoạn 2b, và cả hai
+đều đo được chứ không phải suy đoán.
 
-Plan Giai đoạn 2a viết tiêu chí "query vượt hạn mức RAM **tràn ra đĩa**, không
-giết pod", và giả định rằng đặt `memory_limit` cộng `temp_directory` là đủ để
-DuckDB tràn. Đo thật trên DuckDB 1.5.5 thì **không có lần nào tràn**:
+**1. `memory_limit` mặc định theo RAM MÁY CHỦ, không theo cgroup.** Trong container
+384 MiB nó tưởng mình có nhiều GB và đi thẳng tới OOMKill. Đã kiểm trong cgroup
+thật (`scripts/measure_duckdb_spill.py`): đặt tay 256MB thì tiến trình sống, để
+mặc định kiểu 8GB thì hạt nhân giết — `Killed`.
 
-    30M BIGINT  ORDER BY   limit 128MB  → OK,   temporary_storage_bytes = 0
-    20M dòng    GROUP BY   limit 128MB  → OK,   temporary_storage_bytes = 0
-    1M dòng x 512B VARCHAR khác nhau    → OutOfMemoryException ở MỌI mức
-                                           đã thử, tới tận 512MB
+**2. Cùng một query, cùng một hạn mức, kết quả đổi theo `threads`:**
 
-Những lần "OK" chạy được nhờ nén và xử lý theo luồng, KHÔNG nhờ tràn đĩa —
-`temporary_storage_bytes` bằng 0 ở cả ba. Còn payload chuỗi rộng thì DuckDB
-không tràn mà ném lỗi.
+    threads=1  4M dòng  limit 256MB  -> chạy xong
+    threads=2  4M dòng  limit 256MB  -> chạy xong
+    threads=4  4M dòng  limit 256MB  -> OutOfMemoryException
 
-(Một cái bẫy đã dính khi đo: `repeat('x', 512)` cho mọi dòng một chuỗi GIỐNG
-HỆT nhau, nén từ điển làm 977 MiB dữ liệu teo còn gần bằng không. Dữ liệu đo
-phải biến thiên thật — `repeat(md5(i::VARCHAR), 16)` — nếu không con số đo được
-là con số của một bài toán khác.)
+Nhiều luồng nghĩa là nhiều buffer song song, nghĩa là nhiều bộ nhớ. Hệ quả trực
+tiếp cho 2b: **`loom-query` phải ghim `threads`, không chỉ `memory_limit`.** Một
+pod 384 MiB chạy DuckDB với số luồng mặc định theo số core của node là đặt cược
+vào phần cứng.
 
-Nên tiêu chí được viết lại theo tính chất THẬT SỰ cần, và spec cũng chỉ cần đúng
-tính chất đó: **pod không bị giết.** DuckDB ném `OutOfMemoryException` là kết
-quả TỐT — đó là một lỗi bắt được, `loom-query` ở Giai đoạn 2b biến nó thành một
-câu trả lời tử tế cho người dùng. Thứ không chấp nhận được là RSS phình tới khi
-hạt nhân giết tiến trình, vì lúc đó mọi query khác trong pod chết theo.
+Đây cũng là lý do bản đầu của file này FLAKY và đỏ trên CI: nó có hai phép chạy
+CÙNG một query rồi khẳng định cả hai đều OOM. Ở máy dev (nhiều core) cả hai OOM;
+trên runner của GitHub thì phép đầu OOM còn phép sau chạy xong. Một cửa chặn
+flaky tệ hơn không có cửa chặn. Bản này ghim `threads` để mọi khẳng định tất định.
 
-`scripts/measure_duckdb_spill.py` là phần kiểm trong cgroup thật.
+**Bẫy khi đo, ghi lại để không dính lại:** `repeat('x', 512)` cho mọi dòng một
+chuỗi GIỐNG HỆT nhau; nén từ điển làm 977 MiB teo còn gần bằng không và bài đo
+báo "chạy tốt" trong khi chưa hề chạm bộ nhớ. Dữ liệu phải biến thiên thật.
+
+Điều spec THẬT SỰ cần không phải "tràn ra đĩa" mà là **"không giết pod"**. Một
+`OutOfMemoryException` là kết quả tốt — lỗi bắt được, `loom-query` biến thành câu
+trả lời tử tế. Thứ không chấp nhận được là RSS phình tới khi hạt nhân ra tay.
 """
 
 from pathlib import Path
@@ -34,9 +38,15 @@ from pathlib import Path
 import duckdb
 import pytest
 
-# Thấp hơn limit container 384Mi của `loom-query` (Giai đoạn 2b). Khoảng cách đó
-# là chỗ cho bộ nhớ của chính tiến trình Python, Arrow buffer và libc arena.
+# Cấu hình mà `loom-query` sẽ chạy thật: hạn mức thấp hơn limit container 384Mi
+# (chỗ trống là cho bộ nhớ tiến trình Python, Arrow buffer, libc arena), và số
+# luồng GHIM — xem docstring đầu file.
 LIMIT_MB = 256
+THREADS = 2
+
+# Hạn mức nhỏ tới mức không mập mờ. Đo ở threads=1, 4M dòng: 16/32/64MB đều OOM,
+# 128MB thì chạy xong. 32 nằm giữa vùng OOM chứ không sát ranh giới.
+TINY_LIMIT_MB = 32
 
 # ~512B/dòng và KHÁC NHAU từng dòng. Chuỗi lặp lại nén từ điển về gần 0 và làm
 # phép đo vô nghĩa — xem docstring đầu file.
@@ -73,35 +83,40 @@ def test_setting_the_limit_actually_takes_effect() -> None:
     assert as_bytes == pytest.approx(LIMIT_MB * 1000 * 1000, rel=0.01)
 
 
-def test_a_query_over_the_limit_raises_instead_of_growing_unbounded(tmp_path: Path) -> None:
-    """Tính chất SỐNG CÒN cho `loom-query`: vượt hạn mức thì DuckDB NÉM, và ném
-    một lỗi bắt được.
+def test_the_production_configuration_completes(tmp_path: Path) -> None:
+    """Vế KHẲNG ĐỊNH, và nó là cấu hình `loom-query` sẽ chạy thật.
 
-    Đây không phải "tràn ra đĩa" — đo thật cho thấy DuckDB 1.5.5 không tràn với
-    payload kiểu này (xem docstring đầu file). Ném lỗi là kết quả tốt: Giai đoạn
-    2b bắt nó và trả về một câu trả lời tử tế, thay vì để hạt nhân giết pod và
-    kéo theo mọi query khác.
+    Không có phép này, một `memory_limit` đặt thành 1 byte cũng làm phép từ chối
+    bên dưới xanh — và lúc đó pod query không chạy nổi query nào.
     """
     with duckdb.connect() as conn:
         conn.execute(f"SET memory_limit='{LIMIT_MB}MB'")
+        conn.execute(f"SET threads={THREADS}")
         conn.execute(f"SET temp_directory='{tmp_path}'")
         conn.execute("SET preserve_insertion_order=false")
 
-        with pytest.raises(duckdb.OutOfMemoryException):
-            conn.execute(
-                f"SELECT count(*) FROM ({WIDE_VARIED.format(rows=1_000_000)} ORDER BY pad, i)"  # noqa: S608
-            ).fetchone()
+        result = conn.execute(
+            f"SELECT count(*) FROM ({WIDE_VARIED.format(rows=1_000_000)} ORDER BY pad, i)"  # noqa: S608
+        ).fetchone()
+
+    assert result is not None
+    assert result[0] == 1_000_000
 
 
-def test_the_connection_survives_the_failure(tmp_path: Path) -> None:
-    """Ném lỗi thôi chưa đủ — connection phải còn dùng được sau đó.
+def test_far_over_the_limit_raises_and_the_connection_survives(tmp_path: Path) -> None:
+    """Hai khẳng định trong MỘT query, có chủ đích.
 
-    Một `OutOfMemoryException` làm hỏng connection sẽ buộc `loom-query` dựng lại
-    mọi thứ, và tệ hơn là có thể kéo theo query khác nếu pod dùng chung. Phép này
-    khẳng định lỗi là CỤC BỘ theo từng câu lệnh.
+    Bản đầu tách làm hai test chạy cùng một query, và chính sự trùng lặp đó tạo ra
+    flake trên CI. Chạy một lần rồi khẳng định cả hai vế thì vừa nhanh hơn vừa
+    không còn chỗ cho hai lần chạy ra hai kết quả.
+
+    Vế một: vượt xa hạn mức thì DuckDB NÉM, và ném một lỗi BẮT ĐƯỢC.
+    Vế hai: connection còn dùng được sau đó — nếu không, ở Giai đoạn 2b một query
+    nặng sẽ kéo theo mọi query khác trong cùng pod.
     """
     with duckdb.connect() as conn:
-        conn.execute(f"SET memory_limit='{LIMIT_MB}MB'")
+        conn.execute(f"SET memory_limit='{TINY_LIMIT_MB}MB'")
+        conn.execute("SET threads=1")
         conn.execute(f"SET temp_directory='{tmp_path}'")
         conn.execute("SET preserve_insertion_order=false")
 
@@ -111,21 +126,6 @@ def test_the_connection_survives_the_failure(tmp_path: Path) -> None:
             ).fetchone()
 
         after = conn.execute("SELECT 1 + 1").fetchone()
+
     assert after is not None
     assert after[0] == 2
-
-
-def test_a_query_within_the_limit_still_completes(tmp_path: Path) -> None:
-    """Vế KHẲNG ĐỊNH. Không có nó, một `memory_limit` đặt thành 1 byte cũng làm
-    hai phép ở trên xanh — và lúc đó `loom-query` không chạy nổi query nào."""
-    with duckdb.connect() as conn:
-        conn.execute(f"SET memory_limit='{LIMIT_MB}MB'")
-        conn.execute(f"SET temp_directory='{tmp_path}'")
-        conn.execute("SET preserve_insertion_order=false")
-
-        result = conn.execute(
-            "SELECT count(*) FROM (SELECT i FROM range(30000000) t(i) ORDER BY i DESC)"
-        ).fetchone()
-
-    assert result is not None
-    assert result[0] == 30_000_000

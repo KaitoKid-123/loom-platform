@@ -33,16 +33,28 @@ def main() -> int:
         help="Hạn mức của DuckDB. PHẢI thấp hơn limit container — đó là cả điểm "
         "của bài đo. Giai đoạn 2b đặt container 384Mi, nên 256MB là con số thật.",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=2,
+        help="GHIM số luồng. Nhu cầu bộ nhớ của DuckDB co giãn theo nó — cùng một "
+        "query, cùng hạn mức, threads=2 chạy xong còn threads=4 thì OOM. Để mặc "
+        "định là đặt cược vào số core của node.",
+    )
     parser.add_argument("--temp-dir", default="/tmp/duckdb-spill")  # noqa: S108
     parser.add_argument("--rows", type=int, default=4_000_000)
     args = parser.parse_args()
 
     os.makedirs(args.temp_dir, exist_ok=True)
-    print(f"memory_limit={args.memory_limit}  temp_directory={args.temp_dir}  rows={args.rows:,}")
+    print(
+        f"memory_limit={args.memory_limit}  threads={args.threads}  "
+        f"temp_directory={args.temp_dir}  rows={args.rows:,}"
+    )
 
     raised: str | None = None
     with duckdb.connect() as conn:
         conn.execute(f"SET memory_limit='{args.memory_limit}'")
+        conn.execute(f"SET threads={args.threads}")
         conn.execute(f"SET temp_directory='{args.temp_dir}'")
         conn.execute("SET preserve_insertion_order=false")
         try:
