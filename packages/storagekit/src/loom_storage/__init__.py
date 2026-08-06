@@ -4,3 +4,17 @@ Tách khỏi `icebergkit` có chủ đích: Giai đoạn 2b đọc Parquet thô 
 bằng DuckDB httpfs, không đi qua Iceberg chút nào. Gộp vào icebergkit sẽ buộc
 đường đó import cả PyIceberg chỉ để lấy một cặp access key.
 """
+
+from loom_storage.credentials import (
+    S3Credentials,
+    StorageCredentials,
+    prefix_for_lakehouse,
+    prefix_for_workspace,
+)
+
+__all__ = [
+    "S3Credentials",
+    "StorageCredentials",
+    "prefix_for_lakehouse",
+    "prefix_for_workspace",
+]
