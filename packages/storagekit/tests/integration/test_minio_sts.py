@@ -15,9 +15,27 @@ from botocore.exceptions import ClientError
 
 from loom_storage import MinioStsProvider, S3Credentials
 
-from .conftest import BUCKET
+from .conftest import BUCKET, pinned_image
 
 pytestmark = pytest.mark.integration
+
+
+def test_container_runs_the_same_minio_as_the_cluster(minio: object) -> None:
+    """Contract test bên dưới chỉ có giá trị nếu nó chạy đúng MinIO mà cụm chạy.
+
+    Bản đầu của conftest để `MinioContainer` dùng image mặc định của nó —
+    `RELEASE.2022-12-02` — trong khi `deploy/versions.env` pin `RELEASE.2025-04-22`
+    cho cụm. Sáu phép kiểm bên dưới đều XANH, và không phép nào nhìn thấy chuyện
+    chúng đang kiểm một MinIO cách bản thật hai năm rưỡi.
+
+    Phép này là thứ chặn nó trôi lại: đổi image của container mà quên `versions.env`
+    (hoặc ngược lại) thì nó đỏ ngay.
+    """
+    running = getattr(minio, "image", None)
+    assert running == pinned_image("MINIO_IMAGE"), (
+        f"container chạy {running!r} nhưng cụm chạy {pinned_image('MINIO_IMAGE')!r} — "
+        "contract test đang khẳng định về một MinIO khác với MinIO giữ dữ liệu"
+    )
 
 
 def _client(endpoint: str, creds: S3Credentials) -> Any:

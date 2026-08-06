@@ -7,6 +7,7 @@ này đúng như ta nghĩ". Một mock chỉ khẳng định "ta nghĩ đúng nh
 
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -19,10 +20,40 @@ ROOT_USER = "loom-root"
 ROOT_PASSWORD = "loom-root-test"  # container dùng một lần
 BUCKET = "loom-test"
 
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def pinned_image(key: str) -> str:
+    """Đọc tag image từ `deploy/versions.env` — cùng file mà Makefile `include`.
+
+    KHÔNG dùng mặc định của testcontainers, và đây không phải chuyện thẩm mỹ.
+    `MinioContainer` mặc định là `minio/minio:RELEASE.2022-12-02`, còn cụm chạy
+    `RELEASE.2025-04-22`. Hai năm rưỡi cách nhau, và cách nhau đúng ở bề mặt mà
+    contract test này khẳng định: cách MinIO diễn giải `Condition` trên
+    `s3:prefix`, và cách nó cấp credential qua STS `AssumeRole`.
+
+    Một contract test xanh trên MinIO 2022 không nói được gì về MinIO 2025 đang
+    thật sự giữ dữ liệu. Test một thứ rồi triển khai một thứ khác là đúng lớp lỗi
+    mà cả Giai đoạn 2a đã bốn lần phải gỡ.
+
+    Đọc THẲNG file thay vì qua biến môi trường: CI có nạp `versions.env` vào
+    `$GITHUB_ENV`, nhưng chạy pytest ở máy thì không có gì nạp hộ — và một phép
+    canh chỉ đúng-khi-ở-CI thì không phải một phép canh.
+    """
+    for line in (REPO_ROOT / "deploy" / "versions.env").read_text().splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == key:
+            return value.strip()
+    raise RuntimeError(f"{key} không có trong deploy/versions.env")
+
 
 @pytest.fixture(scope="session")
 def minio() -> Iterator[MinioContainer]:
-    container = MinioContainer(access_key=ROOT_USER, secret_key=ROOT_PASSWORD)
+    container = MinioContainer(
+        image=pinned_image("MINIO_IMAGE"),
+        access_key=ROOT_USER,
+        secret_key=ROOT_PASSWORD,
+    )
     with container as running:
         yield running
 
