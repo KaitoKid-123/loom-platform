@@ -80,8 +80,10 @@ phục **cả hai** database về cùng một mốc — xem `docs/runbook/restor
 - **Lập kế hoạch quét p95 = 172,7ms** (1 triệu dòng, 20 snapshot, container cùng máy).
   Dưới ngưỡng 200ms nên **không lấp `MetadataCache`**. Nhưng nó ngang ngửa thời gian đọc
   dữ liệu, và đây là cận dưới — VPS sẽ thêm một chặng mạng vào đúng chỗ nhạy nhất.
-- **DuckDB phải đặt `memory_limit` tay**, thấp hơn limit container. Nó không đọc cgroup.
-  Con số đã kiểm: 256MB trong container 384Mi, RSS đỉnh 376 Mi.
+- **DuckDB phải ghim CẢ `memory_limit` LẪN `threads`.** Nó không đọc cgroup, và nhu cầu
+  bộ nhớ co giãn theo số luồng: cùng query, cùng hạn mức, `threads=2` chạy xong còn
+  `threads=4` thì OOM. Con số đã kiểm: `memory_limit=256MB`, `threads=2`, container
+  384Mi, RSS đỉnh 348 Mi.
 - **RAM cả node 1318 / 1843 Mi.** Còn dư 525 Mi; `loom-query` chiếm ~376 Mi khi tải nặng.
 
 ### Nợ đã biết sau Giai đoạn 2a
