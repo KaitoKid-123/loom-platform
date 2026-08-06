@@ -31,7 +31,7 @@ type ColumnLike = Any
 
 
 class Forbidden(HTTPException):
-    def __init__(self, detail: str = "không đủ quyền") -> None:
+    def __init__(self, detail: str = "you do not have permission to do that") -> None:
         super().__init__(status.HTTP_403_FORBIDDEN, detail)
 
 
@@ -40,7 +40,7 @@ class NotVisible(HTTPException):
     lộ sự tồn tại của nó, mà tên item thường mang thông tin
     (`acquisition_2026_finance`). Xem spec mục 4.5."""
 
-    def __init__(self, detail: str = "không tìm thấy") -> None:
+    def __init__(self, detail: str = "not found") -> None:
         super().__init__(status.HTTP_404_NOT_FOUND, detail)
 
 

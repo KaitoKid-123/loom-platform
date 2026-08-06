@@ -102,7 +102,7 @@ describe('useRenameItem', () => {
             JSON.stringify({
               title: 'Precondition Failed',
               status: 412,
-              detail: 'item đã được người khác đổi (bản hiện tại 5)',
+              detail: 'somebody else changed this item (current version is 5)',
             }),
             { status: 412, headers: { 'content-type': 'application/problem+json' } },
           ),
@@ -119,8 +119,8 @@ describe('useRenameItem', () => {
     expect(nameIn(qc)).toBe('Cũ')
     // Và thông báo phải nói LÝ DO, không chỉ nhấp nháy về giá trị cũ. Không có nó,
     // người dùng thấy tên mình vừa gõ biến mất và tưởng ứng dụng hỏng.
-    expect(result.current.error?.message).toMatch(/người khác/)
-    expect(result.current.error?.message).toMatch(/bản hiện tại 5/)
+    expect(result.current.error?.message).toMatch(/somebody else/)
+    expect(result.current.error?.message).toMatch(/current version is 5/)
   })
 
   it('lỗi mạng cũng rollback, không để cache lệch với server', async () => {
@@ -178,11 +178,11 @@ describe('describeError', () => {
   it('412 giữ thông báo server VÀ thêm bước tiếp theo', () => {
     const error = new ConflictError(
       412,
-      { title: 'Precondition Failed', status: 412, detail: 'bản hiện tại 5' },
+      { title: 'Precondition Failed', status: 412, detail: 'current version is 5' },
       'dự phòng',
     )
     const text = describeError(error)
-    expect(text).toContain('bản hiện tại 5')
+    expect(text).toContain('current version is 5')
     expect(text).toMatch(/tải lại/i)
   })
 
@@ -192,11 +192,11 @@ describe('describeError', () => {
       {
         title: 'Unprocessable Content',
         status: 422,
-        errors: [{ loc: ['body', 'name'], msg: 'sai định dạng', type: 'x' }],
+        errors: [{ loc: ['body', 'name'], msg: 'invalid format', type: 'x' }],
       },
       'dự phòng',
     )
-    expect(describeError(error)).toBe('name: sai định dạng')
+    expect(describeError(error)).toBe('name: invalid format')
   })
 
   it('lỗi thường đi qua nguyên văn', () => {

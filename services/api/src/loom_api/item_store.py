@@ -37,7 +37,7 @@ class NameTaken(HTTPException):
     def __init__(self, name: str) -> None:
         super().__init__(
             status.HTTP_409_CONFLICT,
-            f"đã có item tên '{name}' cùng loại trong workspace này",
+            f"an item of this type named '{name}' already exists in this workspace",
         )
 
 
@@ -56,7 +56,8 @@ class VersionMismatch(HTTPException):
     def __init__(self, current: int) -> None:
         super().__init__(
             status.HTTP_412_PRECONDITION_FAILED,
-            f"item đã được người khác đổi (bản hiện tại {current}) — tải lại rồi thử lại",
+            f"somebody else changed this item (current version is {current}) "
+            "— reload and try again",
         )
         self.current = current
 
@@ -122,7 +123,7 @@ class ItemStore:
                 display_name=display_name,
                 folder_path=folder_path,
                 description=description,
-                change_note="tạo mới",
+                change_note="created",
                 created_by=self._principal.user_id,
             )
         )
@@ -383,7 +384,7 @@ class ItemStore:
             display_name=source.display_name,
             folder_path=source.folder_path,
             description=source.description,
-            change_note=f"phục hồi từ version {version}",
+            change_note=f"restored from version {version}",
         )
         self._record_change(
             item,

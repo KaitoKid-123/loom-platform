@@ -144,7 +144,7 @@ async def test_revoking_the_last_admin_is_409_with_a_usable_message(api_world):
     r = await w.client.delete(f"/api/v1/workspaces/{w.ws_a}/roles?user_id={w.user_id}")
     assert r.status_code == 409, r.text
     # Thông báo phải nói người dùng làm gì TIẾP, không chỉ nói "không được".
-    assert "gán admin khác" in r.json()["detail"]
+    assert "grant another admin" in r.json()["detail"]
 
 
 async def test_grant_requires_exactly_one_principal(api_world):

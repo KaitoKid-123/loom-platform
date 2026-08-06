@@ -106,11 +106,11 @@ describe('ConnectionsPage', () => {
             JSON.stringify({
               title: 'Unprocessable Content',
               status: 422,
-              detail: 'dữ liệu gửi lên không hợp lệ',
+              detail: 'the submitted data is not valid',
               errors: [
                 {
                   loc: ['body', 'definition', 'secret_ref'],
-                  msg: 'phải là vault://path#key hoặc k8s://namespace/name#key',
+                  msg: 'must be vault://path#key or k8s://namespace/name#key',
                   type: 'value_error',
                 },
               ],

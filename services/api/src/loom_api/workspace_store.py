@@ -26,7 +26,7 @@ _WORKSPACE_NAME_INDEX = "uq_workspace_active_name"
 
 class NameTaken(HTTPException):
     def __init__(self, name: str) -> None:
-        super().__init__(status.HTTP_409_CONFLICT, f"đã có workspace tên '{name}'")
+        super().__init__(status.HTTP_409_CONFLICT, f"a workspace named '{name}' already exists")
 
 
 class WorkspaceStore:
@@ -82,7 +82,7 @@ class WorkspaceStore:
         if role is None:
             raise NotVisible
         if role < Role.admin:
-            raise Forbidden("chỉ admin cấp tenant tạo được workspace")
+            raise Forbidden("only a tenant admin can create a workspace")
 
         ws_id = uuid.uuid4()
         ws = Workspace(

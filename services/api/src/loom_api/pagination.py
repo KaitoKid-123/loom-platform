@@ -24,7 +24,7 @@ class CursorMismatch(HTTPException):
     def __init__(self) -> None:
         super().__init__(
             status.HTTP_400_BAD_REQUEST,
-            "cursor không hợp lệ hoặc không thuộc bộ lọc hiện tại",
+            "the cursor is malformed, or belongs to a different set of filters",
         )
 
 

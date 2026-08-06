@@ -241,8 +241,8 @@ describe('ExplorerPage — tạo item', () => {
             JSON.stringify({
               title: 'Unprocessable Content',
               status: 422,
-              detail: 'dữ liệu gửi lên không hợp lệ',
-              errors: [{ loc: ['body', 'name'], msg: 'sai định dạng', type: 'x' }],
+              detail: 'the submitted data is not valid',
+              errors: [{ loc: ['body', 'name'], msg: 'invalid format', type: 'x' }],
             }),
             { status: 422, headers: { 'content-type': 'application/problem+json' } },
           ),
@@ -253,7 +253,7 @@ describe('ExplorerPage — tạo item', () => {
     // Thông báo nằm cạnh ô `name`, không phải một câu chung ở cuối form: với sáu ô thì
     // "dữ liệu không hợp lệ" bắt người dùng tự đoán ô nào sai.
     const alerts = await screen.findAllByRole('alert')
-    expect(alerts.map((a) => a.textContent)).toContain('sai định dạng')
+    expect(alerts.map((a) => a.textContent)).toContain('invalid format')
   })
 })
 

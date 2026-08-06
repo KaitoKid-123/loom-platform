@@ -22,7 +22,7 @@ PROBLEM_JSON = "application/problem+json"
 # str(exc): thông điệp ngoại lệ hay mang đường dẫn nội bộ, một mẩu SQL, một giá
 # trị đang xử lý, hoặc chính chuỗi kết nối. Không có gì client làm được với nó,
 # nên nó không có lý do gì để rời khỏi log.
-UNEXPECTED_ERROR_DETAIL = "lỗi không mong đợi ở phía máy chủ"
+UNEXPECTED_ERROR_DETAIL = "an unexpected server error"
 
 logger = structlog.get_logger(__name__)
 
@@ -80,7 +80,7 @@ async def _validation_error_handler(request: Request, exc: Exception) -> JSONRes
         ProblemDetail(
             title=_title(422),
             status=422,
-            detail="dữ liệu gửi lên không hợp lệ",
+            detail="the submitted data is not valid",
             instance=str(request.url.path),
             errors=errors,
         )
@@ -139,7 +139,7 @@ async def _pydantic_validation_handler(request: Request, exc: Exception) -> JSON
         ProblemDetail(
             title=_title(422),
             status=422,
-            detail="dữ liệu gửi lên không hợp lệ",
+            detail="the submitted data is not valid",
             instance=str(request.url.path),
             errors=errors,
         )

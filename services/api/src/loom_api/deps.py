@@ -33,7 +33,7 @@ async def get_principal(request: Request) -> Principal:
         # `not`, không phải `is None`: `Cookie: loom_session=` cho ra chuỗi rỗng,
         # và đi tra database bằng chuỗi rỗng là một round-trip vô ích trên mọi
         # request của khách chưa đăng nhập — một vector DoS rẻ.
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "chưa đăng nhập")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not signed in")
 
     try:
         principal = await store.load_session(session_id)
@@ -43,10 +43,14 @@ async def get_principal(request: Request) -> Principal:
         # Principal thành đúng ngoại lệ này, nên nhánh dưới đây là mã SỐNG. Với
         # client thì phiên đơn giản là không dùng được — 401, không phải 500.
         logger.warning("auth.session_unusable", reason=exc.reason)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "phiên đã hết hạn") from exc
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "your session has expired — sign in again"
+        ) from exc
 
     if principal is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "phiên đã hết hạn")
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "your session has expired — sign in again"
+        )
     return principal
 
 

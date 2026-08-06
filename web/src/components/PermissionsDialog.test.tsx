@@ -108,7 +108,7 @@ describe('PermissionsDialog', () => {
           JSON.stringify({
             title: 'Forbidden',
             status: 403,
-            detail: 'vai trò member không gán được vai trò admin',
+            detail: 'a member cannot grant the admin role',
           }),
           { status: 403, headers: { 'content-type': 'application/problem+json' } },
         )
@@ -119,9 +119,9 @@ describe('PermissionsDialog', () => {
     await userEvent.type(screen.getByLabelText(/user or group/i), 'ops')
     await userEvent.selectOptions(screen.getByLabelText(/role/i), 'viewer')
     await userEvent.click(screen.getByRole('button', { name: 'Grant' }))
-    await waitFor(() => expect(screen.getByRole('alert')).// Nguyên văn câu của SERVER, và câu đó vẫn tiếng Việt: nhãn giao diện đổi sang
-    // tiếng Anh không kéo theo thông báo lỗi backend.
-      toHaveTextContent(/không gán được/i))
+    // Nguyên văn câu của SERVER. Backend cũng đã sang tiếng Anh, nên giao diện không
+    // còn trộn hai ngôn ngữ giữa nhãn và thông báo lỗi.
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/cannot grant/i))
   })
 
   it('409 admin cuối cùng từ server vẫn hiện, kể cả khi UI đã cố chặn', async () => {
@@ -137,7 +137,8 @@ describe('PermissionsDialog', () => {
           JSON.stringify({
             title: 'Conflict',
             status: 409,
-            detail: 'đây là admin cuối cùng của phạm vi này — gán admin khác trước khi thu',
+            detail:
+              'this is the last admin of this scope — grant another admin before removing it',
           }),
           { status: 409, headers: { 'content-type': 'application/problem+json' } },
         )
@@ -146,7 +147,7 @@ describe('PermissionsDialog', () => {
     renderDialog()
     const buttons = await screen.findAllByRole('button', { name: /remove/i })
     await userEvent.click(buttons[0])
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/gán admin khác/i))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/grant another admin/i))
   })
 
   it('UUID gán cho NGƯỜI DÙNG, chuỗi khác gán cho NHÓM', async () => {

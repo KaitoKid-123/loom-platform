@@ -68,13 +68,13 @@ describe('api', () => {
       problem(412, {
         title: 'Precondition Failed',
         status: 412,
-        detail: 'item đã được người khác đổi (bản hiện tại 9)',
+        detail: 'somebody else changed this item (current version is 9)',
       }),
     )
     await expect(apiPatch('/api/v1/items/x', {}, 'W/"7"')).rejects.toThrow(ConflictError)
     // Thông báo của server PHẢI đi tới người dùng: nó nói bản hiện tại là mấy. Thay
     // bằng "Có lỗi" là bỏ đi thông tin duy nhất giúp họ hiểu chuyện gì vừa xảy ra.
-    await expect(apiPatch('/api/v1/items/x', {}, 'W/"7"')).rejects.toThrow(/bản hiện tại 9/)
+    await expect(apiPatch('/api/v1/items/x', {}, 'W/"7"')).rejects.toThrow(/current version is 9/)
   })
 
   it('428 thành PreconditionRequiredError riêng, không lẫn với 412', async () => {
@@ -105,15 +105,15 @@ describe('api', () => {
       problem(422, {
         title: 'Unprocessable Content',
         status: 422,
-        detail: 'dữ liệu không hợp lệ',
+        detail: 'the submitted data is not valid',
         errors: [
-          { loc: ['body', 'name'], msg: 'sai định dạng', type: 'string_pattern_mismatch' },
+          { loc: ['body', 'name'], msg: 'invalid format', type: 'string_pattern_mismatch' },
         ],
       }),
     )
     const error = await apiPostJson('/api/v1/x', {}).catch((e: unknown) => e)
     expect(error).toBeInstanceOf(ProblemError)
-    expect((error as ProblemError).fieldErrors.name).toBe('sai định dạng')
+    expect((error as ProblemError).fieldErrors.name).toBe('invalid format')
   })
 
   it('phản hồi không phải problem+json vẫn thành lỗi có nghĩa', async () => {

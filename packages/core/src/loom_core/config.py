@@ -70,8 +70,8 @@ class Settings(BaseSettings):
         ]
         if still_default:
             raise ValueError(
-                f"phải đặt giá trị thật cho {', '.join(sorted(still_default))} "
-                f"khi LOOM_ENVIRONMENT={self.environment!r}"
+                f"set a real value for {', '.join(sorted(still_default))} "
+                f"when LOOM_ENVIRONMENT={self.environment!r}"
             )
         return self
 

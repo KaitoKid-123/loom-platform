@@ -121,15 +121,15 @@ class OIDCClient:
             timeout=5.0,
         )
         if response.status_code != 200:
-            raise TokenExchangeError(f"nhà cung cấp trả về {response.status_code}")
+            raise TokenExchangeError(f"the identity provider returned {response.status_code}")
 
         try:
             payload = response.json()
         except Exception as exc:
-            raise TokenExchangeError("phản hồi không phải JSON hợp lệ") from exc
+            raise TokenExchangeError("the response was not valid JSON") from exc
 
         if not isinstance(payload, dict) or "id_token" not in payload:
-            raise TokenExchangeError("phản hồi thiếu id_token")
+            raise TokenExchangeError("the response has no id_token")
         return TokenSet(
             id_token=payload["id_token"],
             access_token=payload.get("access_token"),

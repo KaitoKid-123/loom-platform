@@ -40,7 +40,7 @@ class Principal(BaseModel):
         # toàn. IdTokenClaims.__post_init__ giữ đúng bất biến này cho đường token;
         # đây là bản sao của nó cho đường database.
         if not value.strip():
-            raise ValueError("subject không được rỗng")
+            raise ValueError("subject must not be blank")
         return value
 
     @field_validator("groups", mode="before")
@@ -51,12 +51,12 @@ class Principal(BaseModel):
         if isinstance(value, str):
             # Một chuỗi cũng iterate được: "admins" sẽ lặng lẽ thành sáu nhóm
             # một-ký-tự thay vì một nhóm.
-            raise ValueError("groups phải là danh sách, không phải chuỗi")
+            raise ValueError("groups must be a list, not a string")
         if not isinstance(value, Iterable):
-            raise ValueError("groups phải là danh sách")
+            raise ValueError("groups must be a list")
         names = [str(v).strip() for v in value]
         if any(not n for n in names):
-            raise ValueError("tên nhóm không được rỗng")
+            raise ValueError("a group name must not be blank")
         # sorted() làm thứ tự KHÔNG phụ thuộc IdP và không phụ thuộc thứ tự băm
         # của set — cả hai đều đủ để làm cache key trong phạm vi request lệch.
         return tuple(sorted(set(names)))
@@ -170,7 +170,7 @@ class PrincipalRef(BaseModel):
     @model_validator(mode="after")
     def _exactly_one_principal(self) -> "PrincipalRef":
         if (self.user_id is None) == (self.group is None):
-            raise ValueError("phải chỉ đúng một trong user_id hoặc group")
+            raise ValueError("give exactly one of user_id or group")
         return self
 
 

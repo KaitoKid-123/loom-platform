@@ -26,11 +26,11 @@ def _parse_if_match(raw: str | None) -> int:
         # và một client tử tế sẽ tự thử lại đúng cách.
         raise HTTPException(
             status.HTTP_428_PRECONDITION_REQUIRED,
-            "thiếu header If-Match — tải item để lấy ETag rồi gửi lại",
+            "missing If-Match header — load the item to get its ETag, then send it back",
         )
     match = _ETAG_RE.match(raw.strip())
     if not match:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"If-Match không đúng định dạng: {raw}")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"malformed If-Match header: {raw}")
     return int(match.group(1))
 
 

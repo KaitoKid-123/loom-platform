@@ -37,7 +37,7 @@ class LastAdminError(HTTPException):
     def __init__(self) -> None:
         super().__init__(
             status.HTTP_409_CONFLICT,
-            "đây là admin cuối cùng của phạm vi này — gán admin khác trước khi thu",
+            "this is the last admin of this scope — grant another admin before removing it",
         )
 
 
@@ -47,7 +47,7 @@ class UnknownUser(HTTPException):
         # người dùng đã cũ trên giao diện là cách bình thường nhất để nó sai.
         super().__init__(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"không có người dùng {user_id}",
+            f"there is no user {user_id}",
         )
 
 
@@ -98,7 +98,7 @@ class RoleStore:
         # domain/tenant: chuỗi tổ tiên chỉ chạy TỪ tài nguyên LÊN, nên không có
         # câu hỏi "vai trò của tôi trên domain này" nào để hỏi bằng hai hàm ở
         # trên. Từ chối thẳng thay vì bỏ qua phép kiểm.
-        raise Forbidden("chỉ admin cấp tenant thao tác được vai trò ở phạm vi này")
+        raise Forbidden("only a tenant admin can change roles at this scope")
 
     async def grant(
         self,
@@ -108,13 +108,13 @@ class RoleStore:
         group: str | None = None,
     ) -> None:
         if (user_id is None) == (group is None):
-            raise HTTPException(422, "phải chỉ đúng một trong user_id hoặc group")
+            raise HTTPException(422, "give exactly one of user_id or group")
         actor_role = await self._require_role_grant(scope)
 
         # QUY TẮC 1. Không có dòng này thì `role.grant` một mình đủ để member tự
         # nâng thành admin — một bước, không cần ai duyệt.
         if role not in GRANTABLE_BY[actor_role]:
-            raise Forbidden(f"vai trò {actor_role} không gán được vai trò {role}")
+            raise Forbidden(f"a {actor_role} cannot grant the {role} role")
 
         scope_type, scope_id = scope
         # ON CONFLICT: gán lại cùng principal + scope là ĐỔI vai trò, không phải
@@ -163,7 +163,7 @@ class RoleStore:
         group: str | None = None,
     ) -> None:
         if (user_id is None) == (group is None):
-            raise HTTPException(422, "phải chỉ đúng một trong user_id hoặc group")
+            raise HTTPException(422, "give exactly one of user_id or group")
         actor_role = await self._require_role_grant(scope)
         scope_type, scope_id = scope
         target = _one_principal(user_id, group)
@@ -194,7 +194,7 @@ class RoleStore:
         for role_name in existing:
             role = Role[role_name]
             if role not in GRANTABLE_BY[actor_role]:
-                raise Forbidden(f"vai trò {actor_role} không thu được vai trò {role}")
+                raise Forbidden(f"a {actor_role} cannot remove the {role} role")
 
         # QUY TẮC 2, và nó phải chạy TRONG CÙNG transaction với DELETE.
         #
@@ -259,7 +259,7 @@ class RoleStore:
         elif scope_type == "item":
             await self._perms.require_item(scope_id, Action.role_read)
         else:
-            raise Forbidden("chỉ admin cấp tenant đọc được vai trò ở phạm vi này")
+            raise Forbidden("only a tenant admin can read roles at this scope")
         return list(
             (
                 await self._session.execute(

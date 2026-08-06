@@ -54,8 +54,8 @@ class ConnectionDefinition(_Base):
     def _check_ref(cls, value: str) -> str:
         if not SECRET_REF_RE.match(value):
             raise ValueError(
-                "secret_ref phải là vault://path#key hoặc k8s://namespace/name#key "
-                "— đây là tham chiếu, không phải mật khẩu"
+                "secret_ref must be vault://path#key or k8s://namespace/name#key "
+                "— this is a reference, not a password"
             )
         return value
 
