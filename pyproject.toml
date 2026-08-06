@@ -52,7 +52,12 @@ files = [
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["testcontainers.*", "pyiceberg.*", "duckdb.*"]
+# testcontainers KHÔNG có py.typed nên dòng này là thật. pyiceberg và duckdb thì
+# CÓ — thêm chúng vào đây là cấu hình chết hôm nay, và là một cái bẫy ngày mai:
+# nếu một bản sau bỏ py.typed đi, mypy sẽ lặng lẽ ngừng kiểm import cho đúng chỗ
+# `loom_iceberg` gọi nhiều API nhất. Để chúng ngoài danh sách thì trường hợp đó
+# nổ ra thành lỗi lint, đúng như nó nên thế.
+module = ["testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
