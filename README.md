@@ -84,7 +84,7 @@ phục **cả hai** database về cùng một mốc — xem `docs/runbook/restor
   bộ nhớ co giãn theo số luồng: cùng query, cùng hạn mức, `threads=2` chạy xong còn
   `threads=4` thì OOM. Con số đã kiểm: `memory_limit=256MB`, `threads=2`, container
   384Mi, RSS đỉnh 348 Mi.
-- **RAM cả node 1318 / 1843 Mi.** Còn dư 525 Mi; `loom-query` chiếm ~376 Mi khi tải nặng.
+- **RAM cả node 1318 / 1843 Mi.** Còn dư 525 Mi; `loom-query` chiếm ~348 Mi khi tải nặng.
 
 ### Nợ đã biết sau Giai đoạn 2a
 

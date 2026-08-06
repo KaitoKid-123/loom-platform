@@ -416,7 +416,7 @@ ram: check-context  ## Tổng RAM cụm đang dùng, so với trần 1,8 GB
 	  | awk '{v=$$1; sub(/GiB/,"",v); if ($$1 ~ /GiB/) print int(v*1024); \
 	          else {sub(/MiB/,"",v); print int(v)}}'); \
 	printf '  CẢ NODE:         %d Mi   trần 1843 Mi\n' "$$node_mib"; \
-	printf '  còn dư %d Mi — Giai đoạn 2b thêm loom-query, đỉnh đo được 376 Mi\n' \
+	printf '  còn dư %d Mi — Giai đoạn 2b thêm loom-query, đỉnh đo được 348 Mi\n' \
 	  $$(( 1843 - node_mib )); \
 	if [ "$$node_mib" -gt 1843 ]; then \
 	  echo "  VƯỢT TRẦN — xem spec Giai đoạn 2 mục 7.3, ba lối ra"; exit 1; fi
