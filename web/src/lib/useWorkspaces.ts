@@ -1,6 +1,6 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { UnauthorizedError, apiGet } from './api'
+import { UnauthorizedError, apiGet, apiPatch, apiPostJson } from './api'
 
 export interface Workspace {
   id: string
@@ -8,6 +8,8 @@ export interface Workspace {
   display_name: string
   description: string | null
   domain_id: string | null
+  /** ETag của workspace — client cần nó cho `If-Match` khi sửa. */
+  version: number
   /** Vai trò của CHÍNH người gọi, không phải vai trò cao nhất có trong workspace. */
   my_role: string
 }
@@ -41,8 +43,13 @@ export interface Page<T> {
   next_cursor: string | null
 }
 
+export interface WorkspaceList extends Page<Workspace> {
+  /** Vai trò của người gọi ở cấp tenant, hoặc `null`. Chỉ admin mới tạo được workspace. */
+  tenant_role: string | null
+}
+
 export function useWorkspaces() {
-  return useQuery<Page<Workspace>, Error>({
+  return useQuery<WorkspaceList, Error>({
     queryKey: ['workspaces'],
     queryFn: () => apiGet('/api/v1/workspaces'),
     // Cùng khuôn với `useCurrentUser`, và `failureCount` là BẮT BUỘC: TanStack coi
@@ -50,5 +57,49 @@ export function useWorkspaces() {
     // qua đếm lần sẽ retry vô hạn. Giai đoạn 0 đã dính đúng lỗi này.
     retry: (failureCount, error) => !(error instanceof UnauthorizedError) && failureCount < 2,
     staleTime: 30_000,
+  })
+}
+
+export interface CreateWorkspaceArgs {
+  name: string
+  display_name: string
+  description?: string
+  domain_id?: string
+}
+
+export function useCreateWorkspace() {
+  const qc = useQueryClient()
+  return useMutation<Workspace, Error, CreateWorkspaceArgs>({
+    mutationFn: (body) => apiPostJson<Workspace>('/api/v1/workspaces', body),
+    onSuccess: () => {
+      // Cả hai: danh sách workspace, và danh sách domain — `workspace_count` của domain
+      // vừa đổi, và một con số cũ trông y như một con số đúng.
+      void qc.invalidateQueries({ queryKey: ['workspaces'] })
+      void qc.invalidateQueries({ queryKey: ['domains'] })
+    },
+  })
+}
+
+export interface PatchWorkspaceArgs {
+  id: string
+  /** ETag hiện tại. Thiếu nó server trả 428, và đó là lỗi của client chứ không người dùng. */
+  etag: string
+  display_name?: string
+  description?: string
+  domain_id?: string
+  clear_domain?: boolean
+}
+
+export function usePatchWorkspace() {
+  const qc = useQueryClient()
+  return useMutation<Workspace, Error, PatchWorkspaceArgs>({
+    mutationFn: async ({ id, etag, ...body }) => {
+      const { data } = await apiPatch<Workspace>(`/api/v1/workspaces/${id}`, body, etag)
+      return data
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['workspaces'] })
+      void qc.invalidateQueries({ queryKey: ['domains'] })
+    },
   })
 }

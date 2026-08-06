@@ -2,6 +2,7 @@ import type { RouteObject } from 'react-router'
 
 import { AppLayout } from './components/AppLayout'
 import { ConnectionsPage } from './pages/ConnectionsPage'
+import { DomainsPage } from './pages/DomainsPage'
 import { ExplorerPage } from './pages/ExplorerPage'
 import { ItemPage } from './pages/ItemPage'
 import { NotFoundPage } from './pages/NotFoundPage'
@@ -22,6 +23,7 @@ export const routeObjects: RouteObject[] = [
     element: <AppLayout />,
     children: [
       { index: true, element: <WorkspaceListPage /> },
+      { path: 'domains', element: <DomainsPage /> },
       { path: 'workspaces/:workspaceId/items', element: <ExplorerPage /> },
       // Không có route này thì mọi cú bấm item trong Explorer và mọi Enter trong ⌘K đều
       // rơi vào route bắt-tất-cả và ra trang "không tìm thấy" — một hành trình vỡ, dù cả

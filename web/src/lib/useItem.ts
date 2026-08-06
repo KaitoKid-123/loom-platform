@@ -53,6 +53,25 @@ export function useItemVersions(itemId: string) {
   })
 }
 
+export interface VersionDetail extends VersionRow {
+  definition: Record<string, unknown>
+}
+
+/**
+ * Nội dung đầy đủ của MỘT version, kể cả `definition`.
+ *
+ * `enabled` theo `version`: chỉ gọi khi người dùng thật sự mở một version ra xem. Tải
+ * sẵn nội dung của mọi version là kéo về cả lịch sử — với item `connection` thì đó là
+ * kéo về mọi `secret_ref` từng có.
+ */
+export function useVersion(itemId: string, version: number | null) {
+  return useQuery<VersionDetail, Error>({
+    queryKey: ['item-version', itemId, version],
+    queryFn: () => apiGet(`/api/v1/items/${itemId}/versions/${version}`),
+    enabled: itemId !== '' && version !== null,
+  })
+}
+
 export function useRestoreVersion(itemId: string, workspaceId: string) {
   const qc = useQueryClient()
   return useMutation<ItemDetail, Error, number>({

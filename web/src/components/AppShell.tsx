@@ -21,15 +21,22 @@ interface AppShellProps {
   children?: ReactNode
 }
 
-// Bốn mục cũ — Home, Monitor, Catalog, Admin — vẫn chưa có trang, nên rail chỉ có một
-// mục: một icon dẫn tới trang trắng tệ hơn là không có icon đó. Monitor và Catalog quay
-// lại ở Giai đoạn 3, Admin ở Giai đoạn 4.
+// Home, Monitor và Catalog vẫn chưa có trang nên chưa vào rail: một icon dẫn tới trang
+// trắng tệ hơn là không có icon đó. Monitor và Catalog quay lại ở Giai đoạn 3.
 const NAV_ITEMS = [
   {
     label: 'Workspaces',
     to: '/',
+    end: true,
     // Bốn ô vuông — ngăn chứa công việc.
     d: 'M2.5 2.5h4.2v4.2H2.5zM9.3 2.5h4.2v4.2H9.3zM2.5 9.3h4.2v4.2H2.5zM9.3 9.3h4.2v4.2H9.3z',
+  },
+  {
+    label: 'Domains',
+    to: '/domains',
+    end: false,
+    // Một nút toả ra ba nhánh — lĩnh vực nghiệp vụ chứa nhiều workspace.
+    d: 'M8 2.2v3.4M8 5.6 3.4 9.2v4.6M8 5.6l4.6 3.6v4.6M8 5.6v8.2',
   },
 ] as const
 
@@ -116,6 +123,9 @@ export function AppShell({ user, onLogout, sidebar, children }: AppShellProps) {
             <NavLink
               key={item.label}
               to={item.to}
+              // `end` cho "Workspaces": không có nó, mục này sáng ở MỌI đường vì `/` là
+              // tiền tố của tất cả, và hai mục cùng sáng một lúc.
+              end={item.end}
               aria-label={item.label}
               title={item.label}
               className={({ isActive }) =>

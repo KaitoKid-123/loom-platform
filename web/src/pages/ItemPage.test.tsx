@@ -157,3 +157,52 @@ describe('ItemPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/no longer have permission/i)
   })
 })
+
+describe('ItemPage — đọc nội dung một version', () => {
+  it('mở một version ra xem definition của nó', async () => {
+    // Không có nó thì "Restore" là một nút bấm mù: người dùng không đọc được nội dung cũ
+    // trước khi quyết định.
+    const mock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input)
+      if (/\/versions\/\d+$/.test(url)) {
+        return new Response(
+          JSON.stringify({ ...VERSIONS[1], definition: { schema_version: 1, sql: 'SELECT cu' } }),
+          { status: 200 },
+        )
+      }
+      return route(input)
+    })
+    vi.stubGlobal('fetch', mock)
+    const router = createMemoryRouter(
+      [{ path: '/workspaces/:workspaceId/items/:itemId', element: <ItemPage /> }],
+      { initialEntries: [`/workspaces/${WS}/items/${ID}`] },
+    )
+    const qc = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+
+    await userEvent.click(await screen.findByRole('button', { name: /v2/ }))
+    expect(await screen.findByText(/SELECT cu/)).toBeInTheDocument()
+  })
+
+  it('KHÔNG tải nội dung version nào cho tới khi người dùng mở', async () => {
+    // Tải sẵn cả lịch sử là kéo về mọi `secret_ref` từng có với item `connection`.
+    const mock = vi.fn<typeof fetch>(async (input) => route(input))
+    vi.stubGlobal('fetch', mock)
+    const router = createMemoryRouter(
+      [{ path: '/workspaces/:workspaceId/items/:itemId', element: <ItemPage /> }],
+      { initialEntries: [`/workspaces/${WS}/items/${ID}`] },
+    )
+    const qc = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+    await screen.findByText('v2')
+    expect(mock.mock.calls.some((c) => /\/versions\/\d+$/.test(String(c[0])))).toBe(false)
+  })
+})

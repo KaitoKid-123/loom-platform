@@ -1,10 +1,11 @@
+import { useState } from 'react'
 import { Link, useParams } from 'react-router'
 
 import { ItemTypeIcon, typeLabel } from '../components/ItemTypeIcon'
 import { PageHeader } from '../components/PageHeader'
 
 import { describeError } from '../lib/useItemMutations'
-import { useItem, useItemVersions, useRestoreVersion } from '../lib/useItem'
+import { useItem, useItemVersions, useRestoreVersion, useVersion } from '../lib/useItem'
 
 /**
  * Trang chi tiết item, CHỈ ĐỌC ở Giai đoạn 1.
@@ -18,6 +19,8 @@ export function ItemPage() {
   const { data, isPending, error } = useItem(itemId)
   const versions = useItemVersions(itemId)
   const restore = useRestoreVersion(itemId, workspaceId)
+  const [openVersion, setOpenVersion] = useState<number | null>(null)
+  const opened = useVersion(itemId, openVersion)
 
   if (isPending) {
     return (
@@ -112,8 +115,19 @@ export function ItemPage() {
                 key={row.version}
                 className="flex items-center gap-3 rounded border border-line bg-surface px-3 py-1.5 text-[13px]"
               >
-                <span className="tabular w-9 shrink-0 font-mono text-[12px] text-dim">v{row.version}</span>
-                <span className="min-w-0 flex-1 truncate">{row.display_name}</span>
+                <button
+                  type="button"
+                  // Mở ra để ĐỌC nội dung cũ trước khi quyết định phục hồi. Không có nó
+                  // thì "Restore" là một nút bấm mù.
+                  onClick={() => setOpenVersion(openVersion === row.version ? null : row.version)}
+                  aria-expanded={openVersion === row.version}
+                  className="flex min-w-0 flex-1 items-center gap-3 text-left hover:text-accent"
+                >
+                  <span className="tabular w-9 shrink-0 font-mono text-[12px] text-dim">
+                    v{row.version}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{row.display_name}</span>
+                </button>
                 {row.change_note && (
                   <span className="truncate text-[12px] text-faint">{row.change_note}</span>
                 )}
@@ -132,6 +146,24 @@ export function ItemPage() {
                 </button>
               </li>
             ))}
+            {openVersion !== null && (
+              <li className="rounded border border-accent-line bg-raised p-3">
+                <p className="mb-2 text-[12px] font-medium text-dim">
+                  Definition at v{openVersion}
+                </p>
+                {opened.isPending && <p className="text-[13px] text-dim">Loading…</p>}
+                {opened.error && (
+                  <p role="alert" className="text-[13px] text-danger">
+                    {opened.error.message}
+                  </p>
+                )}
+                {opened.data && (
+                  <pre className="overflow-auto rounded border border-line bg-surface p-3 font-mono text-[12px] leading-relaxed">
+                    {JSON.stringify(opened.data.definition, null, 2)}
+                  </pre>
+                )}
+              </li>
+            )}
           </ul>
         )}
         {restore.isError && restore.error && (

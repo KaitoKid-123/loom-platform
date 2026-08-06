@@ -125,3 +125,100 @@ describe('atLeast', () => {
     expect(atLeast('ADMIN', 'viewer')).toBe(false)
   })
 })
+
+describe('WorkspaceListPage — tạo workspace', () => {
+  function stubList(tenantRole: string | null, items: unknown[] = []) {
+    const mock = vi.fn<typeof fetch>(async (input) =>
+      String(input).includes('/domains')
+        ? new Response(JSON.stringify({ items: [] }), { status: 200 })
+        : new Response(
+            JSON.stringify({ items, next_cursor: null, tenant_role: tenantRole }),
+            { status: 200 },
+          ),
+    )
+    vi.stubGlobal('fetch', mock)
+    return mock
+  }
+
+  it('admin cấp tenant thấy nút New workspace', async () => {
+    // Đây là khoảng trống lộ ra từ một ảnh chụp: API có `POST /workspaces` từ Task 21
+    // nhưng không có chỗ nào trên giao diện gọi tới nó.
+    stubList('admin')
+    renderPage()
+    expect(await screen.findByRole('button', { name: /new workspace/i })).toBeInTheDocument()
+  })
+
+  it('người không phải admin cấp tenant KHÔNG thấy nút đó', async () => {
+    // Server trả 404 cho họ, nên hiện nút là mời điền xong một form rồi mới biết mình
+    // không có quyền.
+    stubList(null, [WS])
+    renderPage()
+    await screen.findByText('Retail')
+    expect(screen.queryByRole('button', { name: /new workspace/i })).not.toBeInTheDocument()
+  })
+
+  it('hộp thoại mở theo URL, không theo state React', async () => {
+    stubList('admin')
+    const { router } = renderPage()
+    await userEvent.click(await screen.findByRole('button', { name: /new workspace/i }))
+    expect(router.state.location.search).toBe('?new=1')
+    expect(screen.getByRole('dialog', { name: 'New workspace' })).toBeInTheDocument()
+  })
+
+  it('nói rõ `name` không đổi được về sau', async () => {
+    // Nó đi vào `storage_prefix` ở Giai đoạn 2, nên đây không phải một cái nhãn đổi lúc
+    // nào cũng được — và người dùng không tự biết điều đó.
+    stubList('admin')
+    renderPage()
+    await userEvent.click(await screen.findByRole('button', { name: /new workspace/i }))
+    expect(screen.getByText(/cannot be changed later/i)).toBeInTheDocument()
+  })
+})
+
+describe('WorkspaceListPage — đổi tên', () => {
+  function stubOne(role: string) {
+    const mock = vi.fn<typeof fetch>(async (input) =>
+      String(input).includes('/domains')
+        ? new Response(JSON.stringify({ items: [] }), { status: 200 })
+        : new Response(
+            JSON.stringify({
+              items: [{ ...WS, my_role: role, version: 4 }],
+              next_cursor: null,
+              tenant_role: null,
+            }),
+            { status: 200 },
+          ),
+    )
+    vi.stubGlobal('fetch', mock)
+    return mock
+  }
+
+  it('member đổi tên được, và ETag dựng từ version đã có trong danh sách', async () => {
+    const mock = stubOne('member')
+    renderPage()
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    const input = screen.getByLabelText(/^rename /i)
+    await userEvent.clear(input)
+    await userEvent.type(input, 'Tên mới{Enter}')
+
+    const patch = mock.mock.calls.find((c) => c[1]?.method === 'PATCH')
+    expect(patch).toBeDefined()
+    // Không cần một GET phụ để lấy ETag — `version` đã nằm trong phản hồi danh sách.
+    expect((patch?.[1]?.headers as Record<string, string>)['If-Match']).toBe('W/"4"')
+  })
+
+  it('contributor KHÔNG đổi tên được — cùng cổng server dùng', async () => {
+    stubOne('contributor')
+    renderPage()
+    await screen.findByText('Retail')
+    expect(screen.queryByRole('button', { name: 'Rename' })).not.toBeInTheDocument()
+  })
+
+  it('Escape huỷ mà không gửi gì', async () => {
+    const mock = stubOne('admin')
+    renderPage()
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByLabelText(/^rename /i), 'nửa chừng{Escape}')
+    expect(mock.mock.calls.some((c) => c[1]?.method === 'PATCH')).toBe(false)
+  })
+})
