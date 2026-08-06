@@ -342,3 +342,12 @@ lint-shell:  ## shellcheck cho mọi script shell trong repo
 	@command -v shellcheck >/dev/null || { \
 		echo "Thiếu shellcheck — chạy 'make bootstrap'."; exit 1; }
 	shellcheck scripts/*.sh scripts/git-hooks/*
+
+.PHONY: measure-spill
+measure-spill:  ## Phép đo 1 mục 3 (CỬA CHẶN) — DuckDB trong cgroup 384Mi thật
+	@# Chạy trong một container có ĐÚNG limit mà Giai đoạn 2b sẽ đặt cho
+	@# loom-query. Chạy trên host thì không có cgroup nào để bị giết, và bài đo
+	@# xanh mà không chứng minh được gì.
+	docker run --rm --memory=384m --memory-swap=384m \
+		-v "$(PWD):/w" -w /w python:3.12-slim \
+		sh -c "pip install --quiet duckdb && python scripts/measure_duckdb_spill.py"
