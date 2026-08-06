@@ -60,8 +60,31 @@ spec:
       labels: { app: minio }
     spec:
       securityContext:
-        # PVC mount vào mặc định thuộc root. Không có fsGroup thì uid 1000 không
-        # ghi nổi vào /data và MinIO chết ngay lúc khởi động.
+        # ĐỌC KỸ TRƯỚC KHI SỬA — chỗ này đã tốn một lần CrashLoopBackOff.
+        #
+        # `fsGroup` ở đây gần như KHÔNG làm gì trên cụm local, và đừng tin ngược
+        # lại: k3d dùng provisioner `local-path` của Rancher, sinh ra PV kiểu
+        # `Local`. Kubelet KHÔNG chown đệ quy cho PV kiểu `Local` (cùng khoảng
+        # trống đã biết với `hostPath`) — nên `fsGroup` không đổi quyền của thư
+        # mục sẵn có.
+        #
+        # Thứ THẬT SỰ làm uid 1000 ghi được là script cấp phát của provisioner:
+        # nó `mkdir -m 0777` khi tạo volume MỚI. Hệ quả trực tiếp:
+        #
+        #   - Cụm dựng từ số không (Task 14) → volume mới, 0777, chạy tốt.
+        #   - Cụm ĐANG CÓ với volume đã dùng khi MinIO còn chạy bằng root →
+        #     thư mục con thuộc root, pod chết ngay:
+        #     "FATAL Unable to initialize backend: Unable to write to the backend"
+        #
+        # Gặp trường hợp thứ hai thì xoá PVC cho nó cấp phát lại, KHÔNG phải gỡ
+        # hardening (reclaimPolicy là Delete nên dữ liệu trong đó mất — ở local
+        # chấp nhận được, trên VPS thì không):
+        #
+        #     kubectl -n loom delete pvc minio-data
+        #     make infra
+        #
+        # Giữ `fsGroup` vì nó ĐÚNG với storage class thật (VPS, CSI driver) — chỉ
+        # là nó không phải lý do mọi thứ chạy được ở local.
         fsGroup: 1000
       containers:
         - name: minio
