@@ -54,3 +54,43 @@ Admin đầu tiên phải được gán từ ngoài hệ thống — mọi thứ
 - Chưa có UI thùng rác; phục hồi item đã xoá phải qua API
 - Trang chi tiết item (`/workspaces/{ws}/items/{id}`) chưa có nội dung — Explorer liên kết
   tới nó nhưng Giai đoạn 2 mới làm trình soạn thảo
+
+## Giai đoạn 2a — nền storage
+
+MinIO và Lakekeeper (Iceberg REST catalog) chạy trong cụm; `packages/storagekit` cấp
+credential S3 ngắn hạn hẹp theo prefix của workspace; `packages/icebergkit` là chỗ duy
+nhất trong hệ thống biết Iceberg tồn tại — mọi thứ khác nói chuyện với nó bằng Arrow.
+
+| Lệnh | Làm gì |
+|---|---|
+| `make minio-console` | Console MinIO ở http://localhost:9001 |
+| `make minio-s3` | Port-forward cổng S3 ra localhost:9000 |
+| `make ram` | RAM từng pod và CẢ NODE, so với trần 1,8 GB |
+| `make measure-scan` | Phép đo 1 — thời gian lập kế hoạch quét bảng Iceberg |
+| `make measure-spill` | Phép đo 1 — DuckDB trong cgroup 384Mi thật |
+
+**MinIO chỉ chạy ở local** (`deploy/infra/minio.yaml`, cùng khuôn với Dex). dev/prod trỏ
+endpoint ngoài — kế hoạch là một VPS riêng.
+
+**Lakekeeper cần một database THỨ HAI** trên cùng Aiven service. Khôi phục Loom là khôi
+phục **cả hai** database về cùng một mốc — xem `docs/runbook/restore.md`.
+
+### Ba con số bàn giao cho Giai đoạn 2b
+
+- **Lập kế hoạch quét p95 = 172,7ms** (1 triệu dòng, 20 snapshot, container cùng máy).
+  Dưới ngưỡng 200ms nên **không lấp `MetadataCache`**. Nhưng nó ngang ngửa thời gian đọc
+  dữ liệu, và đây là cận dưới — VPS sẽ thêm một chặng mạng vào đúng chỗ nhạy nhất.
+- **DuckDB phải đặt `memory_limit` tay**, thấp hơn limit container. Nó không đọc cgroup.
+  Con số đã kiểm: 256MB trong container 384Mi, RSS đỉnh 376 Mi.
+- **RAM cả node 1318 / 1843 Mi.** Còn dư 525 Mi; `loom-query` chiếm ~376 Mi khi tải nặng.
+
+### Nợ đã biết sau Giai đoạn 2a
+
+- **Chưa có kế hoạch sao lưu lakehouse.** Đây là món mất khi chọn MinIO thay Backblaze B2.
+  Ở 2a dữ liệu là dữ liệu thử nên chấp nhận được, nhưng nó là **điều kiện** của việc đưa
+  dữ liệu thật vào và của việc chuyển sang VPS.
+- `authz-backend` của Lakekeeper là `allow-all`. Chấp nhận được vì Service là ClusterIP,
+  không lộ ra ingress — nhưng cần xem lại ở Giai đoạn 6.
+- Credential gốc của MinIO ở local là hằng số trong `deploy/infra/minio.yaml`. dev/prod
+  lấy từ Vault qua External Secrets.
+- Xoay credential vẫn là việc tay tới Giai đoạn 6.
