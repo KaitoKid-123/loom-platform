@@ -360,3 +360,20 @@ measure-scan:  ## Phép đo 1 mục 1 — thời gian lập kế hoạch quét b
 	@# một môi trường khác cho ra một con số nói về hệ thống không ai chạy.
 	uv run pytest -m benchmark -o addopts="" -s \
 		packages/icebergkit/tests/integration/test_scan_planning_benchmark.py
+
+.PHONY: ram
+ram: check-context  ## Tổng RAM cụm đang dùng, so với trần 1,8 GB
+	@# Cộng trên giấy ở spec Giai đoạn 2 mục 7.3 là ước lượng từ
+	@# `resources.requests`, KHÔNG phải mức dùng thật — hai thứ lệch nhau theo
+	@# cả hai chiều. Đây là số thật, đọc từ cgroup của từng container.
+	@total=0; \
+	for p in $$(kubectl -n $(NS) get pods -o jsonpath='{.items[*].metadata.name}'); do \
+	  m=$$(kubectl -n $(NS) exec "$$p" -- cat /sys/fs/cgroup/memory.current 2>/dev/null \
+	       || echo 0); \
+	  mib=$$(( m / 1048576 )); total=$$(( total + mib )); \
+	  printf '  %-34s %5d Mi\n' "$$p" "$$mib"; \
+	done; \
+	printf '\n  TỔNG %*d Mi   (trần 1843 Mi)\n' 31 "$$total"; \
+	if [ "$$total" -gt 1843 ]; then \
+	  echo "  VƯỢT TRẦN — xem spec Giai đoạn 2 mục 7.3, ba lối ra"; exit 1; \
+	else printf '  còn dư %d Mi\n' $$(( 1843 - total )); fi
