@@ -12,32 +12,58 @@ import uuid
 import pytest
 
 from loom_core.schemas import Principal
-from loom_query.authz import AuthzPort
+from loom_query.authz import AuthzPort, LakehouseResolver
 
 
 class FakeAuthz:
-    """`AuthzPort` giả — trả đúng vai trò mà test cấp trước bằng `grant()`, và
-    ghi lại MỌI lần bị gọi vào `calls`.
+    """`AuthzPort` VÀ `LakehouseResolver` giả trong CÙNG một đối tượng — đúng
+    cách `AuthzClient` thật cài cả hai Protocol trên một `base_url` (xem
+    docstring `authz.py`): test không cần tiêm hai fake cho một thứ về bản
+    chất là "hỏi loom-api".
+
+    Trả đúng vai trò mà test cấp trước bằng `grant()`, đúng id mà test đăng ký
+    trước bằng `register_lakehouse()`, và ghi lại MỌI lần bị gọi vào `calls`/
+    `resolve_calls`.
 
     `calls` là thứ làm "chứng minh đỏ 1" (gỡ bước gọi `/internal/authz/items`
     khỏi `run_gate`) kiểm được: nếu ai đó xoá dòng `await authz.
     roles_for_items(...)` trong `authz.run_gate`, `test_missing_role_is_
     forbidden` ở `test_query_authz_gate.py` sẽ không còn thấy `QueryForbidden`
     nào được ném — nó ĐỎ đúng vì thiếu bước gọi, không phải vì một lý do khác.
+
+    `resolve_calls` cùng vai trò đó cho `resolver.resolve_lakehouses`: một
+    phép kiểm join hai lakehouse gọi nó ĐÚNG MỘT lần cho toàn bộ danh sách tên,
+    không phải một lần cho mỗi bảng ba phần.
     """
 
     def __init__(self) -> None:
         self._roles: dict[uuid.UUID, str | None] = {}
+        self._lakehouses: dict[tuple[uuid.UUID, str], uuid.UUID] = {}
         self.calls: list[tuple[uuid.UUID, ...]] = []
+        self.resolve_calls: list[tuple[uuid.UUID, tuple[str, ...]]] = []
 
     def grant(self, item_id: uuid.UUID, role: str) -> None:
         self._roles[item_id] = role
+
+    def register_lakehouse(self, workspace_id: uuid.UUID, name: str, item_id: uuid.UUID) -> None:
+        """Đăng ký "trong `workspace_id`, tên `name` là item `item_id`" — bản
+        giả của một hàng `Item(type='lakehouse')` mà `/internal/lakehouses/
+        resolve` thật sẽ tìm thấy. KHÔNG đăng ký gì cho một (workspace, tên)
+        mô phỏng đúng "resolver thật trả None" (tên không tồn tại, hoặc tồn
+        tại nhưng ở workspace khác — resolver thật giới hạn theo workspace)."""
+        self._lakehouses[(workspace_id, name)] = item_id
 
     async def roles_for_items(
         self, principal: Principal, item_ids: tuple[uuid.UUID, ...]
     ) -> dict[str, str | None]:
         self.calls.append(item_ids)
         return {str(item_id): self._roles.get(item_id) for item_id in item_ids}
+
+    async def resolve_lakehouses(
+        self, workspace_id: uuid.UUID, names: tuple[str, ...]
+    ) -> dict[str, uuid.UUID | None]:
+        self.resolve_calls.append((workspace_id, names))
+        return {name: self._lakehouses.get((workspace_id, name)) for name in names}
 
 
 def a_principal(*, user_id: uuid.UUID | None = None, groups: tuple[str, ...] = ()) -> Principal:
@@ -61,8 +87,9 @@ def principal() -> Principal:
 
 
 # Xác nhận tĩnh (đọc lúc import module test, không phải một test riêng) rằng
-# `FakeAuthz` thật sự khớp `AuthzPort` — một protocol chỉ khớp CẤU TRÚC, và một
-# lần đổi chữ ký ở một trong hai bên mà không đổi bên kia sẽ không đỏ ở đâu cả
-# nếu không có dòng này: mypy strict kiểm nó lúc lint, không phải lúc `pytest`
-# chạy hàm nào.
-_: type[AuthzPort] = FakeAuthz
+# `FakeAuthz` thật sự khớp CẢ HAI Protocol — một protocol chỉ khớp CẤU TRÚC, và
+# một lần đổi chữ ký ở một trong hai bên mà không đổi bên kia sẽ không đỏ ở đâu
+# cả nếu không có hai dòng này: mypy strict kiểm nó lúc lint, không phải lúc
+# `pytest` chạy hàm nào.
+_authz_check: type[AuthzPort] = FakeAuthz
+_resolver_check: type[LakehouseResolver] = FakeAuthz

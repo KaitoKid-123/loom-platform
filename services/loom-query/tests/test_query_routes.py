@@ -42,9 +42,19 @@ from .conftest import FakeAuthz
 UNREACHABLE = "http://127.0.0.1:1"
 
 
-def _body(lakehouse_id: uuid.UUID, sql: str, principal: Principal) -> dict[str, Any]:
+def _body(
+    lakehouse_id: uuid.UUID,
+    sql: str,
+    principal: Principal,
+    *,
+    workspace_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
     return {
         "lakehouse_id": str(lakehouse_id),
+        # Giá trị mặc định ngẫu nhiên: hầu hết test dưới đây dùng bảng HAI
+        # phần, và `run_gate` không hỏi gì về workspace cho trường hợp đó — chỉ
+        # test tên BA phần mới cần truyền `workspace_id=` tường minh.
+        "workspace_id": str(workspace_id or uuid.uuid4()),
         "sql": sql,
         "principal": {
             "user_id": str(principal.user_id),
@@ -77,9 +87,29 @@ async def test_bad_sql_is_rejected_with_400_and_line_column(
     assert errors[0]["line"] == 3
 
 
-async def test_three_part_table_name_is_rejected_with_400(
+async def test_unqualified_table_name_is_rejected_with_400(
     fake_authz: FakeAuthz, principal: Principal
 ) -> None:
+    app = create_app(authz=fake_authz)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/query", json=_body(uuid.uuid4(), "SELECT * FROM orders", principal)
+        )
+
+    assert response.status_code == 400
+    assert "unqualified" in response.json()["detail"] or "namespace" in response.json()["detail"]
+
+
+async def test_three_part_table_name_with_an_unresolvable_lakehouse_is_forbidden(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Tên bảng BA phần giờ được HỖ TRỢ (không còn 400 "chưa hỗ trợ" của Task
+    6) — nhưng "lh" không được đăng ký qua `fake_authz.register_lakehouse`
+    trong `workspace_id` của request, nên nó không phân giải được. Kết quả
+    vẫn phải là 403 (không phân biệt được với "có nhưng không có quyền"),
+    KHÔNG phải 404 — xem `tests/test_query_authz_gate.py` cho phép kiểm chi
+    tiết hơn về tính indistinguishable đó."""
     app = create_app(authz=fake_authz)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -87,8 +117,7 @@ async def test_three_part_table_name_is_rejected_with_400(
             "/api/v1/query", json=_body(uuid.uuid4(), "SELECT * FROM lh.ns.t", principal)
         )
 
-    assert response.status_code == 400
-    assert "not supported yet" in response.json()["detail"]
+    assert response.status_code == 403
 
 
 async def test_forbidden_query_never_touches_the_catalog(

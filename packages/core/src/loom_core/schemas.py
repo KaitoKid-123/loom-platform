@@ -277,3 +277,32 @@ class AuthzItemsResponse(BaseModel):
     """
 
     roles: dict[str, str | None]
+
+
+class LakehouseResolveRequest(BaseModel):
+    """Body của `POST /internal/lakehouses/resolve` — xem docstring endpoint
+    (`routers/internal.py`) cho lý do endpoint này tồn tại tách riêng khỏi
+    `/internal/authz/items` và vì sao nó KHÔNG kiểm quyền.
+
+    `names` là cả DANH SÁCH cho một request, không phải một tên một request:
+    một câu `JOIN` ba phần chạm N tên lakehouse khác nhau phải đi ĐÚNG MỘT
+    round trip, không phải N.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: uuid.UUID
+    names: list[str]
+
+
+class LakehouseResolveResponse(BaseModel):
+    """`ids[ten]` là `None` cho tên không tồn tại HOẶC chỉ tồn tại ở trạng thái
+    khác `active` — endpoint này không phân biệt hai lý do đó với nhau, cùng
+    tinh thần `AuthzItemsResponse.roles` ở trên, dù lý do khác: ở đây không có
+    gì để rò rỉ cho NGƯỜI DÙNG CUỐI (endpoint không kiểm quyền), nhưng phân
+    biệt "chưa từng tồn tại" khỏi "vừa xoá mềm" chỉ để lộ chi tiết vòng đời mà
+    người gọi (`loom-query`) không cần biết — nó chỉ cần một id DÙNG ĐƯỢC hay
+    không.
+    """
+
+    ids: dict[str, uuid.UUID | None]

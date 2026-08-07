@@ -18,6 +18,18 @@ class QueryCreate(BaseModel):
     lakehouse_id: uuid.UUID
     sql: str
 
+    # TẠM THỜI, cùng lý do và cùng số phận với `principal` bên dưới: `loom-api`
+    # là nguồn thật của "lakehouse này thuộc workspace nào" (nó có database,
+    # `loom-query` thì không — xem docstring `main.py`), nhưng CHƯA proxy
+    # request này, nên workspace phải tới qua thân request thay vì `loom-query`
+    # tự tra cứu. `run_gate` cần nó để phân giải tên bảng ba phần đúng phạm vi
+    # workspace (xem `authz._resolve_item_ids`) — tên lakehouse chỉ duy nhất
+    # TRONG một workspace, không phải toàn hệ thống. Khi `loom-api` bắt đầu
+    # proxy, trường này đổi từ "người gọi tự khai" thành "loom-api tự điền sau
+    # khi đã xác minh `lakehouse_id` thuộc workspace nào", cùng lúc với
+    # `principal` đổi từ tự khai sang xác thực qua cookie phiên.
+    workspace_id: uuid.UUID
+
     # TẠM THỜI — xem docstring `main.py`. `loom-api` CHƯA chuyển tiếp request
     # này (đó là việc của task sau); tới lúc đó, principal của người dùng cuối
     # phải tới qua đúng MỘT đường (session cookie mà `loom-api` đã xác thực),

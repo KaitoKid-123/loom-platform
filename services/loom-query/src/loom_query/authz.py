@@ -4,7 +4,7 @@ Thứ tự dưới đây LÀ đặc tả, không phải chi tiết cài đặt (
 
     1. sqlkit.validate(sql)      -> lỗi cú pháp -> 400 kèm dòng/cột
     2. sqlkit.table_deps(sql)    -> mọi bảng, kể cả trong CTE và subquery
-    3. bảng -> item id           -> xem `_resolve_item_id`
+    3. bảng -> item id           -> xem `_resolve_item_ids`
     4. POST /internal/authz/items (qua `AuthzPort.roles_for_items`)
     5. thiếu viewer ở BẤT KỲ id nào -> 403, CHƯA từng chạm S3
     6. (ở module khác — `runner.py`) mới tới lượt build_catalog / mở bảng / chạy
@@ -21,6 +21,19 @@ bất kỳ I/O nào ra ngoài tiến trình.
 đường đánh giá không trôi khỏi nhau; viết một luật thứ ba ở đây — dù chỉ là
 "nếu vai trò không None thì cho qua" — là mở đúng con đường mà differential
 test đó tồn tại để chặn. `AuthzPort` vì vậy chỉ có một việc: hỏi, không tính.
+
+**Bước 3 giờ có hai nhánh** (tên bảng ba phần / hai lakehouse, xem
+`_resolve_item_ids`): bảng hai phần trỏ thẳng về `lakehouse_id` của request,
+bảng ba phần cần dịch `name` của MỘT lakehouse khác sang id qua
+`LakehouseResolver.resolve_lakehouses` (`POST /internal/lakehouses/resolve`
+bên `loom-api`) trước khi bước 4 hỏi quyền trên id đó. `LakehouseResolver` là
+một Protocol THỨ HAI, tách khỏi `AuthzPort`, vì hai câu hỏi khác hẳn nhau: một
+cái hỏi "quyền", một cái chỉ dịch tên — đúng cách `/internal/lakehouses/
+resolve` tách khỏi `/internal/authz/items` bên `loom-api` (xem docstring
+`routers/internal.py` ở đó). `AuthzClient` cài CẢ HAI Protocol trên cùng một
+`base_url`, vì cả hai đều là chuyện của `loom-api`; `FakeAuthz`
+(`tests/conftest.py`) cũng vậy, để test không phải tiêm hai đối tượng giả cho
+một thứ về bản chất là "hỏi loom-api".
 """
 
 from __future__ import annotations
@@ -62,7 +75,12 @@ class SqlSyntaxError(HTTPException):
 
 
 class UnsupportedTableName(HTTPException):
-    """400 — quy ước tên bảng chưa mở rộng ở Giai đoạn 2b, xem `_resolve_item_id`."""
+    """400 — tên bảng KHÔNG có namespace (`FROM orders`), xem `_resolve_item_ids`.
+
+    Đây là trường hợp DUY NHẤT còn bị từ chối ở bước phân giải: hai phần
+    (`namespace.table`) và ba phần (`lakehouse.namespace.table`) đều được hỗ
+    trợ. `loom-query` cố tình không đoán namespace hộ người dùng.
+    """
 
     def __init__(self, table: TableRef, reason: str) -> None:
         self.table = table
@@ -125,9 +143,29 @@ class AuthzPort(Protocol):
     ) -> dict[str, str | None]: ...
 
 
+class LakehouseResolver(Protocol):
+    """Hợp đồng "dịch tên", TÁCH khỏi `AuthzPort` — xem docstring module.
+
+    Đây KHÔNG phải một cổng quyền: `resolve_lakehouses` không nói gì về việc
+    principal có đọc được lakehouse hay không, chỉ nói tên đó tồn tại (và
+    đang active) hay không. `run_gate` là nơi biến câu trả lời `None` của
+    Protocol này thành 403 — chỗ hỏi (đây) và chỗ quyết định "cho qua hay
+    không" (`run_gate`) tách nhau, cùng lý do `AuthzPort` tách khỏi luật RBAC.
+    """
+
+    async def resolve_lakehouses(
+        self, workspace_id: uuid.UUID, names: tuple[str, ...]
+    ) -> dict[str, uuid.UUID | None]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class AuthzClient:
-    """Bản cài THẬT của `AuthzPort` — gọi `POST {base_url}/authz/items`.
+    """Bản cài THẬT của CẢ `AuthzPort` LẪN `LakehouseResolver` — gọi
+    `POST {base_url}/authz/items` và `POST {base_url}/lakehouses/resolve`.
+
+    Một class cho cả hai Protocol vì cả hai đều là "hỏi `loom-api` qua cùng
+    `base_url` nội bộ" — không có lý do tách hai `httpx.AsyncClient`/hai cấu
+    hình chỉ để giữ ranh giới kiểu tồn tại trên giấy.
 
     Không tự đóng `http`: chỗ dựng nó (`main.py`) quyết định ai sở hữu vòng đời
     của `httpx.AsyncClient`, đúng quy tắc "chỉ đóng thứ mình tạo ra" đã dùng ở
@@ -151,48 +189,115 @@ class AuthzClient:
         roles: dict[str, str | None] = response.json()["roles"]
         return roles
 
+    async def resolve_lakehouses(
+        self, workspace_id: uuid.UUID, names: tuple[str, ...]
+    ) -> dict[str, uuid.UUID | None]:
+        response = await self.http.post(
+            f"{self.base_url}/lakehouses/resolve",
+            json={"workspace_id": str(workspace_id), "names": list(names)},
+        )
+        response.raise_for_status()
+        raw_ids: dict[str, str | None] = response.json()["ids"]
+        return {
+            name: (uuid.UUID(value) if value is not None else None)
+            for name, value in raw_ids.items()
+        }
 
-def _resolve_item_id(table: TableRef, lakehouse_id: uuid.UUID) -> uuid.UUID:
-    """table -> item id — BẢN THU HẸP của Giai đoạn 2b, xem module docstring.
 
-    Chỉ hỗ trợ tên bảng HAI phần (`namespace.table`), hiểu là nằm trong
-    lakehouse của `lakehouse_id` trong request — mọi bảng hai phần hợp lệ vì
-    vậy đều trỏ về CÙNG một item id (chính `lakehouse_id`), vì ở Giai đoạn 2b
-    một item riêng cho từng bảng chưa tồn tại (`LakehouseDefinition` mới có
-    `schema_version`, "Giai đoạn 2 thêm `tables`" — xem
-    `loom_core.item_definitions`).
+def _lakehouse_name_of(namespace: str) -> str | None:
+    """`name` của lakehouse nêu trong một tên bảng BA phần, hoặc `None` nếu
+    `namespace` chỉ có một phần (tên bảng HAI phần, `namespace.table`).
 
-    Tên KHÔNG có namespace (`FROM orders`) và tên BA phần
-    (`lakehouse.namespace.table`, tức `table.catalog` VÀ `table.db` đều có
-    giá trị — xem `loom_sql.deps.table_deps`) đều bị từ chối bằng 400 "chưa hỗ
-    trợ": ba phần cần phân giải `name` của một item `lakehouse` khác sang id
-    của nó qua một endpoint internal thứ hai (`/internal/lakehouses/resolve`,
-    spec Giai đoạn 2b Task 6) mà task này CỐ Ý chưa dựng — đó là việc của task
-    mở tên bảng ba phần / hai lakehouse.
+    `namespace` tới từ `TableRef.namespace` — `loom_sql.deps.dependencies` nối
+    `table.catalog` và `table.db` bằng một dấu chấm khi cả hai có giá trị.
+    sqlglot không cho một `exp.Table` nhiều hơn ba phần (`catalog.db.table`),
+    nên `namespace` ở đây mang TỐI ĐA một dấu chấm — `partition` (tách ở dấu
+    chấm ĐẦU TIÊN) là đủ, không cần đếm số phần.
     """
-    if table.namespace is None:
-        raise UnsupportedTableName(
-            table,
-            f"table '{table.name}' has no namespace — write it as "
-            f"'<namespace>.{table.name}' (unqualified table names are not supported)",
-        )
-    if "." in table.namespace:
-        raise UnsupportedTableName(
-            table,
-            f"three-part table names ('{table.namespace}.{table.name}') are not "
-            "supported yet — use 'namespace.table' within the lakehouse given in the request",
-        )
-    return lakehouse_id
+    lakehouse_name, dot, _rest = namespace.partition(".")
+    return lakehouse_name if dot else None
+
+
+async def _resolve_item_ids(
+    refs: tuple[TableRef, ...],
+    *,
+    lakehouse_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    resolver: LakehouseResolver,
+) -> tuple[uuid.UUID, ...]:
+    """Mọi `TableRef` trong `refs` -> id item `lakehouse` tương ứng — quy ước
+    đặt tên bảng đã chốt (xem module docstring và spec Giai đoạn 2b Task 6/7):
+
+    - `namespace.table` (HAI phần): trỏ THẲNG về `lakehouse_id` của request —
+      không có gì để hỏi, mọi bảng hai phần hợp lệ trỏ về CÙNG một id.
+    - `lakehouse.namespace.table` (BA phần): `lakehouse` là `name` của một item
+      `type='lakehouse'` KHÁC, cùng workspace với `lakehouse_id` — cần dịch
+      sang id qua `resolver.resolve_lakehouses`.
+
+    **MỘT lần gọi `resolver.resolve_lakehouses` cho TOÀN BỘ danh sách tên**,
+    không phải một lần cho mỗi bảng: gom hết tên lakehouse xuất hiện trong
+    `refs` (khử trùng lặp) rồi hỏi một lượt — một `JOIN` năm bảng ở CÙNG một
+    lakehouse thứ hai không được sinh năm round trip HTTP. Đây cũng là lý do
+    hàm này nhận `refs` là một khối thay vì được gọi lặp lại cho từng `ref` như
+    `_resolve_item_id` (bản cũ, một-bảng) đã làm.
+
+    Không phân giải được một tên (`resolver` trả `None` cho nó) ném THẲNG
+    `QueryForbidden` — KHÔNG phải một lỗi 404 riêng cho "tên sai". "Tên
+    lakehouse không tồn tại" và "tên lakehouse tồn tại nhưng principal không
+    có quyền" phải là MỘT câu trả lời từ phía người dùng cuối (403, cùng thông
+    điệp) — đúng quy tắc 404-trước-403 mà `QueryForbidden` đã ghi trong
+    docstring của chính nó, áp dụng ở đây cho danh mục lakehouse thay vì cho
+    một item bên trong nó.
+    """
+    namespaces: list[str] = []
+    for ref in refs:
+        if ref.namespace is None:
+            raise UnsupportedTableName(
+                ref,
+                f"table '{ref.name}' has no namespace — write it as "
+                f"'<namespace>.{ref.name}' (unqualified table names are not supported)",
+            )
+        namespaces.append(ref.namespace)
+
+    cross_lakehouse_names = tuple(
+        dict.fromkeys(name for ns in namespaces if (name := _lakehouse_name_of(ns)) is not None)
+    )
+    resolved = (
+        await resolver.resolve_lakehouses(workspace_id, cross_lakehouse_names)
+        if cross_lakehouse_names
+        else {}
+    )
+
+    item_ids: list[uuid.UUID] = []
+    for ns in namespaces:
+        name = _lakehouse_name_of(ns)
+        if name is None:
+            item_ids.append(lakehouse_id)
+            continue
+        other_id = resolved.get(name)
+        if other_id is None:
+            raise QueryForbidden
+        item_ids.append(other_id)
+    return tuple(dict.fromkeys(item_ids))
 
 
 async def run_gate(
     *,
     sql: str,
     lakehouse_id: uuid.UUID,
+    workspace_id: uuid.UUID,
     principal: Principal,
     authz: AuthzPort,
+    resolver: LakehouseResolver,
 ) -> tuple[TableRef, ...]:
     """Chạy năm bước đầu của cổng quyền. Ném `HTTPException` nếu bị chặn.
+
+    `workspace_id` là workspace CHỨA `lakehouse_id` của request — cần nó để
+    phân giải tên bảng ba phần (`_resolve_item_ids`) đúng phạm vi: tên lakehouse
+    là duy nhất trong MỘT workspace, không phải toàn hệ thống, nên tìm nó mà
+    không giới hạn workspace là tìm ở phạm vi sai. `routers/query.py` lấy giá
+    trị này từ `QueryCreate.workspace_id` — xem docstring trường đó cho lý do
+    nó tới qua thân request thay vì `loom-query` tự tra cứu (không có database).
 
     Trả về danh sách bảng đã kiểm quyền — người gọi (`routers/query.py`) đưa
     thẳng nó cho `runner.py` ở bước 6, để SQL không bị `sqlglot.parse` một lần
@@ -211,12 +316,13 @@ async def run_gate(
 
     refs = tuple(deps.tables)
 
-    # `dict.fromkeys` khử trùng lặp nhưng GIỮ hình dạng "một id cho mỗi bảng"
-    # thay vì sớm rút gọn về một tập hợp: trong task này mọi bảng hợp lệ đều
-    # trỏ về CÙNG `lakehouse_id`, nhưng viết vòng lặp theo từng `ref` (thay vì
-    # gọi `_resolve_item_id` một lần rồi coi như xong) là để Task mở hai
-    # lakehouse chỉ cần đổi `_resolve_item_id`, không đổi hàm này.
-    item_ids = tuple(dict.fromkeys(_resolve_item_id(ref, lakehouse_id) for ref in refs))
+    # `_resolve_item_ids` tự khử trùng lặp NHƯNG kiểm quyền trên TOÀN BỘ id thu
+    # được — không rút gọn xuống "bảng đầu tiên" ở đây hay bên trong nó. Một
+    # `JOIN` hai lakehouse phải hỏi quyền trên CẢ HAI id, xem
+    # `tests/test_query_authz_gate.py` cho phép kiểm canh đúng lỗi này.
+    item_ids = await _resolve_item_ids(
+        refs, lakehouse_id=lakehouse_id, workspace_id=workspace_id, resolver=resolver
+    )
 
     roles = await authz.roles_for_items(principal, item_ids)
 

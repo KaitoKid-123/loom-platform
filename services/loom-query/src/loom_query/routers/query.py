@@ -30,7 +30,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Request, status
 
 from loom_query import runner
-from loom_query.authz import AuthzPort, run_gate
+from loom_query.authz import AuthzPort, LakehouseResolver, run_gate
 from loom_query.config import Settings
 from loom_query.schemas import QueryCreate, QueryCreated, QueryStatusOut
 from loom_query.store import QueryStore
@@ -41,11 +41,14 @@ router = APIRouter(tags=["query"])
 @router.post("/query", response_model=QueryCreated, status_code=status.HTTP_202_ACCEPTED)
 async def create_query(body: QueryCreate, request: Request) -> QueryCreated:
     authz: AuthzPort = request.app.state.authz
+    resolver: LakehouseResolver = request.app.state.resolver
     table_refs = await run_gate(
         sql=body.sql,
         lakehouse_id=body.lakehouse_id,
+        workspace_id=body.workspace_id,
         principal=body.principal,
         authz=authz,
+        resolver=resolver,
     )
 
     store: QueryStore = request.app.state.store

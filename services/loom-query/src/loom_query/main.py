@@ -15,12 +15,13 @@ migration nào ở service này.
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import cast
 
 import httpx
 from fastapi import FastAPI
 
 from loom_query import VERSION
-from loom_query.authz import AuthzClient, AuthzPort
+from loom_query.authz import AuthzClient, AuthzPort, LakehouseResolver
 from loom_query.config import Settings, get_settings
 from loom_query.routers import query
 from loom_query.store import QueryStore
@@ -29,6 +30,7 @@ from loom_query.store import QueryStore
 def create_app(
     settings: Settings | None = None,
     authz: AuthzPort | None = None,
+    resolver: LakehouseResolver | None = None,
     authz_http: httpx.AsyncClient | None = None,
     query_store: QueryStore | None = None,
 ) -> FastAPI:
@@ -50,6 +52,16 @@ def create_app(
         http = authz_http or httpx.AsyncClient()
         resolved_authz = AuthzClient(http=http, base_url=settings.authz_base_url)
 
+    # `AuthzClient` cài CẢ HAI Protocol trên CÙNG một `base_url` (xem docstring
+    # `authz.py`) — "hỏi quyền" và "dịch tên" đều là chuyện của `loom-api`. Khi
+    # không có `resolver=` riêng, dùng lại CHÍNH `resolved_authz`: một
+    # `AuthzClient` thật luôn thoả `LakehouseResolver`, và một `FakeAuthz` tiêm
+    # qua `authz=` (`tests/conftest.py`) cũng cố tình cài cả hai để test không
+    # phải tiêm hai đối tượng giả cho một thứ về bản chất là "hỏi loom-api". Ép
+    # kiểu ở đây (`cast`) là trung thực với NHỮNG GÌ hai class đó THẬT SỰ làm,
+    # không phải một cách né mypy.
+    resolved_resolver: LakehouseResolver = resolver or cast(LakehouseResolver, resolved_authz)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
@@ -59,6 +71,7 @@ def create_app(
     app = FastAPI(title="Loom Query", version=VERSION, lifespan=lifespan)
     app.state.settings = settings
     app.state.authz = resolved_authz
+    app.state.resolver = resolved_resolver
     app.state.store = store
     app.include_router(query.router, prefix="/api/v1")
     return app

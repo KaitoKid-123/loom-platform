@@ -32,11 +32,19 @@ Giai đoạn 1 sinh ra để chặn, chỉ đổi hướng.
 """
 
 from fastapi import APIRouter
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_api.deps import SessionDep
+from loom_api.models import ACTIVE, Item
 from loom_api.permissions import PermissionService
-from loom_core.schemas import AuthzItemsRequest, AuthzItemsResponse
+from loom_core.item_definitions import ItemType
+from loom_core.schemas import (
+    AuthzItemsRequest,
+    AuthzItemsResponse,
+    LakehouseResolveRequest,
+    LakehouseResolveResponse,
+)
 
 router = APIRouter(tags=["internal"])
 
@@ -54,3 +62,64 @@ async def authz_items(
             for item_id, role in roles.items()
         }
     )
+
+
+@router.post("/lakehouses/resolve", response_model=LakehouseResolveResponse)
+async def resolve_lakehouses(
+    body: LakehouseResolveRequest,
+    session: AsyncSession = SessionDep,
+) -> LakehouseResolveResponse:
+    """`name` của item `type='lakehouse'` -> `id`, cho tên bảng BA PHẦN
+    (`lakehouse.namespace.table`) mà `loom-query` cần phân giải trước khi hỏi
+    quyền — xem docstring `loom_query.authz._resolve_item_ids`.
+
+    **KHÔNG kiểm quyền ở đây, và đó là cố ý, không phải sót.** Endpoint này chỉ
+    dịch một cái TÊN (thứ người dùng gõ trong SQL) sang một item id; câu hỏi
+    "principal này có ĐỌC được lakehouse đó không" là việc của
+    `/internal/authz/items`, và `loom-query` LUÔN gọi endpoint đó ngay sau đây
+    với id vừa phân giải (xem `run_gate`). Tách hai câu hỏi ra hai endpoint là
+    để mỗi cái làm ĐÚNG MỘT việc — trộn chung sẽ mời một điều kiện quyền thứ
+    hai lặng lẽ trôi khỏi `PermissionService`, đúng thứ differential test của
+    `permissions.py` sinh ra để chặn (xem docstring module đó).
+
+    Endpoint này trả `null` cho một tên KHÔNG TỒN TẠI giống hệt một tên tồn
+    tại nhưng principal không có quyền đọc — vì bước kiểm quyền diễn ra ở
+    request THỨ HAI (`/internal/authz/items`), không phải ở đây, "tồn tại hay
+    không" tạm thời không phân biệt được ở BƯỚC NÀY dù chưa biết principal là
+    ai. Điều đó nghe như một lỗ rò rỉ sự tồn tại, nhưng KHÔNG PHẢI: nó rò rỉ
+    (nếu có) *cho `loom-query`*, một pod nội bộ, không phải cho người dùng
+    cuối — `run_gate` biến MỌI thất bại phân giải (tên sai HAY không có
+    quyền) thành cùng một 403 trước khi trả lời bất kỳ ai ở ngoài. Đừng "sửa"
+    chỗ này thành hai nhánh phản hồi khác nhau; làm vậy chỉ chuyển lỗ rò rỉ từ
+    chỗ vô hại (nội bộ cluster) sang chỗ có hại (ra tới người dùng), vì
+    `loom-query` sẽ phải LỘ lại phân biệt đó để giữ hành vi của chính nó.
+
+    **MỘT truy vấn cho toàn bộ `names`** — `Item.name.in_(...)`, không lặp
+    từng tên: một câu `JOIN` chạm năm lakehouse không được sinh năm round trip.
+
+    Hai điều kiện lọc BẮT BUỘC, cả hai đã kiểm trực tiếp trên
+    `uq_item_active_name`/migration `0003` (`UNIQUE (workspace_id, type, name)
+    WHERE state = 'active'`):
+
+    - `Item.type == lakehouse`: `type` nằm TRONG ràng buộc duy nhất, nên một
+      `sql_script` và một `lakehouse` cùng tên cùng tồn tại được trong một
+      workspace. Thiếu điều kiện này, một tên khớp nhiều hàng và kết quả phụ
+      thuộc thứ tự Postgres trả về — có thể phân giải nhầm sang item KHÔNG
+      phải lakehouse.
+    - `Item.state == ACTIVE`: ràng buộc chỉ là PARTIAL trên `state = 'active'`,
+      nên một lakehouse đã xoá mềm không chặn một lakehouse MỚI mang cùng tên
+      được tạo lại. Thiếu điều kiện này, phân giải có thể trả về id của bản đã
+      xoá thay vì bản đang sống — hoặc trả kết quả không xác định nếu cả hai
+      hàng cùng khớp `name`.
+    """
+    if not body.names:
+        return LakehouseResolveResponse(ids={})
+
+    stmt = select(Item.name, Item.id).where(
+        Item.workspace_id == body.workspace_id,
+        Item.type == str(ItemType.lakehouse),
+        Item.state == ACTIVE,
+        Item.name.in_(body.names),
+    )
+    found = {name: item_id for name, item_id in (await session.execute(stmt)).all()}
+    return LakehouseResolveResponse(ids={name: found.get(name) for name in body.names})

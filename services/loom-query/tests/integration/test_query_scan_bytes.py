@@ -45,6 +45,9 @@ pytestmark = pytest.mark.integration
 def _body(lakehouse_id: uuid.UUID, sql: str, principal: Principal) -> dict[str, Any]:
     return {
         "lakehouse_id": str(lakehouse_id),
+        # Mọi câu SQL ở file này dùng bảng HAI phần — `run_gate` không hỏi gì
+        # về workspace cho trường hợp đó, nên một UUID ngẫu nhiên là đủ.
+        "workspace_id": str(uuid.uuid4()),
         "sql": sql,
         "principal": {
             "user_id": str(principal.user_id),
