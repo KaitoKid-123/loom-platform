@@ -25,7 +25,9 @@ src = [
     "packages/core/src",
     "packages/storagekit/src",
     "packages/icebergkit/src",
+    "packages/sqlkit/src",
     "services/api/src",
+    "services/loom-query/src",
 ]
 
 [tool.ruff.lint]
@@ -45,8 +47,10 @@ files = [
     "packages/core/src",
     "packages/storagekit/src",
     "packages/icebergkit/src",
+    "packages/sqlkit/src",
     "services/api/src",
     "services/api/migrations",
+    "services/loom-query/src",
     "scripts",
 ]
 plugins = ["pydantic.mypy"]

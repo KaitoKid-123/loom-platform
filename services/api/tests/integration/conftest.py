@@ -18,12 +18,18 @@ quan trọng:
 chỉ rollback mà không ràng buộc thứ tự chạy giữa các file.
 """
 
+import subprocess
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import boto3
+import httpx
 import pytest
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, event
 from sqlalchemy.ext.asyncio import (
@@ -32,7 +38,9 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from testcontainers.community.minio import MinioContainer
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.core.container import DockerContainer
 
 from loom_api.db import Database
 from loom_api.item_store import ItemStore
@@ -46,9 +54,11 @@ from loom_api.models import (
     RoleAssignment,
     Workspace,
 )
+from loom_core.config import get_settings
 from loom_core.item_definitions import ItemType
 from loom_core.roles import Role
 from loom_core.schemas import Principal
+from loom_iceberg.warehouse import ensure_bootstrapped
 
 from .pg_support import POSTGRES_IMAGE, async_url, run_alembic
 
@@ -466,6 +476,12 @@ class ApiWorld:
     # cần một người thật để gán cho — và một test tự chèn app_user rồi quên xoá sẽ
     # làm lệnh xoá user của fixture vỡ vì khoá ngoại, đúng lỗi Task 19 đã gặp.
     make_user: Callable[[str], Awaitable[uuid.UUID]]
+    # App THẬT đứng sau `client`. Lộ ra để test của Task 10/11 thay được
+    # `app.state.query_http` bằng một `httpx.MockTransport` giả `loom-query`
+    # SAU khi app đã dựng — `create_app()` không nhận `query_http=` chỗ fixture
+    # này gọi nó (mọi test khác không cần biết tới loom-query), nên đây là cách
+    # duy nhất tiêm một upstream giả mà không đổi chữ ký của fixture dùng chung.
+    app: FastAPI
 
 
 @pytest.fixture
@@ -593,7 +609,9 @@ async def api_world(
             cookies={"loom_session": "phien-hop-le"},
         ) as client:
             try:
-                yield ApiWorld(client, db_engine, ws_a, ws_b, user_id, principal, grant, make_user)
+                yield ApiWorld(
+                    client, db_engine, ws_a, ws_b, user_id, principal, grant, make_user, app
+                )
             finally:
                 async with maker() as session:
                     # Dọn audit theo ACTOR, không theo workspace: một test có thể
@@ -634,3 +652,188 @@ async def api_world(
                     if extra_users:
                         await session.execute(delete(AppUser).where(AppUser.id.in_(extra_users)))
                     await session.commit()
+
+
+# --------------------------------- MinIO + Lakekeeper thật, cho vòng đời warehouse
+#
+# Bản chép GẦN NGUYÊN VĂN của `services/loom-query/tests/integration/
+# conftest.py` (mà chính nó chép từ `packages/icebergkit/tests/integration/
+# conftest.py`) — cùng lý do đã ghi ở đầu file đó: "Chép cách làm đó, đừng
+# phát minh lại". Ba container này giải bài toán mạng khó nhất (container nói
+# chuyện được với nhau VÀ với tiến trình pytest qua IP gateway của docker
+# bridge mặc định) và đã đúng ở hai chỗ dùng trước — viết lại từ đầu ở đây chỉ
+# tổ có thêm một chỗ thứ ba để hai cạm bẫy mạng đó lặp lại.
+
+ROOT_USER = "loom-root"
+ROOT_PASSWORD = "loom-root-test"  # container dùng một lần
+BUCKET = "loom-api-test"
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+_LAKEKEEPER_ENCRYPTION_KEY = "loom-test-lakekeeper-encryption-key-not-for-prod"
+_LAKEKEEPER_PORT = 8181
+
+
+def pinned_image(key: str) -> str:
+    """Đọc tag image từ `deploy/versions.env` — cùng file mà Makefile `include`."""
+    for line in (REPO_ROOT / "deploy" / "versions.env").read_text().splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == key:
+            return value.strip()
+    raise RuntimeError(f"{key} không có trong deploy/versions.env")
+
+
+def _bridge_gateway_ip() -> str:
+    """IP gateway của docker bridge mặc định — xem comment đầu khối này."""
+    # "docker" chạy qua PATH có chủ đích, không nhận input từ ngoài.
+    result = subprocess.run(
+        ["docker", "network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+@pytest.fixture(scope="session")
+def minio() -> Iterator[MinioContainer]:
+    container = MinioContainer(
+        image=pinned_image("MINIO_IMAGE"),
+        access_key=ROOT_USER,
+        secret_key=ROOT_PASSWORD,
+    )
+    with container as running:
+        yield running
+
+
+@pytest.fixture(scope="session")
+def s3_endpoint(minio: MinioContainer) -> str:
+    """Endpoint MinIO qua gateway bridge — dùng được cả từ host và từ container."""
+    gateway = _bridge_gateway_ip()
+    port = minio.get_exposed_port(minio.port)
+    return f"http://{gateway}:{port}"
+
+
+@pytest.fixture(scope="session")
+def bucket(s3_endpoint: str) -> str:
+    """Bucket dựng bằng credential GỐC, TRƯỚC khi warehouse nào được tạo."""
+    client = boto3.client(
+        "s3",
+        endpoint_url=s3_endpoint,
+        aws_access_key_id=ROOT_USER,
+        aws_secret_access_key=ROOT_PASSWORD,
+        region_name="us-east-1",
+    )
+    client.create_bucket(Bucket=BUCKET)
+    return BUCKET
+
+
+@pytest.fixture(scope="session")
+def catalog_pg() -> Iterator[PostgresContainer]:
+    """Postgres của chính Lakekeeper — schema do `lakekeeper migrate` dựng.
+
+    KHÁC `migrated_pg` ở trên: đây là database RIÊNG của Lakekeeper, không
+    phải database của loom-api. Hai container Postgres cùng sống trong bộ
+    test này, đúng như chúng sống tách nhau trên Aiven ở cụm thật (xem README
+    — "Lakekeeper cần một database THỨ HAI").
+    """
+    with PostgresContainer(
+        POSTGRES_IMAGE, username="lakekeeper", password="lakekeeper", dbname="lakekeeper"
+    ) as pg:
+        yield pg
+
+
+def _lakekeeper_env(pg: PostgresContainer) -> dict[str, str]:
+    pg_ip = pg.get_docker_client().bridge_ip(pg.get_container_id())
+    return {
+        "LAKEKEEPER__PG_HOST_R": pg_ip,
+        "LAKEKEEPER__PG_HOST_W": pg_ip,
+        "LAKEKEEPER__PG_PORT": "5432",
+        "LAKEKEEPER__PG_USER": pg.username,
+        "LAKEKEEPER__PG_PASSWORD": pg.password,
+        "LAKEKEEPER__PG_DATABASE": pg.dbname,
+        "LAKEKEEPER__PG_ENCRYPTION_KEY": _LAKEKEEPER_ENCRYPTION_KEY,
+    }
+
+
+def _run_migrate(image: str, env: dict[str, str]) -> None:
+    migrator = DockerContainer(image, command="migrate", env=dict(env))
+    migrator.start()
+    try:
+        exit_code = migrator.wait()
+        stdout, stderr = migrator.get_logs()
+    finally:
+        migrator.stop()
+    if exit_code != 0:
+        raise RuntimeError(
+            f"lakekeeper migrate thoat voi code {exit_code}\n"
+            f"stdout: {stdout.decode()}\nstderr: {stderr.decode()}"
+        )
+
+
+def _wait_for_health(base_url: str, timeout_seconds: float = 60.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error = "chua thu lan nao"
+    with httpx.Client(timeout=5.0) as client:
+        while time.monotonic() < deadline:
+            try:
+                response = client.get(f"{base_url}/health")
+                if response.status_code == 200:
+                    return
+                last_error = f"HTTP {response.status_code}: {response.text}"
+            except httpx.HTTPError as exc:
+                last_error = str(exc)
+            time.sleep(0.5)
+    raise TimeoutError(f"Lakekeeper khong san sang sau {timeout_seconds}s: {last_error}")
+
+
+@pytest.fixture(scope="session")
+def lakekeeper(catalog_pg: PostgresContainer) -> Iterator[str]:
+    image = pinned_image("LAKEKEEPER_IMAGE")
+    env = _lakekeeper_env(catalog_pg)
+    _run_migrate(image, env)
+
+    serve = DockerContainer(image, command="serve", env=dict(env), ports=[_LAKEKEEPER_PORT])
+    with serve as running:
+        host = running.get_container_host_ip()
+        port = running.get_exposed_port(_LAKEKEEPER_PORT)
+        base_url = f"http://{host}:{port}"
+        _wait_for_health(base_url)
+        ensure_bootstrapped(base_url)
+        yield base_url
+
+
+@pytest.fixture
+def _lakekeeper_settings_env(
+    monkeypatch: pytest.MonkeyPatch, lakekeeper: str, s3_endpoint: str, bucket: str
+) -> Iterator[None]:
+    """Trỏ `Settings` vào cụm container ở trên, TRƯỚC khi `api_world` (dưới)
+    dựng app — thứ tự đó là ĐIỀU KIỆN, không phải chi tiết: `create_app()` gọi
+    `get_settings()`, một `lru_cache`, nên set env sau khi app đã dựng là vô
+    tác dụng. pytest dựng các fixture độc lập cùng scope THEO ĐÚNG thứ tự
+    tham số được khai — đặt fixture này TRƯỚC `api_world` trong chữ ký của
+    `api_world_with_lakekeeper` bên dưới là thứ tạo ra đảm bảo đó (đã kiểm
+    bằng thực nghiệm, không phải suy đoán).
+    """
+    monkeypatch.setenv("LOOM_LAKEKEEPER_URL", lakekeeper)
+    monkeypatch.setenv("LOOM_STORAGE_ENDPOINT", s3_endpoint)
+    monkeypatch.setenv("LOOM_STORAGE_BUCKET", bucket)
+    monkeypatch.setenv("LOOM_STORAGE_ROOT_ACCESS_KEY", ROOT_USER)
+    monkeypatch.setenv("LOOM_STORAGE_ROOT_SECRET_KEY", ROOT_PASSWORD)
+    get_settings.cache_clear()
+    yield
+    # Xoá cache SAU khi app dùng xong (finalizer chạy LIFO — sau finalizer của
+    # `api_world`): một Settings trỏ vào container đã tắt của test này mà rò
+    # sang test sau (không dùng fixture này) sẽ làm test đó đỏ vì một lý do nó
+    # không hề đọc thấy trong chính nó.
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+async def api_world_with_lakekeeper(
+    _lakekeeper_settings_env: None, api_world: ApiWorld
+) -> ApiWorld:
+    """`api_world`, nhưng `Settings.lakekeeper_url`/`storage_*` trỏ vào MinIO +
+    Lakekeeper container THẬT — dùng cho test xác nhận warehouse THẬT SỰ xuất
+    hiện (và còn sống sau xoá mềm), không phải một con giả đứng thay."""
+    return api_world

@@ -4,6 +4,9 @@ api:
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits: { memory: 1Gi }
+query:
+  tag: prod
+  replicas: 3
 web:
   tag: prod
   replicas: 2
@@ -20,6 +23,7 @@ oidc:
   issuer: https://loom.internal/dex
   redirectUrl: https://loom.internal/api/v1/auth/callback
   # Production không bao giờ để secret trong values — ESO đồng bộ Secret này.
+  # PHẢI có đủ BA khoá — xem comment tương ứng ở values-dev.yaml.
   existingSecret: loom-app-secrets
 storage:
   # dev/prod KHÔNG chạy MinIO trong cụm — deploy/infra/minio.yaml chỉ dành cho

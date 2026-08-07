@@ -1,0 +1,147 @@
+"""Chuyển tiếp `/api/v1/query*` sang `loom-query` — Task 10/11.
+
+Trình duyệt chỉ nói chuyện với `loom-api` (Giai đoạn 1 chỉ hứa MỘT mặt xác
+thực: cookie phiên httpOnly, không token nào lộ ra trình duyệt). `loom-query`
+chạy sau nó, ClusterIP, không qua ingress (xem `deploy/helm/loom/templates/
+ingress.yaml` — chỉ hai path, `/api` và `/`, không path nào cho `loom-query`)
+— router này là cách DUY NHẤT một request từ trình duyệt chạm tới nó.
+
+**Chuyển tiếp RẺ vì API phía dưới bất đồng bộ** (xem docstring
+`loom_query.routers.query`): `POST` trả `202` kèm `query_id` NGAY, không giữ
+kết nối, nên một round trip HTTP bình thường (`httpx.AsyncClient.request`) là
+đủ — KHÔNG dựng streaming proxy. `GET`/`DELETE` cũng vậy.
+
+Ba route đều dùng chung `_forward`: chuyển tiếp status code VÀ thân phản hồi
+NGUYÊN VẸN từ `loom-query` (không đi qua `install_error_handlers`/
+`ProblemDetail` của `loom-api` — trả một `Response` trực tiếp bỏ qua tầng
+đó). `loom-query` KHÔNG có OIDC/session riêng nên body lỗi của nó (400 kèm
+dòng/cột SQL, 403 "thiếu quyền"...) đã đúng hình dạng client cần thấy; dịch
+lại nó qua một schema thứ hai chỉ để đổi vỏ là việc không có giá trị.
+
+**`workspace_id`: BẮT BUỘC tự tra, KHÔNG BAO GIỜ dùng giá trị client gửi.**
+`loom-api` có database — nó biết `lakehouse_id` (một `Item` loại `lakehouse`)
+thuộc workspace nào — nên đây là nơi DUY NHẤT có đủ thẩm quyền đó;
+`loom-query` không có database (xem docstring `loom_query.main`) và không tự
+tra được. Nếu để giá trị client tự khai đi qua, một client gửi `workspace_id`
+của workspace KHÁC sẽ khiến bước phân giải tên bảng ba phần
+(`lakehouse.ns.table`, xem `loom_query.authz._resolve_tables`) chạy SAI PHẠM
+VI — người dùng phân giải được tên lakehouse ở một workspace mà họ không có
+quyền, và cổng quyền viewer chạy SAU bước phân giải đó nên không cứu được:
+tên tồn tại hay không đã bị lộ trước khi có ai được hỏi quyền.
+
+Tra cứu `_lakehouse_workspace_id` CỐ Ý KHÔNG kiểm quyền `item_read` trên
+`lakehouse_id` — cùng lý do `POST /internal/lakehouses/resolve` không kiểm
+quyền (xem docstring `routers/internal.py`): cổng quyền THẬT xảy ra ngay sau,
+bên trong `loom-query` (`run_gate`, hỏi `POST /internal/authz/items` với
+CHÍNH `lakehouse_id` này luôn có mặt trong tập id — xem bất biến bắt buộc ở
+`loom_query.authz.run_gate`). Thêm một cổng quyền THỨ HAI ở đây là tính lại
+một phần luật RBAC mà differential test của `permissions.py` sinh ra để
+chặn trôi — `lakehouse_id` không tồn tại (hoặc không phải type `lakehouse`,
+hoặc đã xoá mềm) chỉ đơn thuần là 404 ở ĐÂY, trước khi tốn một round trip
+sang `loom-query` cho một thứ chắc chắn thất bại.
+
+**Bí mật chia sẻ** (`X-Loom-Query-Secret`, xem `loom_core.internal_auth` và
+`loom_query.security`): đính kèm ở MỌI request gửi sang `loom-query`, chứng
+minh nó tới TỪ `loom-api` — nơi duy nhất biết bí mật — chứ không phải từ một
+pod bất kỳ trong namespace tự xưng principal bất kỳ (xem docstring
+`loom_core.internal_auth` cho khoảng hở mà nó đóng, và nợ nó KHÔNG đóng).
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import httpx
+from fastapi import APIRouter, HTTPException, Request, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import Response
+
+from loom_api.deps import PrincipalDep, SessionDep
+from loom_api.models import ACTIVE, Item
+from loom_core.config import Settings
+from loom_core.internal_auth import QUERY_SHARED_SECRET_HEADER
+from loom_core.item_definitions import ItemType
+from loom_core.schemas import Principal, QuerySubmitRequest
+
+router = APIRouter(tags=["query"])
+
+
+async def _lakehouse_workspace_id(
+    session: AsyncSession, lakehouse_id: uuid.UUID
+) -> uuid.UUID | None:
+    """`workspace_id` CHỨA `lakehouse_id`, hoặc `None` nếu nó không tồn tại,
+    không phải type `lakehouse`, hoặc đã xoá mềm. KHÔNG kiểm quyền — xem
+    docstring module."""
+    stmt = select(Item.workspace_id).where(
+        Item.id == lakehouse_id,
+        Item.type == str(ItemType.lakehouse),
+        Item.state == ACTIVE,
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _forward(
+    request: Request,
+    *,
+    method: str,
+    path: str,
+    json_body: dict[str, object] | None = None,
+) -> Response:
+    settings: Settings = request.app.state.settings
+    client: httpx.AsyncClient = request.app.state.query_http
+    upstream = await client.request(
+        method,
+        f"{settings.query_base_url}{path}",
+        json=json_body,
+        headers={QUERY_SHARED_SECRET_HEADER: settings.query_shared_secret},
+    )
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type"),
+    )
+
+
+@router.post("/query", status_code=status.HTTP_202_ACCEPTED)
+async def create_query(
+    body: QuerySubmitRequest,
+    request: Request,
+    principal: Principal = PrincipalDep,
+    session: AsyncSession = SessionDep,
+) -> Response:
+    workspace_id = await _lakehouse_workspace_id(session, body.lakehouse_id)
+    if workspace_id is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no lakehouse with this id")
+
+    return await _forward(
+        request,
+        method="POST",
+        path="/query",
+        json_body={
+            "lakehouse_id": str(body.lakehouse_id),
+            # Giá trị THẬT vừa tra ở trên — KHÔNG PHẢI `body.workspace_id`.
+            # Xem docstring module cho lý do tin giá trị client là một lỗ hổng.
+            "workspace_id": str(workspace_id),
+            "sql": body.sql,
+            "principal": principal.model_dump(mode="json"),
+        },
+    )
+
+
+@router.get("/query/{query_id}")
+async def get_query(
+    query_id: uuid.UUID,
+    request: Request,
+    principal: Principal = PrincipalDep,
+) -> Response:
+    return await _forward(request, method="GET", path=f"/query/{query_id}")
+
+
+@router.delete("/query/{query_id}", status_code=status.HTTP_202_ACCEPTED)
+async def cancel_query(
+    query_id: uuid.UUID,
+    request: Request,
+    principal: Principal = PrincipalDep,
+) -> Response:
+    return await _forward(request, method="DELETE", path=f"/query/{query_id}")

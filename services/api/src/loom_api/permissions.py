@@ -11,7 +11,8 @@ sang SQL.
 """
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections import defaultdict
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -125,6 +126,71 @@ class PermissionService:
 
     async def effective_role_for_item(self, item_id: uuid.UUID) -> Role | None:
         return await self._cached("item", item_id, self._query_item_roles)
+
+    async def effective_roles_for_items(
+        self, item_ids: Iterable[uuid.UUID]
+    ) -> dict[uuid.UUID, Role | None]:
+        """Bản theo lô của `effective_role_for_item` — MỘT round trip cho N item,
+        dùng LẠI `_chain_conditions` nguyên vẹn thay vì viết lại chuỗi tổ tiên.
+
+        Đây là bản dịch trực tiếp của `_query_item_roles` ở dưới: CÙNG JOIN, CÙNG
+        bốn nhánh của chuỗi tổ tiên, chỉ khác đúng một chỗ — `Item.id.in_(...)`
+        thay vì `Item.id == một_giá_trị`, và `SELECT` thêm `Item.id` để biết mỗi
+        hàng vai trò trả về thuộc về item nào. Viết lại chuỗi tổ tiên ở đây — dù
+        chỉ để "tối ưu" — là mở một đường thứ ba tính luật quyền, và trôi ở đó
+        nghĩa là `loom-query` cho người dùng đọc bảng họ không được phép đọc. Đây
+        chính là ràng buộc mà `_chain_conditions` viết trong docstring của nó.
+
+        Item không tồn tại và item tồn tại nhưng không có assignment nào khớp ra
+        CÙNG một kết quả — `None` — theo đúng cách `_query_item_roles` đã làm:
+        không có hàng nào khớp thì không có hàng nào trả về, và `max_role([])`
+        là `None`. Không có nhánh "item không tồn tại thì báo khác đi" nào ở
+        đây: thêm một nhánh như vậy là đúng lỗ rò rỉ sự tồn tại mà endpoint gọi
+        hàm này (`POST /internal/authz/items`) phải tránh.
+
+        Dùng cache TRƯỚC khi hỏi, và ghi lại cache theo ĐÚNG cùng khoá với
+        `effective_role_for_item`: một item đã được hỏi (lẻ hoặc theo lô) trong
+        cùng request không bao giờ cần một round trip thứ hai, theo hai chiều.
+        """
+        wanted = list(dict.fromkeys(item_ids))
+        result: dict[uuid.UUID, Role | None] = {}
+        missing: list[uuid.UUID] = []
+        for item_id in wanted:
+            cache_key = ("item", item_id)
+            if cache_key in self._cache:
+                result[item_id] = self._cache[cache_key]
+            else:
+                missing.append(item_id)
+        if not missing:
+            return result
+
+        self.query_count += 1
+        stmt = (
+            select(Item.id, RoleAssignment.role)
+            .select_from(Item)
+            .join(Workspace, Workspace.id == Item.workspace_id)
+            .join(
+                RoleAssignment,
+                and_(
+                    principal_matches(self._principal),
+                    or_(
+                        *_chain_conditions(
+                            Item.id, Item.workspace_id, Workspace.domain_id, Item.tenant_id
+                        )
+                    ),
+                ),
+            )
+            .where(Item.id.in_(missing))
+        )
+        roles_by_item: dict[uuid.UUID, list[Role]] = defaultdict(list)
+        for item_id, role in (await self._session.execute(stmt)).all():
+            roles_by_item[item_id].append(Role[role])
+
+        for item_id in missing:
+            role = max_role(roles_by_item.get(item_id, []))
+            self._cache[("item", item_id)] = role
+            result[item_id] = role
+        return result
 
     async def effective_role_for_tenant(self, tenant_id: uuid.UUID) -> Role | None:
         """Vai trò ở cấp tenant.

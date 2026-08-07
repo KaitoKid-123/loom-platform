@@ -96,7 +96,13 @@ def build_and_import(dockerfile):
 custom_build(
     'loom/api',
     build_and_import('services/api/Dockerfile'),
-    deps=['services/api', 'packages/core', 'pyproject.toml', 'uv.lock'],
+    # packages/storagekit và packages/icebergkit thêm vào vì vòng đời warehouse:
+    # loom-api giờ gọi thẳng `loom_iceberg.warehouse.create_warehouse`/
+    # `ensure_bootstrapped` (xem `loom_api.warehouse_provisioning`) — thiếu hai
+    # dòng này thì sửa `packages/icebergkit` mà Tilt không build lại `loom/api`,
+    # cùng cạm bẫy mà `loom-query` từng gặp với `packages/core`.
+    deps=['services/api', 'packages/core', 'packages/storagekit', 'packages/icebergkit',
+          'pyproject.toml', 'uv.lock'],
     ignore=BUILD_IGNORE,
     skips_local_docker=True,
     disable_push=True,
@@ -123,6 +129,24 @@ custom_build(
     # sẵn. Sync mã nguồn TypeScript vào đó không đi qua bước build nào cả.
 )
 
+custom_build(
+    'loom/query',
+    build_and_import('services/loom-query/Dockerfile'),
+    # Bốn package workspace mà Dockerfile COPY vào layer dependency
+    # (packages/core trực tiếp; sqlkit/storagekit/icebergkit — icebergkit lại
+    # kéo storagekit — xem comment COPY trong chính Dockerfile), CỘNG
+    # services/loom-query. Thiếu một trong bốn thì sửa packages/icebergkit mà
+    # Tilt không build lại — cùng cạm bẫy `loom/api` từng gặp với packages/core.
+    deps=['services/loom-query', 'packages/core', 'packages/sqlkit',
+          'packages/storagekit', 'packages/icebergkit', 'pyproject.toml', 'uv.lock'],
+    ignore=BUILD_IGNORE,
+    skips_local_docker=True,
+    disable_push=True,
+    # Không devReload/live_update: khác `loom/api`, `loom-query` chưa có nhu
+    # cầu hot-reload ở Giai đoạn 2b (không có `query.devReload` trong values) —
+    # sửa mã nguồn thì Tilt build lại ảnh đầy đủ, cùng khuôn `loom/web`.
+)
+
 k8s_yaml(helm(
     'deploy/helm/loom',
     name='loom',
@@ -132,6 +156,9 @@ k8s_yaml(helm(
 
 k8s_resource('loom-api', port_forwards=['8000:8000'], labels=['app'])
 k8s_resource('loom-web', port_forwards=['8080:8080'], labels=['app'])
+# Không port-forward: loom-query là ClusterIP nội bộ, không phải thứ trình
+# duyệt/`curl` từ host gọi thẳng — xem docstring `query-service.yaml`.
+k8s_resource('loom-query', labels=['app'])
 
 # Ở local chart không sinh Job migration (values-local đặt migration.enabled=false),
 # vì Tilt áp dụng lại manifest liên tục còn Job thì bất biến. Đường Job vẫn được

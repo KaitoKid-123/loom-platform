@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "loom.fullname" . }}-query
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loom.labels" . | nindent 4 }}
+    app.kubernetes.io/component: query
+spec:
+  replicas: {{ .Values.query.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "loom.name" . }}
+      app.kubernetes.io/component: query
+  template:
+    metadata:
+      labels:
+        {{- include "loom.labels" . | nindent 8 }}
+        app.kubernetes.io/component: query
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.query.terminationGracePeriodSeconds }}
+      # UID GHIM CỨNG, đã KIỂM THẬT — không đoán, cùng bài học Lakekeeper để lại
+      # (xem comment securityContext ở lakekeeper-deployment.yaml). Dockerfile
+      # của loom-query (`services/loom-query/Dockerfile`) cùng khuôn với
+      # `services/api/Dockerfile`: `useradd --uid 10001 loom` rồi `USER 10001`
+      # — image TỰ khai user 10001 trong metadata, khác Lakekeeper (distroless,
+      # không khai USER, mặc định root).
+      #
+      # Đã kiểm bằng `docker run --cap-drop ALL` (không có CAP_DAC_OVERRIDE che
+      # giấu lỗi quyền, đúng cạm bẫy Lakekeeper để lại — `docker run --user
+      # 1000` "chạy được" không chứng minh gì vì Docker mượn capability đó cho
+      # bất kỳ uid nào):
+      #
+      #     $ docker run --rm --cap-drop ALL loom/query:dev \
+      #         python -c "import os; print(os.getuid(), os.getgid())"
+      #     10001 10001
+      #
+      #     $ docker inspect loom/query:dev   # .Config.User trong JSON trả về
+      #     10001
+      #
+      # Và chạy THẬT sự tiến trình server (không chỉ `id`), với
+      # `--cap-drop ALL --read-only --security-opt no-new-privileges` — đúng ba
+      # điều kiện mà `securityContext` dưới đây áp vào cụm:
+      #
+      #     $ docker run -d --cap-drop ALL --read-only \
+      #         --security-opt no-new-privileges -p 18000:8000 loom/query:dev
+      #     $ docker logs <container>
+      #     INFO:     Uvicorn running on http://0.0.0.0:8000
+      #     $ cat /proc/1/status | grep Uid   # (exec vào container)
+      #     Uid:  10001  10001  10001  10001
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: query
+          image: "{{ .Values.query.image }}:{{ .Values.query.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: LOOM_QUERY_ENVIRONMENT
+              value: {{ .Values.app.environment | quote }}
+            - name: LOOM_QUERY_LOG_LEVEL
+              value: {{ .Values.app.logLevel | quote }}
+            # Ba service nội bộ: cùng namespace "loom" viết cứng — chart bỏ qua
+            # `.Release.Name` khi đặt tên service (xem `loom.fullname` ở
+            # `_helpers.tpl`), nên DNS luôn cố định. GHI TƯỜNG MINH ở đây thay vì
+            # dựa vào giá trị mặc định trong `loom_query.config.Settings`: mặc
+            # định đó (`loom-api.loom...`/`lakekeeper.loom...`, KHÔNG có tiền tố
+            # `loom-` cho service lakekeeper, và KHÔNG có cổng cho authz) chỉ là
+            # một placeholder trong code, không phải tên service THẬT của chart
+            # này (`loom-api`, `loom-lakekeeper`) — thiếu dòng này thì
+            # loom-query gọi sai DNS và mọi query 500 vì không hỏi được quyền.
+            - name: LOOM_QUERY_AUTHZ_BASE_URL
+              value: "http://{{ include "loom.fullname" . }}-api.{{ .Release.Namespace }}.svc.cluster.local:8000/internal"
+            - name: LOOM_QUERY_CATALOG_URI
+              value: "http://{{ include "loom.fullname" . }}-lakekeeper.{{ .Release.Namespace }}.svc.cluster.local:8181/catalog"
+            - name: LOOM_QUERY_S3_ENDPOINT
+              value: {{ .Values.storage.endpoint | quote }}
+            {{- /* Credential GỐC MinIO cho đường đọc file thô trong `Files/`:
+                   `MinioStsProvider` gọi AssumeRole rồi thu hẹp về đúng prefix
+                   của workspace. Đường Iceberg KHÔNG dùng tới — Lakekeeper tự
+                   cấp credential cho nó. */}}
+            {{- include "loom.storageRootEnv" (dict "root" $ "prefix" "LOOM_QUERY_") | nindent 12 }}
+            - name: LOOM_QUERY_SHARED_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loom.appSecretName" . }}
+                  key: query-shared-secret
+          # `/healthz` đứng NGOÀI cổng bí mật chia sẻ (xem `routers/health.py`)
+          # — kubelet không biết bí mật đó, và một probe qua route MANG
+          # dependency đó sẽ luôn 401 (Kubernetes coi mọi mã ngoài 200–399 là
+          # probe hỏng), khiến pod không bao giờ Ready dù tiến trình sống khoẻ.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          # Cùng lý do api-deployment.yaml: rơi request giữa lúc rollout không
+          # phải cái giá bắt buộc phải trả cho mỗi lần triển khai.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "{{ .Values.query.preStopSleepSeconds }}"]
+          resources:
+            {{- toYaml .Values.query.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }

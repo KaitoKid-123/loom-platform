@@ -249,3 +249,88 @@ class RoleListOut(BaseModel):
     # thứ thật sự chặn leo thang. Gỡ trường này thì UI hiện tuỳ chọn server sẽ từ
     # chối; gỡ phép kiểm ở store thì bất kỳ ai gọi API trực tiếp đều leo thang được.
     grantable_roles: list[str]
+
+
+class AuthzItemsRequest(BaseModel):
+    """Body của `POST /internal/authz/items`.
+
+    `principal` do `loom-query` CHUYỂN TIẾP nguyên trạng, không tự dựng: nó
+    không xác thực người dùng cuối, `loom-api` đã làm việc đó khi phát phiên.
+    Endpoint này vì vậy không có `PrincipalDep` — xem `routers/internal.py`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    principal: Principal
+    item_ids: list[uuid.UUID]
+
+
+class AuthzItemsResponse(BaseModel):
+    """`roles[str(item_id)]` là `None` cho CẢ item không tồn tại LẪN item người
+    gọi không có quyền đọc — hai trường hợp đó KHÔNG được phân biệt được từ phía
+    gọi (xem docstring `routers/internal.py`). Phân biệt chúng là rò rỉ sự tồn
+    tại, đúng loại lỗ mà quy tắc 404-trước-403 của Giai đoạn 1 sinh ra để chặn.
+
+    Khoá kiểu `str`, không `uuid.UUID`: JSON không có khoá UUID, và khai tường
+    minh hình dạng thật sự đi qua dây thì đáng tin hơn là dựa vào việc pydantic
+    tự đổi khoá hộ lúc serialize.
+    """
+
+    roles: dict[str, str | None]
+
+
+class LakehouseResolveRequest(BaseModel):
+    """Body của `POST /internal/lakehouses/resolve` — xem docstring endpoint
+    (`routers/internal.py`) cho lý do endpoint này tồn tại tách riêng khỏi
+    `/internal/authz/items` và vì sao nó KHÔNG kiểm quyền.
+
+    `names` là cả DANH SÁCH cho một request, không phải một tên một request:
+    một câu `JOIN` ba phần chạm N tên lakehouse khác nhau phải đi ĐÚNG MỘT
+    round trip, không phải N.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: uuid.UUID
+    names: list[str]
+
+
+class QuerySubmitRequest(BaseModel):
+    """Body của `POST /api/v1/query` — cổng `loom-api` PHÍA TRÌNH DUYỆT
+    (Task 10/11, xem `loom_api.routers.query`).
+
+    Khác `loom-query`'s bản thân của nó (một schema RIÊNG, nội bộ, không phải
+    kiểu này — xem docstring `loom_query.schemas.QueryCreate`): request NÀY
+    không có `principal`. `loom-api` tự đọc principal từ cookie phiên
+    (`PrincipalDep`) — trình duyệt không tự khai được danh tính của chính nó
+    ở tầng này, đúng lời hứa của Giai đoạn 1 (một mặt xác thực DUY NHẤT).
+
+    `workspace_id` CÓ MẶT nhưng LUÔN bị bỏ qua: `loom-api` tự tra
+    `lakehouse_id` (một `Item` loại `lakehouse`) thuộc workspace nào rồi điền
+    giá trị THẬT khi chuyển tiếp sang `loom-query` — không bao giờ dùng giá
+    trị người gọi tự khai ở đây. Trường vẫn được khai (không bị `extra=
+    "forbid"` chặn) để một client gửi kèm nó không ăn 422 vô nghĩa; giữ nó lại
+    dưới dạng "được chấp nhận nhưng bị phớt lờ" là cố ý, KHÔNG phải sót — xem
+    docstring `routers/query.py` cho lý do tin giá trị này là một lỗ hổng
+    (client gửi `workspace_id` của workspace KHÁC thì phân giải tên bảng ba
+    phần sẽ chạy sai phạm vi).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lakehouse_id: uuid.UUID
+    sql: str
+    workspace_id: uuid.UUID | None = None
+
+
+class LakehouseResolveResponse(BaseModel):
+    """`ids[ten]` là `None` cho tên không tồn tại HOẶC chỉ tồn tại ở trạng thái
+    khác `active` — endpoint này không phân biệt hai lý do đó với nhau, cùng
+    tinh thần `AuthzItemsResponse.roles` ở trên, dù lý do khác: ở đây không có
+    gì để rò rỉ cho NGƯỜI DÙNG CUỐI (endpoint không kiểm quyền), nhưng phân
+    biệt "chưa từng tồn tại" khỏi "vừa xoá mềm" chỉ để lộ chi tiết vòng đời mà
+    người gọi (`loom-query`) không cần biết — nó chỉ cần một id DÙNG ĐƯỢC hay
+    không.
+    """
+
+    ids: dict[str, uuid.UUID | None]

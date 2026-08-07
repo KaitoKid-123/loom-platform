@@ -26,6 +26,21 @@ api:
     requests: { cpu: 50m, memory: 192Mi }
     limits: { memory: 512Mi }
 
+query:
+  image: loom/query
+  tag: dev
+  replicas: 1
+  preStopSleepSeconds: 5
+  terminationGracePeriodSeconds: 30
+  # `resources.limits.memory: 384Mi` là con số từ phép đo Giai đoạn 2a
+  # (`make measure-spill` — DuckDB `memory_limit=256MB`/`threads=2` trong một
+  # cgroup 384Mi thật, xem docstring `loom_query.runner`). ĐỪNG đổi số này mà
+  # không đo lại: nó gắn liền với `_MEMORY_LIMIT`/`_THREADS` ghim cứng trong
+  # `runner.py`, không phải một ước lượng rời.
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 384Mi }
+
 web:
   image: loom/web
   tag: dev
@@ -81,6 +96,13 @@ app:
   cookieSecure: false
   sessionTtlHours: 12
   sessionSecret: dev-only-do-not-use-in-production
+  # Bí mật chia sẻ qua header giữa loom-api và loom-query (Task 10/11) — cùng
+  # khuôn `sessionSecret`: hằng số ở local, Secret do External Secrets đồng bộ
+  # ở dev/prod (xem `oidc.existingSecret`/`secret.yaml`). `loom_core.config.
+  # Settings._reject_default_secrets_outside_local` từ chối khởi động
+  # `loom-api` nếu giá trị này còn là mặc định khi `environment != "local"` —
+  # `loom_query.config.Settings` có bản sao của CHÍNH NÓ của phép kiểm này.
+  querySharedSecret: dev-only-do-not-use-in-production
 
 migration:
   enabled: true

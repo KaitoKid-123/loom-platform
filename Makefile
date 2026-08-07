@@ -122,8 +122,12 @@ web-test:  ## Test frontend
 build-web:  ## Build image loom-web
 	docker build -f web/Dockerfile -t loom/web:$(IMAGE_TAG) .
 
+.PHONY: build-query
+build-query:  ## Build image loom-query
+	docker build -f services/loom-query/Dockerfile -t loom/query:$(IMAGE_TAG) .
+
 .PHONY: build
-build: build-api build-web  ## Build cả hai image
+build: build-api build-web build-query  ## Build cả ba image
 
 .PHONY: helm-validate
 helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
@@ -182,6 +186,23 @@ helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
 		echo "khoá database sai: dùng '$$keys', values.yaml khai '$$want'"; exit 1; }; \
 	echo "  cả hai dùng khoá $$keys"
 
+	@echo "→ chart: service nào cần credential gốc thì phải NHẬN được nó"
+	@# Lọt một lần thật: `query-deployment.yaml` thiếu hẳn bốn biến STORAGE_*
+	@# trong khi `api-deployment.yaml` có đủ. `helm lint` và `kubeconform` đều
+	@# xanh — manifest hợp lệ, chỉ là service chạy bằng credential giữ chỗ, và
+	@# điều đó chỉ lộ ra khi có người đọc `Files/` thật.
+	@set -eo pipefail; \
+	rendered=$$(helm template loom deploy/helm/loom -n $(NS) -f deploy/envs/values-local.yaml); \
+	for pair in "loom-api:LOOM_" "loom-query:LOOM_QUERY_"; do \
+		dep=$${pair%%:*}; pfx=$${pair##*:}; \
+		block=$$(echo "$$rendered" | awk "/name: $$dep\$$/,/^---/"); \
+		for suffix in STORAGE_ENDPOINT STORAGE_BUCKET STORAGE_ROOT_ACCESS_KEY STORAGE_ROOT_SECRET_KEY; do \
+			echo "$$block" | grep -q "name: $$pfx$$suffix" || { \
+				echo "$$dep thiếu $$pfx$$suffix"; exit 1; }; \
+		done; \
+	done; \
+	echo "  api và query đều nhận đủ bốn biến storage"
+
 	@echo "→ chart: mọi tài nguyên phải tự khai namespace"
 	@# `kubectl apply -f <ban render>` đặt tài nguyên KHÔNG khai namespace vào
 	@# namespace mặc định của context. Tilt và ArgoCD đều tự tiêm namespace nên
@@ -218,6 +239,8 @@ check-pins:  ## Chặn FROM trong Dockerfile lệch với deploy/versions.env
 		|| { echo "web/Dockerfile không FROM node:$(NODE_VERSION)-alpine — lệch NODE_VERSION trong deploy/versions.env"; exit 1; }
 	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/api/Dockerfile \
 		|| { echo "services/api/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
+	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/loom-query/Dockerfile \
+		|| { echo "services/loom-query/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
 	@echo "Pin khớp: node $(NODE_VERSION), uv $(UV_VERSION)"
 
 .PHONY: bootstrap
