@@ -33,6 +33,7 @@ from testcontainers.core.container import DockerContainer
 
 from loom_iceberg import Lakehouse, build_catalog, create_warehouse, ensure_bootstrapped
 from loom_query.config import Settings
+from loom_storage import S3Credentials, StorageCredentials
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -54,7 +55,7 @@ def duckdb_httpfs_installed() -> None:
     `autouse` để không test nào phải nhớ xin nó.
     """
     duckdb.connect().execute("INSTALL httpfs")
-from loom_storage import S3Credentials, StorageCredentials
+
 
 ROOT_USER = "loom-root"
 ROOT_PASSWORD = "loom-root-test"  # container dùng một lần
