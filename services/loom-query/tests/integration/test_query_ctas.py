@@ -47,18 +47,22 @@ from ..conftest import FakeAuthz, http_client
 pytestmark = pytest.mark.integration
 
 
+def _principal_json(principal: Principal) -> dict[str, Any]:
+    return {
+        "user_id": str(principal.user_id),
+        "subject": principal.subject,
+        "email": principal.email,
+        "display_name": principal.display_name,
+        "groups": list(principal.groups),
+    }
+
+
 def _body(lakehouse_id: uuid.UUID, sql: str, principal: Principal) -> dict[str, Any]:
     return {
         "lakehouse_id": str(lakehouse_id),
         "workspace_id": str(uuid.uuid4()),
         "sql": sql,
-        "principal": {
-            "user_id": str(principal.user_id),
-            "subject": principal.subject,
-            "email": principal.email,
-            "display_name": principal.display_name,
-            "groups": list(principal.groups),
-        },
+        "principal": _principal_json(principal),
     }
 
 
@@ -114,6 +118,21 @@ async def test_ctas_creates_a_real_iceberg_table_readable_afterwards(
         "id": [1, 2, 3],
         "amount": [10.0, 20.0, 30.0],
     }
+
+    # Không chỉ đúng qua `Lakehouse.list_tables()` gọi trực tiếp — phải THẤY
+    # ĐƯỢC qua đúng route mà Lakehouse Explorer dùng (tiêu chí nghiệm thu của
+    # spec Giai đoạn 2 quyết định #4: "thấy nó trong Lakehouse Explorer").
+    async with http_client(app) as client:
+        schema_response = await client.request(
+            "GET",
+            f"/api/v1/lakehouses/{lakehouse_id}/schema",
+            json={"principal": _principal_json(principal)},
+        )
+    assert schema_response.status_code == 200, schema_response.text
+    tables_by_namespace = {
+        ns["name"]: [t["name"] for t in ns["tables"]] for ns in schema_response.json()["namespaces"]
+    }
+    assert "orders_ctas" in tables_by_namespace.get("sales", [])
 
 
 async def test_ctas_requires_contributor_viewer_is_forbidden_over_http(
