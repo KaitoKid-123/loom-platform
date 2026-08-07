@@ -11,7 +11,17 @@ from loom_api.logging import configure_logging
 from loom_api.middleware import RequestContextMiddleware
 from loom_api.oidc_client import OIDCClient
 from loom_api.oidc_verifier import IdTokenClaims, OIDCVerifier
-from loom_api.routers import audit, auth, domains, health, items, roles, search, workspaces
+from loom_api.routers import (
+    audit,
+    auth,
+    domains,
+    health,
+    internal,
+    items,
+    roles,
+    search,
+    workspaces,
+)
 from loom_api.user_store import PostgresUserStore, UserStore
 from loom_core.config import get_settings
 
@@ -95,4 +105,9 @@ def create_app(
     app.include_router(roles.router, prefix="/api/v1")
     app.include_router(search.router, prefix="/api/v1")
     app.include_router(audit.router, prefix="/api/v1")
+    # KHÔNG `/api/v1`: đây là đường loom-query hỏi quyền, không phải đường
+    # người dùng cuối gọi qua trình duyệt. Ingress chỉ chuyển `/api` tới service
+    # này (xem `routers/internal.py`), nên `/internal` không có route nào để dò
+    # từ bên ngoài cluster — bảo vệ nằm ở đó, không ở dependency xác thực.
+    app.include_router(internal.router, prefix="/internal")
     return app

@@ -249,3 +249,31 @@ class RoleListOut(BaseModel):
     # thứ thật sự chặn leo thang. Gỡ trường này thì UI hiện tuỳ chọn server sẽ từ
     # chối; gỡ phép kiểm ở store thì bất kỳ ai gọi API trực tiếp đều leo thang được.
     grantable_roles: list[str]
+
+
+class AuthzItemsRequest(BaseModel):
+    """Body của `POST /internal/authz/items`.
+
+    `principal` do `loom-query` CHUYỂN TIẾP nguyên trạng, không tự dựng: nó
+    không xác thực người dùng cuối, `loom-api` đã làm việc đó khi phát phiên.
+    Endpoint này vì vậy không có `PrincipalDep` — xem `routers/internal.py`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    principal: Principal
+    item_ids: list[uuid.UUID]
+
+
+class AuthzItemsResponse(BaseModel):
+    """`roles[str(item_id)]` là `None` cho CẢ item không tồn tại LẪN item người
+    gọi không có quyền đọc — hai trường hợp đó KHÔNG được phân biệt được từ phía
+    gọi (xem docstring `routers/internal.py`). Phân biệt chúng là rò rỉ sự tồn
+    tại, đúng loại lỗ mà quy tắc 404-trước-403 của Giai đoạn 1 sinh ra để chặn.
+
+    Khoá kiểu `str`, không `uuid.UUID`: JSON không có khoá UUID, và khai tường
+    minh hình dạng thật sự đi qua dây thì đáng tin hơn là dựa vào việc pydantic
+    tự đổi khoá hộ lúc serialize.
+    """
+
+    roles: dict[str, str | None]
