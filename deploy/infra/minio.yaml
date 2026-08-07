@@ -31,8 +31,26 @@ spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      # Phép đo 2 ở Giai đoạn 2c cần 50–100 GB. 20Gi đủ cho 2a và 2b; nâng khi
-      # tới đó, sau khi kiểm đĩa trống trên máy.
+      # 20Gi là LỜI KHAI, KHÔNG PHẢI HÀNG RÀO — và đừng nâng nó.
+      #
+      # Đo thật trên cụm này (Giai đoạn 2c Task 1):
+      #
+      #   1. `local-path` KHÔNG thi hành hạn mức. Ghi 21 GB vào PVC "20Gi" chạy
+      #      trơn ở 773 MB/s, không lỗi gì; `df` bên trong pod hiện nguyên
+      #      filesystem 467 GB chứ không phải 20.
+      #   2. PVC KHÔNG nâng tại chỗ được: `allowVolumeExpansion` không bật trên
+      #      storageclass `local-path`, và kubectl từ chối thẳng —
+      #      "only dynamically provisioned pvc can be resized".
+      #
+      # Cộng lại: nâng con số này đòi XOÁ VÀ TẠO LẠI PVC, tức là mất dữ liệu
+      # lakehouse, để đổi lấy một con số không có tác dụng gì. Nên phép đo 50 GB
+      # của Giai đoạn 2c ghi thẳng vào PVC "20Gi" này và chạy bình thường.
+      #
+      # RỦI RO THẬT, và nó không liên quan tới con số ở đây: KHÔNG có gì ngăn
+      # MinIO ăn hết đĩa máy chủ. Một query chạy loạn hoặc một bài đo quá tay sẽ
+      # lấp đầy phần trống của cả máy, không chỉ của cụm. Hàng rào thật phải là
+      # quota ở phía MinIO (`mc quota set`) hoặc một filesystem riêng — chưa có
+      # cái nào, và đó là việc của lúc chuyển sang VPS.
       storage: 20Gi
 ---
 apiVersion: apps/v1
