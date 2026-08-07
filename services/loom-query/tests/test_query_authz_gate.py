@@ -23,7 +23,13 @@ import uuid
 import pytest
 
 from loom_core.schemas import Principal
-from loom_query.authz import QueryForbidden, SqlSyntaxError, UnsupportedTableName, run_gate
+from loom_query.authz import (
+    ExternalSourceRejected,
+    QueryForbidden,
+    SqlSyntaxError,
+    UnsupportedTableName,
+    run_gate,
+)
 
 from .conftest import FakeAuthz
 
@@ -148,3 +154,54 @@ async def test_invalid_sql_is_rejected_before_authz_is_ever_called(
     assert errors[0]["column"] >= 1
     # authz KHÔNG được hỏi cho một câu SQL còn chưa parse xong.
     assert fake_authz.calls == []
+
+
+async def test_a_query_reading_outside_the_catalog_is_rejected(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """`read_parquet('s3://…')` đọc dữ liệu KHÔNG qua catalog, nên không có item
+    nào để hỏi quyền — và nếu để nó đi tiếp thì nó lặng lẽ không bị kiểm gì.
+
+    Chặn ở đây là lớp thứ hai. Lớp thứ nhất là phạm vi credential do Lakekeeper
+    cấp; một ranh giới duy nhất không có lớp dự phòng là chỗ một lỗi cấu hình
+    biến thành rò rỉ dữ liệu chéo workspace.
+    """
+    with pytest.raises(ExternalSourceRejected):
+        await run_gate(
+            sql="SELECT * FROM read_parquet('s3://workspace-khac/bi-mat.parquet')",
+            lakehouse_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+        )
+
+
+async def test_the_rejection_happens_before_permissions_are_ever_asked(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Thứ tự quan trọng: hỏi quyền cho một nguồn ngoài catalog là hỏi về một
+    item không tồn tại, và câu trả lời `None` trông y hệt "không có quyền" —
+    thông báo lỗi sẽ nói sai nguyên nhân cho người dùng."""
+    with pytest.raises(ExternalSourceRejected):
+        await run_gate(
+            sql="SELECT * FROM 's3://workspace-khac/**/*.parquet'",
+            lakehouse_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+        )
+    assert fake_authz.calls == [], "không được hỏi quyền cho một thứ không phải item"
+
+
+async def test_an_ordinary_query_still_passes_the_external_check(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Vế KHẲNG ĐỊNH. Không có nó, một bản cài từ chối MỌI query cũng làm hai
+    phép trên xanh — và lúc đó không ai chạy được gì."""
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+    refs = await run_gate(
+        sql="SELECT * FROM sales.orders",
+        lakehouse_id=lakehouse_id,
+        principal=principal,
+        authz=fake_authz,
+    )
+    assert [r.name for r in refs] == ["orders"]

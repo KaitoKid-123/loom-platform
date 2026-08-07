@@ -5,7 +5,7 @@ mỗi test được chứng minh ĐỎ (phá cài đặt theo đúng kiểu bỏ
 xác nhận đỏ, rồi phục hồi).
 """
 
-from loom_sql.deps import TableRef, table_deps
+from loom_sql.deps import TableRef, dependencies, table_deps
 
 
 def test_join_returns_every_table_not_just_the_first() -> None:
@@ -66,3 +66,53 @@ def test_order_is_sorted_not_appearance_order() -> None:
     nêu rõ bằng cách liệt kê bảng theo thứ tự NGƯỢC bảng chữ cái trong SQL."""
     sql = "SELECT * FROM zebra JOIN apple ON 1 = 1"
     assert table_deps(sql, "duckdb") == [TableRef(None, "apple"), TableRef(None, "zebra")]
+
+
+# --- Nguồn đọc NGOÀI catalog -------------------------------------------------
+#
+# SQL đọc dữ liệu được từ chỗ không phải bảng trong catalog, và sqlglot phân tích
+# cả ba dạng dưới đây thành `exp.Table`. Nếu chúng lẫn vào danh sách bảng thì cổng
+# quyền hoặc từ chối nhầm, hoặc — nguy hiểm hơn — bị ai đó "dọn nhiễu" bằng cách
+# lọc bỏ tên rỗng, và lúc đó `read_parquet('s3://…')` không còn phụ thuộc nào để
+# kiểm. Xem docstring đầu `deps.py`.
+
+
+def test_a_table_function_is_external_not_a_table() -> None:
+    d = dependencies("SELECT * FROM range(10)", "duckdb")
+    assert d.tables == []
+    assert d.external, "hàm bảng phải lộ ra ở `external`, không được biến mất"
+
+
+def test_reading_a_file_directly_is_external() -> None:
+    """`read_parquet('s3://…')` đọc dữ liệu KHÔNG qua catalog. Đây là đường đi
+    vòng qua RBAC nếu cổng quyền không nhìn thấy nó."""
+    d = dependencies("SELECT * FROM read_parquet('s3://khac/bi-mat.parquet')", "duckdb")
+    assert d.tables == []
+    assert any("PARQUET" in e.upper() for e in d.external), d.external
+
+
+def test_a_bare_path_in_the_from_clause_is_external() -> None:
+    """DuckDB cho `FROM 's3://…/*.parquet'`. sqlglot trả nó về như một bảng MANG
+    TÊN LÀ ĐƯỜNG DẪN — nên phép kiểm "có tên hay không" một mình là chưa đủ."""
+    d = dependencies("SELECT * FROM 's3://workspace-khac/**/*.parquet'", "duckdb")
+    assert d.tables == []
+    assert d.external == ["s3://workspace-khac/**/*.parquet"]
+
+
+def test_a_real_table_joined_with_a_function_keeps_both_signals() -> None:
+    """Trường hợp nguy hiểm nhất: một bảng thật ĐI CÙNG một nguồn ngoài. Bảng
+    thật vẫn phải bị kiểm quyền, và nguồn ngoài vẫn phải lộ ra — mất vế nào cũng
+    hỏng theo một hướng khác nhau."""
+    d = dependencies("SELECT * FROM sales.orders o JOIN range(10) r ON true", "duckdb")
+    assert [t.name for t in d.tables] == ["orders"]
+    assert d.external
+
+
+def test_an_ordinary_query_has_nothing_external() -> None:
+    """Vế KHẲNG ĐỊNH. Không có nó, một bản cài xếp MỌI thứ vào `external` cũng
+    làm bốn phép trên xanh — và lúc đó không query nào chạy được."""
+    d = dependencies(
+        "WITH x AS (SELECT * FROM raw) SELECT * FROM x JOIN sales.orders USING(id)", "duckdb"
+    )
+    assert [t.name for t in d.tables] == ["raw", "orders"]  # sap theo (namespace, name)
+    assert d.external == []

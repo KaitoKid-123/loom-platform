@@ -33,7 +33,8 @@ import httpx
 from fastapi import HTTPException, status
 
 from loom_core.schemas import Principal
-from loom_sql import SqlError, TableRef, table_deps, validate
+from loom_sql import SqlError, TableRef, validate
+from loom_sql.deps import dependencies
 
 # DuckDB là engine DUY NHẤT ở Giai đoạn 2b — spec mục 5.9 để ngỏ việc đổi sang
 # Trino cho Giai đoạn 4, nhưng chưa tới lượt. SQL người dùng gửi lên vì vậy LUÔN
@@ -66,6 +67,31 @@ class UnsupportedTableName(HTTPException):
     def __init__(self, table: TableRef, reason: str) -> None:
         self.table = table
         super().__init__(status.HTTP_400_BAD_REQUEST, detail=reason)
+
+
+class ExternalSourceRejected(HTTPException):
+    """Query đọc dữ liệu KHÔNG qua catalog — từ chối, và từ chối vì THIẾT KẾ.
+
+    `read_parquet('s3://…')`, `FROM 's3://…/*.parquet'`, hàm bảng: sqlglot phân
+    tích cả ba thành `exp.Table`, và `loom_sql.deps.dependencies` tách chúng ra
+    `external` thay vì trộn vào danh sách bảng.
+
+    Vì sao chặn thay vì bỏ qua: đường đọc file thô trong `Files/` chưa được xây
+    (Giai đoạn 2b sau), nên chưa có gì phân quyền cho nó. Thứ duy nhất đứng chắn
+    một `read_parquet('s3://workspace-khac/…')` lúc này là phạm vi của credential
+    do Lakekeeper cấp — và một ranh giới duy nhất, không có lớp thứ hai, là chỗ
+    một lỗi cấu hình biến thành rò rỉ dữ liệu chéo workspace.
+
+    Chặn ở đây rẻ và nói rõ lý do cho người dùng. Khi đường file thô có mặt, chỗ
+    này đổi từ "từ chối" thành "phân quyền theo prefix của workspace".
+    """
+
+    def __init__(self, sources: list[str]) -> None:
+        super().__init__(
+            status.HTTP_400_BAD_REQUEST,
+            "query đọc dữ liệu không qua catalog, chưa hỗ trợ ở giai đoạn này: "
+            + ", ".join(sources),
+        )
 
 
 class QueryForbidden(HTTPException):
@@ -176,7 +202,14 @@ async def run_gate(
     if errors:
         raise SqlSyntaxError(errors)
 
-    refs = tuple(table_deps(sql, DIALECT))
+    deps = dependencies(sql, DIALECT)
+
+    # TRƯỚC khi phân giải và kiểm quyền: một nguồn ngoài catalog không có item
+    # nào để hỏi quyền, nên nếu để nó đi tiếp thì nó lặng lẽ không bị kiểm gì.
+    if deps.external:
+        raise ExternalSourceRejected(deps.external)
+
+    refs = tuple(deps.tables)
 
     # `dict.fromkeys` khử trùng lặp nhưng GIỮ hình dạng "một id cho mỗi bảng"
     # thay vì sớm rút gọn về một tập hợp: trong task này mọi bảng hợp lệ đều
