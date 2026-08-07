@@ -100,9 +100,24 @@ async def test_cancel_of_a_running_query_stops_the_background_work_early(
     assert state.status == QueryStatus.cancelled
     assert state.rows is None  # không có kết quả nào lọt qua sau khi bị huỷ
 
-    assert elapsed < 2.0, (
-        f"huỷ ở 0.5s nhưng task nền mất {elapsed:.2f}s mới thật sự xong — câu "
-        "nặng (~3s chạy trọn) có vẻ vẫn chạy hết thay vì bị interrupt() ngay"
+    # So TƯƠNG ĐỐI với chính thời gian chạy trọn, KHÔNG so với một ngưỡng
+    # tuyệt đối. Một ngưỡng tuyệt đối phải đúng ở cả hai đầu và không làm nổi:
+    # trên máy rảnh câu này mất ~3s nên `< 2.0` phân biệt rất yếu; trên runner
+    # CI bận thì cùng câu đó mất ~9s và `< 2.0` lại quá chặt cho việc DuckDB
+    # NHẬN RA lệnh ngắt. Đo lần chạy trọn ngay trong cùng test thì tỉ lệ giữa
+    # hai con số không phụ thuộc máy nhanh hay chậm.
+    #
+    # Giai đoạn 2a có một cửa chặn flaky mà chỉ CI mới lộ, vì nó khẳng định một
+    # con số tuyệt đối phụ thuộc số core. Đây là cùng một cái bẫy.
+    control_start = time.perf_counter()
+    _, control_task = await _run_in_background(app_settings, lakehouse_id, QueryStore(), HEAVY_SQL)
+    await asyncio.wait_for(control_task, timeout=60.0)
+    uninterrupted = time.perf_counter() - control_start
+
+    assert elapsed < uninterrupted * 0.5, (
+        f"huỷ ở 0.5s xong sau {elapsed:.2f}s, trong khi chạy trọn mất "
+        f"{uninterrupted:.2f}s — tỉ lệ {elapsed / uninterrupted:.0%} là quá cao, "
+        "câu nặng có vẻ vẫn chạy hết thay vì bị interrupt() ngay"
     )
 
 
