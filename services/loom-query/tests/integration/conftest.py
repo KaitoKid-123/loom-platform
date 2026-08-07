@@ -23,6 +23,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import boto3
+import duckdb
 import httpx
 import pyarrow as pa
 import pytest
@@ -32,6 +33,27 @@ from testcontainers.core.container import DockerContainer
 
 from loom_iceberg import Lakehouse, build_catalog, create_warehouse, ensure_bootstrapped
 from loom_query.config import Settings
+
+
+@pytest.fixture(scope="session", autouse=True)
+def duckdb_httpfs_installed() -> None:
+    """Cài `httpfs` vào kho extension của DuckDB trên MÁY CHẠY TEST.
+
+    `runner._install_files_secret` chỉ gọi `LOAD httpfs`, KHÔNG `INSTALL` — cố
+    ý, vì container có `readOnlyRootFilesystem: true` và Dockerfile đã nướng sẵn
+    extension vào image lúc build (xem comment ở `services/loom-query/Dockerfile`).
+
+    Nhưng integration test chạy trên HOST, không trong container đó. Nên kho
+    extension của host phải tự lo, và lo ở đây chứ không ở mã sản phẩm.
+
+    Fixture này ra đời vì CI đỏ còn máy dev xanh: máy dev tình cờ đã có
+    `~/.duckdb/extensions/.../httpfs.duckdb_extension` từ những lần thăm dò
+    DuckDB trước đó, còn runner GitHub thì không. Đúng dạng "chạy được trên máy
+    tôi" — và thứ che nó là trạng thái môi trường không ai khai báo.
+
+    `autouse` để không test nào phải nhớ xin nó.
+    """
+    duckdb.connect().execute("INSTALL httpfs")
 from loom_storage import S3Credentials, StorageCredentials
 
 ROOT_USER = "loom-root"
