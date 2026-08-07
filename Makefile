@@ -115,8 +115,13 @@ web-install:  ## Cài dependency web
 	cd web && npm ci
 
 .PHONY: web-test
-web-test:  ## Test frontend
+web-test: bundle-check  ## Test frontend (kèm phép canh Monaco tải trì hoãn)
 	cd web && npm run test -- --run && npm run typecheck
+
+.PHONY: bundle-check
+bundle-check:  ## Canh: chunk khởi đầu KHÔNG chứa Monaco (Giai đoạn 2c, xem web/scripts/check-bundle-splitting.mjs)
+	cd web && npm run build
+	cd web && node scripts/check-bundle-splitting.mjs
 
 .PHONY: build-web
 build-web:  ## Build image loom-web

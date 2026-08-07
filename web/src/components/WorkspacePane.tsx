@@ -1,6 +1,8 @@
 import { NavLink, useMatch } from 'react-router'
 
+import { useItem } from '../lib/useItem'
 import { useWorkspaces } from '../lib/useWorkspaces'
+import { LakehouseSchemaTree } from './Explorer/LakehouseSchemaTree'
 
 /**
  * Panel ngữ cảnh của workspace đang mở.
@@ -14,8 +16,15 @@ import { useWorkspaces } from '../lib/useWorkspaces'
  */
 export function WorkspacePane() {
   const match = useMatch('/workspaces/:workspaceId/*')
+  // Match RIÊNG cho `:itemId` — cùng lý do `useMatch` ở trên thay vì `useParams`: đây là
+  // route CON của route con, và chỉ khớp khi đang thật sự đứng trên một trang item.
+  const itemMatch = useMatch('/workspaces/:workspaceId/items/:itemId/*')
   const workspaceId = match?.params.workspaceId
+  const itemId = itemMatch?.params.itemId
   const { data } = useWorkspaces()
+  // `useItem` đã dùng đúng `queryKey` mà `ItemPage` cũng dùng, nên khi cả hai cùng hiện
+  // (panel này + trang item), React Query gộp thành MỘT request, không phải hai.
+  const { data: openItem } = useItem(itemId ?? '')
 
   if (!workspaceId) return null
 
@@ -24,6 +33,9 @@ export function WorkspacePane() {
   // lỗi của nó — người dùng mất luôn header, rail và trang họ đang xem. Cùng lỗi đã gặp
   // ở danh sách version trong `ItemPage`.
   const workspace = data?.items?.find((w) => w.id === workspaceId)
+  // `?.data?.type`, không `.data.type`: một phản hồi item chưa về hoặc lỗi không được
+  // phép làm nổ panel này — nó nằm trong vỏ ứng dụng, giống lý do `?.items?.` ở trên.
+  const openLakehouseId = itemId && openItem?.data?.type === 'lakehouse' ? itemId : null
 
   return (
     <aside className="w-56 shrink-0 overflow-y-auto border-r border-line bg-surface py-3">
@@ -50,6 +62,11 @@ export function WorkspacePane() {
         </PaneLink>
         <PaneLink to={`/workspaces/${workspaceId}/connections`}>Connections</PaneLink>
       </nav>
+
+      {/* Lakehouse Explorer: chỉ hiện khi item đang mở LÀ một lakehouse. Không thay THẾ
+          nav ở trên — người dùng vẫn cần đường về "All items"/"Connections" trong khi
+          duyệt bảng. */}
+      {openLakehouseId && <LakehouseSchemaTree lakehouseId={openLakehouseId} />}
     </aside>
   )
 }

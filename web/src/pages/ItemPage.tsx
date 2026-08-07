@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { Suspense, lazy, useState } from 'react'
 import { Link, useParams } from 'react-router'
 
 import { ItemTypeIcon, typeLabel } from '../components/ItemTypeIcon'
@@ -6,6 +6,31 @@ import { PageHeader } from '../components/PageHeader'
 
 import { describeError } from '../lib/useItemMutations'
 import { useItem, useItemVersions, useRestoreVersion, useVersion } from '../lib/useItem'
+
+// `React.lazy`, KHÔNG `import` tĩnh: Monaco nặng 2-5MB — gấp mười tới hai mươi lần toàn
+// bộ bundle còn lại (xem bản đo thật trong `scripts/check-bundle-splitting.mjs` và commit
+// message). Một `import` tĩnh ở đây kéo Monaco vào chunk khởi đầu và bắt MỌI người tải nó
+// dù họ chỉ ghé xem một pipeline — phép canh bundle (`make bundle-check`) ĐỎ nếu ai đó lỡ
+// đổi lại dòng dưới đây thành `import { SqlEditor } from '../components/Editor/SqlEditor'`.
+const SqlEditor = lazy(() =>
+  import('../components/Editor/SqlEditor').then((m) => ({ default: m.SqlEditor })),
+)
+
+/** Khung chờ MÔ PHỎNG hình một trình soạn code — quy tắc bắt buộc spec 7.4 "skeleton
+ * theo hình nội dung sắp tới", không phải một ô trắng hay spinner giữa màn hình. Cùng
+ * chiều cao `min-h-72` với `SqlEditor` thật, để nội dung không nhảy khi chunk tải xong. */
+function SqlEditorSkeleton() {
+  return (
+    <div
+      data-testid="sql-editor-skeleton"
+      className="min-h-72 space-y-2 rounded-md border border-line bg-surface p-3"
+    >
+      {[92, 68, 76, 40, 84, 55].map((width, i) => (
+        <div key={i} className="h-3 animate-pulse rounded bg-hover" style={{ width: `${width}%` }} />
+      ))}
+    </div>
+  )
+}
 
 /**
  * Trang chi tiết item, CHỈ ĐỌC ở Giai đoạn 1.
@@ -90,11 +115,20 @@ export function ItemPage() {
 
       <section>
         <h2 className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-dim">Definition</h2>
-        {/* Chỉ đọc, và cố ý: trình soạn thảo thuộc Giai đoạn 2. Một ô sửa được mà không
-            lưu được thì tệ hơn một ô chỉ đọc. */}
-        <pre className="overflow-auto rounded-md border border-line bg-surface p-3 font-mono text-[12px] leading-relaxed">
-          {JSON.stringify(item.definition, null, 2)}
-        </pre>
+        {item.type === 'sql_script' ? (
+          // `sql_script` mở bằng Monaco chứ không JSON thô — đây chính là task Giai đoạn
+          // 2c. Chạy query/huỷ/lưới kết quả/autocomplete là task SAU, xây trên đúng biên
+          // lazy-load này; ở đây Monaco chỉ cần hiện ra và gõ được.
+          <Suspense fallback={<SqlEditorSkeleton />}>
+            <SqlEditor value={typeof item.definition.sql === 'string' ? item.definition.sql : ''} />
+          </Suspense>
+        ) : (
+          // Chỉ đọc, và cố ý cho MỌI loại khác: trình soạn thảo cho chúng thuộc giai đoạn
+          // sau. Một ô sửa được mà không lưu được thì tệ hơn một ô chỉ đọc.
+          <pre className="overflow-auto rounded-md border border-line bg-surface p-3 font-mono text-[12px] leading-relaxed">
+            {JSON.stringify(item.definition, null, 2)}
+          </pre>
+        )}
       </section>
 
       <section>
