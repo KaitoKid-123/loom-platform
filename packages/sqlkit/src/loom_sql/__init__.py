@@ -8,3 +8,16 @@ Không có ràng buộc đó, logic phân tích SQL sẽ lẻn xuống tầng l�
 hết test được độc lập — mà nó là chỗ RBAC gặp SQL, nên nó phải test được cho mọi
 trường hợp chứ không chỉ những trường hợp dựng nổi một database.
 """
+
+from loom_sql.deps import TableRef, table_deps
+from loom_sql.errors import SqlError
+from loom_sql.transpile import transpile
+from loom_sql.validate import validate
+
+__all__ = [
+    "SqlError",
+    "TableRef",
+    "table_deps",
+    "transpile",
+    "validate",
+]
