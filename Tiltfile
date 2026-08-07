@@ -96,7 +96,13 @@ def build_and_import(dockerfile):
 custom_build(
     'loom/api',
     build_and_import('services/api/Dockerfile'),
-    deps=['services/api', 'packages/core', 'pyproject.toml', 'uv.lock'],
+    # packages/storagekit và packages/icebergkit thêm vào vì vòng đời warehouse:
+    # loom-api giờ gọi thẳng `loom_iceberg.warehouse.create_warehouse`/
+    # `ensure_bootstrapped` (xem `loom_api.warehouse_provisioning`) — thiếu hai
+    # dòng này thì sửa `packages/icebergkit` mà Tilt không build lại `loom/api`,
+    # cùng cạm bẫy mà `loom-query` từng gặp với `packages/core`.
+    deps=['services/api', 'packages/core', 'packages/storagekit', 'packages/icebergkit',
+          'pyproject.toml', 'uv.lock'],
     ignore=BUILD_IGNORE,
     skips_local_docker=True,
     disable_push=True,

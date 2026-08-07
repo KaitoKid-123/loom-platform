@@ -1,4 +1,5 @@
 import uuid
+from functools import partial
 
 from fastapi import APIRouter, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +8,8 @@ from loom_api.deps import PrincipalDep, SessionDep
 from loom_api.etag import etag_for, parse_if_match
 from loom_api.item_store import ItemStore
 from loom_api.models import Item
+from loom_api.warehouse_provisioning import provision_warehouse
+from loom_core.config import Settings
 from loom_core.item_definitions import ItemType
 from loom_core.schemas import ItemCreate, ItemOut, ItemPatch, PageOut, Principal
 
@@ -75,6 +78,7 @@ async def create_item(
     session: AsyncSession = SessionDep,
 ) -> ItemOut:
     store = _store(request, session, principal)
+    settings: Settings = request.app.state.settings
     item = await store.create(
         workspace_id=workspace_id,
         item_type=body.type,
@@ -83,6 +87,13 @@ async def create_item(
         definition=body.definition,
         folder_path=body.folder_path,
         description=body.description,
+        # No-op cho mọi type trừ `lakehouse` — xem
+        # `loom_api.warehouse_provisioning.provision_warehouse`. `ItemStore.
+        # create` gọi callback này TRƯỚC khi tạo hàng item nào (xem docstring
+        # của nó), nên một lỗi Lakekeeper ở đây không để lại một item mồ côi.
+        provision=partial(
+            provision_warehouse, settings, item_type=body.type, workspace_id=workspace_id
+        ),
     )
     out = _out(item)
     await session.commit()

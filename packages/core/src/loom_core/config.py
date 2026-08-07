@@ -9,6 +9,7 @@ _INSECURE_DEFAULTS = {
     "session_secret": "dev-only-do-not-use-in-production",
     "oidc_client_secret": "loom-dev-secret",
     "query_shared_secret": "dev-only-do-not-use-in-production",
+    "storage_root_secret_key": "dev-only-do-not-use-in-production",
 }
 
 
@@ -69,7 +70,37 @@ class Settings(BaseSettings):
     # nó còn là mặc định khi `environment != "local"`.
     query_shared_secret: str = "dev-only-do-not-use-in-production"  # noqa: S105
 
-    @field_validator("public_base_url", "oidc_issuer", "oidc_internal_base", "query_base_url")
+    # Storage — nền cho warehouse Lakekeeper của item `lakehouse` (khoảng trống
+    # Giai đoạn 2a phát hiện: tạo item mà không tạo warehouse thì `GET
+    # /catalog/v1/config` trả 400 lúc mở nó). Cùng khuôn DNS nội bộ "loom" viết
+    # cứng như `query_base_url` ở trên.
+    storage_endpoint: str = "http://minio.loom.svc.cluster.local:9000"
+    storage_bucket: str = "loom-local"
+    # Credential GỐC của MinIO — MÓN NỢ đã được chủ dự án chấp nhận, có điều
+    # kiện: CHỈ `loom_api.warehouse_provisioning` được đọc hai trường này, để
+    # tự cấp phát warehouse lúc tạo lakehouse. Giai đoạn 1 xây `loom-api` như
+    # một control plane KHÔNG đọc secret nào (`connection` chỉ giữ `secret_ref`
+    # — xem `SECRET_REF_RE` ở `loom_core.item_definitions`); đây là một
+    # credential mở được MỌI prefix của MỌI workspace, không riêng một
+    # workspace nào, nên phạm vi đọc nó phải hẹp nhất có thể và phải CANH
+    # ĐƯỢC — xem `services/api/tests/test_root_credential_guard.py`, phép canh
+    # AST khẳng định đúng MỘT module tham chiếu hai trường này.
+    storage_root_access_key: str = "loom-dev-minio-root"
+    storage_root_secret_key: str = "dev-only-do-not-use-in-production"  # noqa: S105
+    # Lakekeeper — base URL, KHÔNG có hậu tố `/catalog`: loom-api chỉ gọi API
+    # QUẢN TRỊ (`/management/v1/...`) để cấp phát warehouse, không bao giờ mở
+    # catalog Iceberg (đó là việc riêng của `loom-query` — xem
+    # `loom_query.config.Settings.catalog_uri`, field đó CÓ hậu tố `/catalog`).
+    lakekeeper_url: str = "http://loom-lakekeeper.loom.svc.cluster.local:8181"
+
+    @field_validator(
+        "public_base_url",
+        "oidc_issuer",
+        "oidc_internal_base",
+        "query_base_url",
+        "storage_endpoint",
+        "lakekeeper_url",
+    )
     @classmethod
     def _strip_trailing_slash(cls, value: str | None) -> str | None:
         """Một dấu / thừa ở cuối làm hỏng phép kiểm biên trong _to_internal:

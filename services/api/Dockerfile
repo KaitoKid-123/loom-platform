@@ -8,15 +8,24 @@ FROM ghcr.io/astral-sh/uv:0.11.21-python3.12-trixie-slim AS builder
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
-# Dependency layer — only invalidated when pyproject/lock change
+# Dependency layer — only invalidated when pyproject/lock change. loom-api
+# now pulls in TWO more workspace packages (vòng đời warehouse: it calls
+# `loom_iceberg.warehouse.create_warehouse`/`ensure_bootstrapped` directly —
+# see `loom_api.warehouse_provisioning`). loom-iceberg itself depends on
+# loom-storage, so both must be present at this layer too, same pattern as
+# services/loom-query/Dockerfile.
 COPY pyproject.toml uv.lock ./
 COPY packages/core/pyproject.toml packages/core/
+COPY packages/storagekit/pyproject.toml packages/storagekit/
+COPY packages/icebergkit/pyproject.toml packages/icebergkit/
 COPY services/api/pyproject.toml services/api/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package loom-api --no-install-project
 
 # Source layer
 COPY packages/core packages/core
+COPY packages/storagekit packages/storagekit
+COPY packages/icebergkit packages/icebergkit
 COPY services/api services/api
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package loom-api

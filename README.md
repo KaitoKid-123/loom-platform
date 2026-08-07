@@ -110,6 +110,16 @@ năm giới hạn tài nguyên và huỷ query. Task 10/11 nối nó vào hệ t
 - Một bí mật chia sẻ qua header (`X-Loom-Query-Secret`) giữa hai service, thay cho việc
   `loom-query` tin thẳng principal trong thân request của bất kỳ pod nào gọi tới nó.
 
+**Vòng đời warehouse (khoảng trống Giai đoạn 2a phát hiện).** Tạo một item `type=lakehouse`
+trước đây chỉ chèn một hàng Postgres — không warehouse Lakekeeper nào được tạo, nên
+`GET /catalog/v1/config` trả 400 và `loom-query` hỏng ngay khi có ai mở nó. Giờ `loom-api`
+tạo warehouse (`packages/icebergkit/src/loom_iceberg/warehouse.py`, đã chạy thật ở 2a)
+**TRƯỚC** khi commit hàng item — hai kho không chia sẻ transaction, và giữa "một item sống
+trỏ vào lakehouse rỗng" (im lặng, lộ ra lúc dùng) với "một warehouse mồ côi" (ồn ào, tốn
+chỗ), vế sau đúng hướng hơn. Warehouse đặt tên theo `str(item.id)` — KHÔNG theo tên hiển
+thị, khớp quy ước mà `loom_query.runner` đã giả định từ Giai đoạn 2b. Xoá mềm một lakehouse
+KHÔNG xoá warehouse của nó.
+
 ### Nợ đã biết sau Giai đoạn 2b
 
 - **Bí mật chia sẻ qua header KHÔNG chống được một pod đọc được chính Secret Kubernetes
@@ -123,3 +133,20 @@ năm giới hạn tài nguyên và huỷ query. Task 10/11 nối nó vào hệ t
   cho phạm vi hiện tại nhưng không phải bất biến vĩnh viễn.
 - `loom-query` không có `devReload`/`live_update` trong Tiltfile — sửa mã nguồn build lại
   ảnh đầy đủ, khác `loom-api`.
+- **Warehouse mồ côi.** Nếu warehouse tạo xong nhưng item không tạo được (trùng tên, mất
+  quyền giữa chừng...), warehouse đó ở lại trong Lakekeeper không ai dùng. Dọn nó vẫn là
+  việc tay tới khi có task riêng — chấp nhận được vì nó ồn ào (thấy được trong danh sách
+  warehouse), khác lỗi mà nó thay thế.
+- **`loom-api` giờ cầm credential GỐC của MinIO** (`Settings.storage_root_access_key`/
+  `storage_root_secret_key`) để tự cấp phát warehouse — phá đúng nguyên tắc Giai đoạn 1 đặt
+  ra ("control plane không đọc secret nào", xem `SECRET_REF_RE`). Chấp nhận được với điều
+  kiện: phạm vi đọc credential đó CHỈ nằm trong `loom_api.warehouse_provisioning`, canh bởi
+  `services/api/tests/test_root_credential_guard.py` (một phép canh AST, không phải một
+  đoạn văn). Xoay credential đó vẫn là việc tay tới Giai đoạn 6, cùng nợ đã ghi ở Giai đoạn
+  2a cho `MinioStsProvider`.
+- Xoá mềm không xoá warehouse — cố ý, vì Lakekeeper từ chối xoá một warehouse còn bảng
+  (`409 WarehouseNotEmpty`, `force=true` không vượt qua được, đã kiểm ở 2a) và vì lịch sử
+  version vẫn cần warehouse sống. Giai đoạn 1b CHƯA có thao tác "bỏ-xoá" (un-delete) một
+  item — chỉ có `restore_version` (phục hồi NỘI DUNG trên một item đang sống). Một lakehouse
+  bị xoá mềm hôm nay không có đường quay lại qua API; nợ đó nằm ở Giai đoạn 1, không phải
+  của warehouse.

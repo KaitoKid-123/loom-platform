@@ -2,9 +2,21 @@
 
 Thứ tự trong `create` quan trọng: validate definition TRƯỚC khi kiểm quyền hay
 chạm database. Một definition sai là lỗi 422 của client, và không có lý do gì để
-nó tốn một round trip."""
+nó tốn một round trip.
 
+Thứ tự đó nới rộng thêm một bước cho `provision` (vòng đời warehouse
+Lakekeeper): CHẠY SAU permission check, TRƯỚC bất kỳ `self._session.add()`
+nào. `create()` CỐ Ý không biết `provision` làm gì — người gọi
+(`loom_api.routers.items`) mới biết đó là
+`loom_api.warehouse_provisioning.provision_warehouse`, và module đó mới là
+chỗ DUY NHẤT chạm credential gốc MinIO. Đặt móc ở đây thay vì để
+`item_store.py` tự import Lakekeeper là để giữ đúng việc `item_store.py` chỉ
+biết CRUD, không biết `lakehouse` khác `sql_script` ở chỗ nào ngoài một
+`ItemType`."""
+
+import asyncio
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
@@ -90,15 +102,31 @@ class ItemStore:
         definition: dict[str, object],
         folder_path: str = "/",
         description: str | None = None,
+        provision: Callable[[uuid.UUID], None] | None = None,
     ) -> Item:
+        """`provision`, nếu có, được gọi ĐÚNG MỘT lần, với id sẽ trở thành
+        `Item.id` — TRƯỚC khi `Item`/`ItemVersion` nào được dựng, chứ đừng nói
+        `flush()`. Nếu nó ném lỗi, hàm này thoát ngay tại đây: chưa có
+        `self._session.add()` nào chạy, nên KHÔNG hàng nào tồn tại, kể cả
+        trong session chưa commit — người gọi không cần tự rollback gì thêm.
+
+        Đây là hàm ĐỒNG BỘ (không phải coroutine): callback thật
+        (`loom_api.warehouse_provisioning.provision_warehouse`) gọi Lakekeeper
+        qua `httpx.Client` chặn, nên nó chạy trong `asyncio.to_thread` ở đây
+        thay vì khoá event loop suốt một round trip mạng.
+        """
         # Validate TRƯỚC: lỗi 422 của client không nên tốn một round trip.
         parsed = parse_definition(item_type, definition)
         payload = parsed.model_dump(mode="json")
 
         await self._perms.require_workspace(workspace_id, Action.item_create)
 
+        item_id = uuid.uuid4()
+        if provision is not None:
+            await asyncio.to_thread(provision, item_id)
+
         item = Item(
-            id=uuid.uuid4(),
+            id=item_id,
             tenant_id=DEFAULT_TENANT_ID,
             workspace_id=workspace_id,
             type=str(item_type),
