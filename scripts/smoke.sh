@@ -9,9 +9,9 @@
 # Đây là bài kiểm chạy với một môi trường ĐANG SỐNG — chạy sau `make dev` ở local,
 # và sau mỗi lần ArgoCD đồng bộ ở dev/prod. Giai đoạn 6 sẽ nối nó vào e2e tự động.
 #
-# Mỗi phép kiểm phải THẬT SỰ đỏ khi thứ nó canh hỏng. Dự án này đã sáu lần gặp
-# "một phép kiểm xanh mà không kiểm gì cả", nên đừng thêm phép kiểm nào vào đây
-# mà chưa tự tay phá thứ nó canh để xem nó có đỏ không.
+# Mỗi phép kiểm phải THẬT SỰ đỏ khi thứ nó canh hỏng. Dự án này đã mười bốn lần
+# gặp "một phép kiểm xanh mà không kiểm gì cả", nên đừng thêm phép kiểm nào vào
+# đây mà chưa tự tay phá thứ nó canh để xem nó có đỏ không.
 set -uo pipefail
 
 BASE="${BASE:-http://loom.localhost}"
@@ -23,7 +23,7 @@ trap 'rm -rf "$(dirname "$JAR")"' EXIT
 
 # Số phép kiểm MONG ĐỢI, khẳng định ở cuối file. Không có nó, xoá một phép kiểm
 # vẫn cho "7/7 đạt" và bản báo cáo trông y như trước.
-EXPECTED=11
+EXPECTED=13
 
 pass=0; fail=0; skipped=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; pass=$((pass+1)); }
@@ -255,8 +255,116 @@ else
   fi
 fi
 
+# 12 — tạo lakehouse qua API rồi hỏi schema của nó: canh đúng đường Giai đoạn 2b
+#      Task 12 dựng — `loom-api` phải gọi Lakekeeper cấp một warehouse THẬT TRƯỚC khi
+#      commit hàng item (xem docstring `loom_api.warehouse_provisioning`). Nếu bước
+#      cấp phát đó bị bỏ qua hay hỏng âm thầm, item vẫn tạo được — hàng Postgres
+#      không biết gì về Lakekeeper — nhưng lakehouse RỖNG, và lỗi đó chỉ lộ ra lúc có
+#      người MỞ nó, không lộ lúc tạo.
+#
+#      Không hỏi Lakekeeper trực tiếp được: nó là ClusterIP, không qua ingress, và
+#      smoke không dùng kubectl. Hỏi GIÁN TIẾP qua route Task 2 Giai đoạn 2c dựng —
+#      `GET /lakehouses/{id}/schema` chuyển tiếp VÔ ĐIỀU KIỆN sang `loom-query` (xem
+#      docstring `routers/query.py`), và `loom-query` mở một catalog Iceberg THẬT của
+#      ĐÚNG warehouse này để liệt kê namespace. Warehouse không tồn tại thì bước mở
+#      catalog đó hỏng — đã kiểm bằng thực nghiệm trên cụm thật: xoá bước cấp phát rồi
+#      gọi route này cho ra một trạng thái KHÁC 200, không phải một cây rỗng.
+#
+#      Dùng CHUNG workspace với phép 10, không tạo workspace thứ hai chỉ cho phép
+#      này. KHÔNG dọn riêng lakehouse: xoá mềm workspace ở cuối file kéo theo cả hàng
+#      item này, đúng cách phép 10 đã để lại hàng item sql_script của nó. KHÔNG dọn
+#      được warehouse Lakekeeper — hệ thống hôm nay không có API xoá warehouse nào
+#      (xem docstring `loom_api.warehouse_provisioning`: "không có hàm xoá nào", một
+#      nợ đã ghi nhận ở đó, không phải việc của smoke). Mỗi lần chạy vì vậy để lại
+#      đúng MỘT warehouse rỗng — không bảng, không dữ liệu, không lớn dần theo cách
+#      đáng lo.
+smoke_lakehouse_id=""
+if [ -z "$smoke_ws_id" ]; then
+  bad "tạo lakehouse qua API — warehouse xuất hiện" "bỏ qua được — phép 10 không có workspace để dùng"
+else
+  lh_payload=$(printf '{"type":"lakehouse","name":"smoke-lakehouse-%s","display_name":"Smoke lakehouse","definition":{"schema_version":1}}' "$$")
+  lh_code=$(curl -s -b "$JAR" -o "$tmpdir/lh.json" -w '%{http_code}' --max-time 15 \
+            -X POST -H 'Content-Type: application/json' -d "$lh_payload" \
+            "$BASE/api/v1/workspaces/$smoke_ws_id/items")
+  if [ "$lh_code" != 201 ]; then
+    bad "tạo lakehouse qua API — warehouse xuất hiện" "tạo item type=lakehouse trả $lh_code"
+  else
+    smoke_lakehouse_id=$(jq -r '.id' < "$tmpdir/lh.json")
+    schema_code=$(curl -s -b "$JAR" -o "$tmpdir/schema.json" -w '%{http_code}' --max-time 15 \
+                  "$BASE/api/v1/lakehouses/$smoke_lakehouse_id/schema")
+    if [ "$schema_code" != 200 ]; then
+      bad "tạo lakehouse qua API — warehouse xuất hiện" \
+          "GET .../schema trả $schema_code (mong 200) — warehouse có được cấp phát không?"
+    elif ! jq -e '.namespaces == []' >/dev/null 2>&1 < "$tmpdir/schema.json"; then
+      bad "tạo lakehouse qua API — warehouse xuất hiện" "schema trả: $(cat "$tmpdir/schema.json")"
+    else
+      ok "tạo lakehouse qua API — warehouse xuất hiện (schema rỗng, đúng lakehouse mới)"
+    fi
+  fi
+fi
+
+# 13 — một câu SQL đi hết đường: trình duyệt -> loom-api -> bí mật chia sẻ ->
+#      cổng quyền -> runner -> Lakekeeper THẬT, và ngược lại. Đây là phép "một câu
+#      SQL đi hết đường" mà cả Giai đoạn 2 tồn tại để làm được.
+#
+#      KHÔNG làm bằng CTAS như đề xuất ban đầu — đã kiểm bằng thực nghiệm trên cụm
+#      thật (nộp một CTAS thật, đọc lại kết quả) VÀ bằng cách đọc thẳng
+#      `loom_sql.deps.dependencies`: `loom-query` không có đường COMMIT nào vào
+#      Iceberg qua SQL. `dependencies()` coi ĐÍCH của một CTAS là một bảng cần đọc,
+#      y hệt một bảng nguồn — `authz.run_gate` đòi quyền trên nó và `runner` cố
+#      `scan_size_bytes` nó TRƯỚC KHI câu CREATE kịp chạy — nên một CTAS luôn hỏng
+#      với lỗi "table not found", không bao giờ tới lượt CREATE. Cũng không có
+#      đường HTTP nào khác nạp được dữ liệu vào một bảng Iceberg: không route upload
+#      file, `Files/` không có gì để đọc nếu không ai nạp trước, và Lakekeeper không
+#      lộ ra ingress. "SELECT lại từ một bảng vừa CTAS" vì vậy không khả thi thuần
+#      qua HTTP ở trạng thái hôm nay của hệ thống — ghi nhận là một khoảng trống,
+#      không phải một việc bỏ qua.
+#
+#      Phép THAY THẾ dưới đây canh CÙNG một chuỗi (proxy, bí mật chia sẻ, cổng
+#      quyền, runner) bằng một SELECT nhắm vào một bảng THẬT không tồn tại trong
+#      lakehouse vừa tạo ở phép 12. Cổng quyền THẬT vẫn được hỏi trên CHÍNH id
+#      lakehouse đó — khác `SELECT 1` (không chạm bảng nào, `dependencies()` trả
+#      zero bảng): `lakehouse_id` LUÔN có mặt trong tập id được hỏi quyền, bất kể SQL
+#      có bảng nào hay không (bất biến bắt buộc ghi ở `authz.run_gate`), nhưng chỉ
+#      một câu SQL THAM CHIẾU một bảng mới khiến `runner` thật sự mở catalog Iceberg
+#      và gọi Lakekeeper — `SELECT 1` có `resolved_tables == ()` nên vòng lặp mở
+#      catalog trong `runner._run_sync` không chạy lần nào. Kết quả mong đợi là
+#      "not found" từ CHÍNH Lakekeeper, không phải một lỗi proxy chung chung — không
+#      nhận "202 hay gì cũng được": phải ĐÚNG 202 lúc nộp (proxy + bí mật chia sẻ còn
+#      sống) rồi ĐÚNG "failed" kèm lý do thật lúc đọc kết quả (runner chạm Lakekeeper
+#      thật, không lặng lẽ trả "succeeded" giả).
+if [ -z "$smoke_lakehouse_id" ]; then
+  bad "SELECT qua /api/v1/query đi hết đường" "không có lakehouse từ phép 12 để kiểm"
+else
+  q_payload=$(printf '{"lakehouse_id":"%s","sql":"SELECT * FROM ns.does_not_exist"}' "$smoke_lakehouse_id")
+  q_code=$(curl -s -b "$JAR" -o "$tmpdir/q.json" -w '%{http_code}' --max-time 15 \
+           -X POST -H 'Content-Type: application/json' -d "$q_payload" \
+           "$BASE/api/v1/query")
+  if [ "$q_code" != 202 ]; then
+    bad "SELECT qua /api/v1/query đi hết đường" "nộp query trả $q_code (mong 202) — proxy hoặc bí mật chia sẻ hỏng?"
+  else
+    query_id=$(jq -r '.query_id' < "$tmpdir/q.json")
+    q_status=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      curl -s -b "$JAR" --max-time 10 -o "$tmpdir/qs.json" "$BASE/api/v1/query/$query_id"
+      q_status=$(jq -r '.status' < "$tmpdir/qs.json" 2>/dev/null)
+      [ "$q_status" = running ] || break
+      sleep 0.3
+    done
+    if [ "$q_status" = failed ] && jq -e '(.error // "") | test("not found"; "i")' >/dev/null 2>&1 < "$tmpdir/qs.json"; then
+      ok "SELECT qua /api/v1/query đi hết đường — runner chạm Lakekeeper thật"
+    else
+      bad "SELECT qua /api/v1/query đi hết đường" "trạng thái cuối: $(cat "$tmpdir/qs.json")"
+    fi
+  fi
+fi
+
 # Dọn: xoá mềm workspace do smoke tạo. Phép 10 tạo một workspace THẬT trên Aiven mỗi
-# lần chạy, nên không dọn thì hai mươi lần chạy để lại hai mươi workspace rác.
+# lần chạy, nên không dọn thì hai mươi lần chạy để lại hai mươi workspace rác. Phép
+# 12 thêm một item lakehouse vào CÙNG workspace này — xoá mềm workspace kéo theo cả
+# hai (không cascade thật, nhưng cả hai đều thuộc một workspace đã biến mất, đúng
+# cách item sql_script của phép 10 đã luôn được xử lý). Không có bảng nào để dọn:
+# phép 13 không tạo bảng nào (xem giải thích ở phép đó).
 # Xoá mềm nên lịch sử audit còn nguyên — và audit của một lần smoke là bằng chứng nó
 # đã chạy thật.
 if [ -n "$smoke_ws_id" ]; then
