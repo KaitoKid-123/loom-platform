@@ -12,6 +12,7 @@ members = [
     "loom-api",
     "loom-core",
     "loom-iceberg",
+    "loom-query",
     "loom-sql",
     "loom-storage",
 ]
@@ -936,6 +937,35 @@ requires-dist = [
     { name = "loom-storage", editable = "packages/storagekit" },
     { name = "pyarrow", specifier = ">=18.0" },
     { name = "pyiceberg", extras = ["pyarrow"], specifier = ">=0.10" },
+]
+
+[[package]]
+name = "loom-query"
+version = "0.1.0"
+source = { editable = "services/loom-query" }
+dependencies = [
+    { name = "duckdb" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "loom-core" },
+    { name = "loom-iceberg" },
+    { name = "loom-sql" },
+    { name = "pyarrow" },
+    { name = "structlog" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "duckdb", specifier = ">=1.1" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "loom-core", editable = "packages/core" },
+    { name = "loom-iceberg", editable = "packages/icebergkit" },
+    { name = "loom-sql", editable = "packages/sqlkit" },
+    { name = "pyarrow", specifier = ">=18.0" },
+    { name = "structlog", specifier = ">=24.4" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
 ]
 
 [[package]]
