@@ -23,7 +23,7 @@ from fastapi import FastAPI
 from loom_query import VERSION
 from loom_query.authz import AuthzClient, AuthzPort, LakehouseResolver
 from loom_query.config import Settings, get_settings
-from loom_query.routers import query
+from loom_query.routers import health, query
 from loom_query.store import QueryStore
 
 
@@ -73,5 +73,8 @@ def create_app(
     app.state.authz = resolved_authz
     app.state.resolver = resolved_resolver
     app.state.store = store
+    # KHÔNG dependencies bí mật chia sẻ — probe của kubelet, xem docstring
+    # `routers/health.py`.
+    app.include_router(health.router)
     app.include_router(query.router, prefix="/api/v1")
     return app

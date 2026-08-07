@@ -122,8 +122,12 @@ web-test:  ## Test frontend
 build-web:  ## Build image loom-web
 	docker build -f web/Dockerfile -t loom/web:$(IMAGE_TAG) .
 
+.PHONY: build-query
+build-query:  ## Build image loom-query
+	docker build -f services/loom-query/Dockerfile -t loom/query:$(IMAGE_TAG) .
+
 .PHONY: build
-build: build-api build-web  ## Build cả hai image
+build: build-api build-web build-query  ## Build cả ba image
 
 .PHONY: helm-validate
 helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
@@ -218,6 +222,8 @@ check-pins:  ## Chặn FROM trong Dockerfile lệch với deploy/versions.env
 		|| { echo "web/Dockerfile không FROM node:$(NODE_VERSION)-alpine — lệch NODE_VERSION trong deploy/versions.env"; exit 1; }
 	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/api/Dockerfile \
 		|| { echo "services/api/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
+	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/loom-query/Dockerfile \
+		|| { echo "services/loom-query/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
 	@echo "Pin khớp: node $(NODE_VERSION), uv $(UV_VERSION)"
 
 .PHONY: bootstrap

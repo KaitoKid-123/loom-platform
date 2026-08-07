@@ -23,7 +23,6 @@ import uuid
 from typing import Any
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 
 from loom_core.schemas import Principal
 from loom_query.config import Settings
@@ -31,7 +30,7 @@ from loom_query.main import create_app
 from loom_query.schemas import ColumnOut
 from loom_query.store import QueryStore
 
-from .conftest import FakeAuthz
+from .conftest import FakeAuthz, http_client
 
 # `fake_authz`/`principal` là fixture của `tests/conftest.py`, tiêm thẳng theo
 # tên tham số — không cần import. `FakeAuthz` ở trên chỉ để chú thích kiểu.
@@ -75,8 +74,7 @@ async def test_bad_sql_is_rejected_with_400_and_line_column(
     fake_authz: FakeAuthz, principal: Principal
 ) -> None:
     app = create_app(authz=fake_authz)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         response = await client.post(
             "/api/v1/query",
             json=_body(uuid.uuid4(), "SELECT 1\nFROM foo\nWHERE ((( )", principal),
@@ -91,8 +89,7 @@ async def test_unqualified_table_name_is_rejected_with_400(
     fake_authz: FakeAuthz, principal: Principal
 ) -> None:
     app = create_app(authz=fake_authz)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         response = await client.post(
             "/api/v1/query", json=_body(uuid.uuid4(), "SELECT * FROM orders", principal)
         )
@@ -111,8 +108,7 @@ async def test_three_part_table_name_with_an_unresolvable_lakehouse_is_forbidden
     KHÔNG phải 404 — xem `tests/test_query_authz_gate.py` cho phép kiểm chi
     tiết hơn về tính indistinguishable đó."""
     app = create_app(authz=fake_authz)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         response = await client.post(
             "/api/v1/query", json=_body(uuid.uuid4(), "SELECT * FROM lh.ns.t", principal)
         )
@@ -125,8 +121,7 @@ async def test_forbidden_query_never_touches_the_catalog(
 ) -> None:
     # `fake_authz` không được `grant()` gì — mọi bảng bị từ chối.
     app = create_app(settings=unreachable_settings, authz=fake_authz)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         response = await client.post(
             "/api/v1/query", json=_body(uuid.uuid4(), "SELECT * FROM ns.orders", principal)
         )
@@ -152,8 +147,7 @@ async def test_allowed_query_reaches_the_background_runner(
     lakehouse_id = uuid.uuid4()
     fake_authz.grant(lakehouse_id, "viewer")
     app = create_app(authz=fake_authz)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         create_response = await client.post(
             "/api/v1/query", json=_body(lakehouse_id, "SELECT * FROM ns.orders", principal)
         )
@@ -175,8 +169,7 @@ async def test_allowed_query_reaches_the_background_runner(
 
 async def test_get_unknown_query_id_is_404(fake_authz: FakeAuthz) -> None:
     app = create_app(authz=fake_authz)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         response = await client.get(f"/api/v1/query/{uuid.uuid4()}")
     assert response.status_code == 404
 
@@ -194,9 +187,8 @@ async def test_delete_marks_a_running_query_cancelled(
     lakehouse_id = uuid.uuid4()
     fake_authz.grant(lakehouse_id, "viewer")
     app = create_app(authz=fake_authz)
-    transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with http_client(app) as client:
             create_response = await client.post(
                 "/api/v1/query", json=_body(lakehouse_id, "SELECT * FROM ns.orders", principal)
             )
@@ -218,7 +210,6 @@ async def test_delete_marks_a_running_query_cancelled(
 
 async def test_delete_unknown_query_id_is_404(fake_authz: FakeAuthz) -> None:
     app = create_app(authz=fake_authz)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         response = await client.delete(f"/api/v1/query/{uuid.uuid4()}")
     assert response.status_code == 404

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, event
 from sqlalchemy.ext.asyncio import (
@@ -466,6 +467,12 @@ class ApiWorld:
     # cần một người thật để gán cho — và một test tự chèn app_user rồi quên xoá sẽ
     # làm lệnh xoá user của fixture vỡ vì khoá ngoại, đúng lỗi Task 19 đã gặp.
     make_user: Callable[[str], Awaitable[uuid.UUID]]
+    # App THẬT đứng sau `client`. Lộ ra để test của Task 10/11 thay được
+    # `app.state.query_http` bằng một `httpx.MockTransport` giả `loom-query`
+    # SAU khi app đã dựng — `create_app()` không nhận `query_http=` chỗ fixture
+    # này gọi nó (mọi test khác không cần biết tới loom-query), nên đây là cách
+    # duy nhất tiêm một upstream giả mà không đổi chữ ký của fixture dùng chung.
+    app: FastAPI
 
 
 @pytest.fixture
@@ -593,7 +600,9 @@ async def api_world(
             cookies={"loom_session": "phien-hop-le"},
         ) as client:
             try:
-                yield ApiWorld(client, db_engine, ws_a, ws_b, user_id, principal, grant, make_user)
+                yield ApiWorld(
+                    client, db_engine, ws_a, ws_b, user_id, principal, grant, make_user, app
+                )
             finally:
                 async with maker() as session:
                     # Dọn audit theo ACTOR, không theo workspace: một test có thể

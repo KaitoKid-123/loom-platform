@@ -12,6 +12,10 @@ khi hàm này trả `202`. Không có `await asyncio.sleep(0)` hay `create_task`
 chen vào giữa — nếu có, một client polling đủ nhanh có thể thấy `query_id` của
 một query mà cổng quyền chưa kịp chặn.
 
+Cả ba route đều đứng sau `security.require_shared_secret` (`dependencies=` ở
+`APIRouter` bên dưới, xem docstring `security.py`) — 401 trước khi chạm bất
+kỳ dòng nào ở đây nếu thiếu/sai header bí mật chia sẻ với `loom-api`.
+
 **Nợ đã biết, ghi ra thay vì lờ đi:** `GET`/`DELETE` nhận một `query_id` (UUID
 sinh ngẫu nhiên phía server, không đoán được) nhưng KHÔNG kiểm lại principal
 nào đang gọi — chưa có khái niệm "principal nào tạo ra query nào" ngoài đúng
@@ -27,15 +31,16 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from loom_query import runner
 from loom_query.authz import AuthzPort, LakehouseResolver, run_gate
 from loom_query.config import Settings
 from loom_query.schemas import QueryCreate, QueryCreated, QueryStatusOut
+from loom_query.security import require_shared_secret
 from loom_query.store import QueryStore
 
-router = APIRouter(tags=["query"])
+router = APIRouter(tags=["query"], dependencies=[Depends(require_shared_secret)])
 
 
 @router.post("/query", response_model=QueryCreated, status_code=status.HTTP_202_ACCEPTED)

@@ -30,7 +30,6 @@ import time
 import uuid
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 
 from loom_query import runner
 from loom_query.authz import ResolvedTable
@@ -39,7 +38,7 @@ from loom_query.main import create_app
 from loom_query.store import QueryStatus, QueryStore
 from loom_sql import TableRef
 
-from ..conftest import FakeAuthz
+from ..conftest import FakeAuthz, http_client
 
 pytestmark = pytest.mark.integration
 
@@ -139,7 +138,6 @@ async def test_cancelling_an_unknown_query_id_over_http_is_404(fake_authz: FakeA
     lại ở đây để bộ test huỷ (integration) tự đứng đủ, không phải nhớ file
     khác mới đủ nghiệm thu."""
     app = create_app(authz=fake_authz)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         response = await client.delete(f"/api/v1/query/{uuid.uuid4()}")
     assert response.status_code == 404

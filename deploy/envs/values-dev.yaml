@@ -1,6 +1,9 @@
 api:
   tag: dev
   replicas: 2
+query:
+  tag: dev
+  replicas: 2
 web:
   tag: dev
   replicas: 2
@@ -18,6 +21,10 @@ oidc:
   redirectUrl: https://loom-dev.internal/api/v1/auth/callback
   # Dev là môi trường triển khai thật — không được kế thừa khoá ký công khai
   # trong values.yaml. `Settings` sẽ từ chối khởi động nếu quên (xem Task 2).
+  # PHẢI có đủ BA khoá: `oidc-client-secret`, `session-secret`, và (Task
+  # 10/11) `query-shared-secret` — thiếu khoá thứ ba làm pod `loom-api` VÀ
+  # `loom-query` đều CreateContainerConfigError (secretKeyRef không tìm thấy
+  # khoá), không phải một 401 âm thầm lúc runtime.
   existingSecret: loom-app-secrets
 storage:
   # dev/prod KHÔNG chạy MinIO trong cụm — deploy/infra/minio.yaml chỉ dành cho

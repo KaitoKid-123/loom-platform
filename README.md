@@ -96,3 +96,30 @@ phục **cả hai** database về cùng một mốc — xem `docs/runbook/restor
 - Credential gốc của MinIO ở local là hằng số trong `deploy/infra/minio.yaml`. dev/prod
   lấy từ Vault qua External Secrets.
 - Xoay credential vẫn là việc tay tới Giai đoạn 6.
+
+## Giai đoạn 2b — dịch vụ truy vấn
+
+`loom-query` (Task 6–9) chạy SQL trên bảng Iceberg sau cổng quyền của Giai đoạn 1, với
+năm giới hạn tài nguyên và huỷ query. Task 10/11 nối nó vào hệ thống thật:
+
+- `loom-api` chuyển tiếp `/api/v1/query*` sang `loom-query` — trình duyệt chỉ nói chuyện
+  với `loom-api`, đúng lời hứa MỘT mặt xác thực của Giai đoạn 1. `workspace_id` do
+  `loom-api` tự tra từ `lakehouse_id` (nó có database); giá trị client gửi kèm LUÔN bị
+  bỏ qua.
+- `loom-query` triển khai như một Deployment/Service ClusterIP riêng, KHÔNG qua ingress.
+- Một bí mật chia sẻ qua header (`X-Loom-Query-Secret`) giữa hai service, thay cho việc
+  `loom-query` tin thẳng principal trong thân request của bất kỳ pod nào gọi tới nó.
+
+### Nợ đã biết sau Giai đoạn 2b
+
+- **Bí mật chia sẻ qua header KHÔNG chống được một pod đọc được chính Secret Kubernetes
+  đó.** Nó chỉ chứng minh request tới từ một nguồn CÓ bí mật — không phân biệt được
+  `loom-api` thật với một pod khác trong namespace vô tình (hay cố ý) đọc được cùng
+  Secret (ví dụ qua một lỗ RBAC cho phép `get`/`list` Secret). Chống điều đó cần ký lên
+  chính principal (chữ ký, không phải một bí mật tĩnh dùng lại cho mọi request) hoặc
+  mTLS giữa hai service — để dành cho Giai đoạn 6.
+- `GET`/`DELETE /api/v1/query/{id}` không kiểm "principal nào tạo ra query nào", chỉ dựa
+  vào `query_id` là UUID không đoán được (xem docstring `loom_query.routers.query`) — đủ
+  cho phạm vi hiện tại nhưng không phải bất biến vĩnh viễn.
+- `loom-query` không có `devReload`/`live_update` trong Tiltfile — sửa mã nguồn build lại
+  ảnh đầy đủ, khác `loom-api`.

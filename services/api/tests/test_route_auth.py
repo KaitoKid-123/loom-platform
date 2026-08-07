@@ -140,6 +140,7 @@ async def test_api_docs_are_local_only(
         # Settings từ chối secret mặc định ngoài local, nên phải cấp giá trị thật.
         monkeypatch.setenv("LOOM_SESSION_SECRET", "x" * 48)
         monkeypatch.setenv("LOOM_OIDC_CLIENT_SECRET", "y" * 48)
+        monkeypatch.setenv("LOOM_QUERY_SHARED_SECRET", "z" * 48)
     get_settings.cache_clear()
 
     app = create_app()

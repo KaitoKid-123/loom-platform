@@ -26,14 +26,13 @@ from typing import Any
 
 import pytest
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
 
 from loom_core.schemas import Principal
 from loom_iceberg import Lakehouse, build_catalog
 from loom_query.config import Settings
 from loom_query.main import create_app
 
-from ..conftest import FakeAuthz
+from ..conftest import FakeAuthz, http_client
 
 # `fake_authz`/`principal` (tests/conftest.py) và `app_settings`/`seeded_table`/
 # `lakehouse_id`/`lakekeeper`/`s3_endpoint`/`warehouse_name` (tests/integration/
@@ -62,8 +61,7 @@ def _body(lakehouse_id: uuid.UUID, sql: str, principal: Principal) -> dict[str, 
 async def _run_and_wait(
     app: FastAPI, lakehouse_id: uuid.UUID, sql: str, principal: Principal
 ) -> dict[str, Any]:
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         create_response = await client.post(
             "/api/v1/query", json=_body(lakehouse_id, sql, principal)
         )

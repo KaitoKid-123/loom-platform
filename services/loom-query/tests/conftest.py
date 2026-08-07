@@ -10,9 +10,13 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
+from loom_core.internal_auth import QUERY_SHARED_SECRET_HEADER
 from loom_core.schemas import Principal
 from loom_query.authz import AuthzPort, LakehouseResolver
+from loom_query.config import Settings
 
 
 class FakeAuthz:
@@ -84,6 +88,30 @@ def fake_authz() -> FakeAuthz:
 @pytest.fixture
 def principal() -> Principal:
     return a_principal()
+
+
+# Giá trị mặc định của `Settings.shared_secret` khi `environment="local"` —
+# mặc định của mọi test dưới đây, không test nào tự đặt `LOOM_QUERY_
+# ENVIRONMENT`. Đọc lại từ `Settings()` thay vì chép chuỗi tay: nếu giá trị
+# mặc định đó đổi, hằng số này đổi theo mà không ai phải nhớ sửa hai chỗ.
+DEFAULT_TEST_SHARED_SECRET = Settings().shared_secret
+
+
+def http_client(app: FastAPI) -> AsyncClient:
+    """`AsyncClient` sẵn header bí mật chia sẻ mà MỌI route của `loom-query`
+    giờ đòi hỏi (Task 10/11, xem `security.require_shared_secret`).
+
+    Dùng hàm này thay vì tự dựng `AsyncClient(transport=ASGITransport(app=app),
+    ...)` ở từng test: một lần đổi tên header hay giá trị mặc định của
+    `shared_secret` thì chỉ có MỘT chỗ phải sửa, không phải mọi file test.
+    `tests/test_query_shared_secret.py` là nơi kiểm CHÍNH bản thân phép kiểm
+    header — test khác chỉ cần "vượt qua" nó để kiểm đúng thứ chúng đang kiểm.
+    """
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={QUERY_SHARED_SECRET_HEADER: DEFAULT_TEST_SHARED_SECRET},
+    )
 
 
 # Xác nhận tĩnh (đọc lúc import module test, không phải một test riêng) rằng

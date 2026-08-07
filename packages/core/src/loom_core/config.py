@@ -8,6 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _INSECURE_DEFAULTS = {
     "session_secret": "dev-only-do-not-use-in-production",
     "oidc_client_secret": "loom-dev-secret",
+    "query_shared_secret": "dev-only-do-not-use-in-production",
 }
 
 
@@ -53,7 +54,22 @@ class Settings(BaseSettings):
 
     public_base_url: str = "http://loom.localhost"
 
-    @field_validator("public_base_url", "oidc_issuer", "oidc_internal_base")
+    # `loom-query` (Task 10/11) — chuyển tiếp `/api/v1/query*` sang service này.
+    # Namespace "loom" viết cứng, cùng quy ước với `oidc_internal_base` ở trên
+    # và `storage.endpoint`/`lakekeeper` bên `deploy/helm/loom/values.yaml`: chart
+    # cố tình bỏ qua `.Release.Name` khi đặt tên service (xem `_helpers.tpl`
+    # `loom.fullname`), nên DNS nội bộ luôn cố định là `<service>.loom.svc.
+    # cluster.local` bất kể tên release.
+    query_base_url: str = "http://loom-query.loom.svc.cluster.local:8000/api/v1"
+    # Bí mật chia sẻ qua header `X-Loom-Query-Secret` (xem `loom_core.
+    # internal_auth`) — chứng minh với `loom-query` rằng request tới TỪ
+    # loom-api, không phải từ một pod bất kỳ trong namespace tự xưng principal
+    # bất kỳ. Cùng khuôn `session_secret`: mặc định KHÔNG an toàn, và
+    # `_reject_default_secrets_outside_local` dưới đây từ chối khởi động nếu
+    # nó còn là mặc định khi `environment != "local"`.
+    query_shared_secret: str = "dev-only-do-not-use-in-production"  # noqa: S105
+
+    @field_validator("public_base_url", "oidc_issuer", "oidc_internal_base", "query_base_url")
     @classmethod
     def _strip_trailing_slash(cls, value: str | None) -> str | None:
         """Một dấu / thừa ở cuối làm hỏng phép kiểm biên trong _to_internal:

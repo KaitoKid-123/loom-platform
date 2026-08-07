@@ -15,6 +15,7 @@ def test_settings_reads_prefixed_env(monkeypatch) -> None:
     monkeypatch.setenv("LOOM_ENVIRONMENT", "dev")
     monkeypatch.setenv("LOOM_SESSION_SECRET", "real-secret")
     monkeypatch.setenv("LOOM_OIDC_CLIENT_SECRET", "real-client-secret")
+    monkeypatch.setenv("LOOM_QUERY_SHARED_SECRET", "real-query-secret")
     monkeypatch.setenv("LOOM_DB_PASSWORD", "s3cr3t")
     monkeypatch.setenv("LOOM_DB_PORT", "6543")
     settings = Settings()
@@ -29,9 +30,22 @@ def test_default_secrets_rejected_outside_local(monkeypatch) -> None:
         Settings()
 
 
+def test_default_query_shared_secret_rejected_outside_local(monkeypatch) -> None:
+    """`query_shared_secret` (Task 10/11) suit CÙNG khuôn `session_secret` —
+    một field mới thêm vào `_INSECURE_DEFAULTS` mà quên set biến môi trường
+    tương ứng ở dev/prod phải chặn khởi động, không phải một 401 âm thầm ở
+    lần request đầu tiên chạm `loom-query`."""
+    monkeypatch.setenv("LOOM_ENVIRONMENT", "prod")
+    monkeypatch.setenv("LOOM_SESSION_SECRET", "real-secret")
+    monkeypatch.setenv("LOOM_OIDC_CLIENT_SECRET", "real-client-secret")
+    with pytest.raises(ValidationError, match="query_shared_secret"):
+        Settings()
+
+
 def test_default_secrets_allowed_in_local() -> None:
     settings = Settings(environment="local")
     assert settings.session_secret == "dev-only-do-not-use-in-production"
+    assert settings.query_shared_secret == "dev-only-do-not-use-in-production"
 
 
 def test_public_base_url_trailing_slash_is_stripped() -> None:
@@ -69,10 +83,21 @@ def test_oidc_internal_base_none_is_left_as_none() -> None:
     assert settings.oidc_internal_base is None
 
 
+def test_query_base_url_trailing_slash_is_stripped() -> None:
+    settings = Settings(query_base_url="http://loom-query.loom.svc.cluster.local:8000/api/v1/")
+    assert settings.query_base_url == "http://loom-query.loom.svc.cluster.local:8000/api/v1"
+
+
+def test_query_base_url_without_trailing_slash_is_unchanged() -> None:
+    settings = Settings(query_base_url="http://loom-query.loom.svc.cluster.local:8000/api/v1")
+    assert settings.query_base_url == "http://loom-query.loom.svc.cluster.local:8000/api/v1"
+
+
 def test_get_settings_is_cached(monkeypatch) -> None:
     get_settings.cache_clear()
     monkeypatch.setenv("LOOM_SESSION_SECRET", "real-secret")
     monkeypatch.setenv("LOOM_OIDC_CLIENT_SECRET", "real-client-secret")
+    monkeypatch.setenv("LOOM_QUERY_SHARED_SECRET", "real-query-secret")
     monkeypatch.setenv("LOOM_ENVIRONMENT", "one")
     first = get_settings()
     monkeypatch.setenv("LOOM_ENVIRONMENT", "two")

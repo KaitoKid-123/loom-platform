@@ -18,6 +18,7 @@ from loom_api.routers import (
     health,
     internal,
     items,
+    query,
     roles,
     search,
     workspaces,
@@ -32,16 +33,19 @@ def create_app(
     database: Database | None = None,
     user_store: UserStore | None = None,
     oidc_http: httpx.AsyncClient | None = None,
+    query_http: httpx.AsyncClient | None = None,
     verify_id_token: VerifyIdToken | None = None,
 ) -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    # Cùng quy tắc sở hữu đã trả giá ở Task 5, giờ áp cho HAI tài nguyên:
-    # chỉ đóng thứ mình tạo ra. Fixture test của chính task này tiêm oidc_http
-    # vào, nên đóng vô điều kiện là đóng client của người khác.
+    # Cùng quy tắc sở hữu đã trả giá ở Task 5, giờ áp cho BA tài nguyên: chỉ
+    # đóng thứ mình tạo ra. Fixture test tiêm oidc_http/query_http vào (một
+    # httpx.MockTransport giả loom-query, xem `tests/test_query_proxy.py`),
+    # nên đóng vô điều kiện là đóng client của người khác.
     owns_db = database is None
     owns_http = oidc_http is None
+    owns_query_http = query_http is None
 
     db = database or Database(
         build_sqlalchemy_url(settings),
@@ -49,6 +53,10 @@ def create_app(
         max_overflow=settings.db_max_overflow,
     )
     http = oidc_http or httpx.AsyncClient()
+    # Client RIÊNG cho loom-query, tách khỏi `http` (dùng cho OIDC): test của
+    # đường này cần mock ĐÚNG MỘT upstream (loom-query) mà không kéo theo yêu
+    # cầu giả lập luôn Dex trên cùng client, và ngược lại.
+    query_client = query_http or httpx.AsyncClient()
     oidc_client = OIDCClient(settings, http)
     store = user_store or PostgresUserStore(db, settings.session_ttl_hours)
 
@@ -65,6 +73,8 @@ def create_app(
         yield
         if owns_http:
             await http.aclose()
+        if owns_query_http:
+            await query_client.aclose()
         if owns_db:
             await db.dispose()
 
@@ -90,6 +100,7 @@ def create_app(
     app.state.oidc_client = oidc_client
     app.state.user_store = store
     app.state.verify_id_token = verify_id_token
+    app.state.query_http = query_client
 
     # Phải là lệnh add_middleware() CUỐI CÙNG. Starlette bọc middleware theo thứ
     # tự đăng ký đảo ngược, nên cái thêm sau cùng chạy ngoài cùng — vào trước
@@ -102,6 +113,7 @@ def create_app(
     app.include_router(domains.router, prefix="/api/v1")
     app.include_router(workspaces.router, prefix="/api/v1")
     app.include_router(items.router, prefix="/api/v1")
+    app.include_router(query.router, prefix="/api/v1")
     app.include_router(roles.router, prefix="/api/v1")
     app.include_router(search.router, prefix="/api/v1")
     app.include_router(audit.router, prefix="/api/v1")

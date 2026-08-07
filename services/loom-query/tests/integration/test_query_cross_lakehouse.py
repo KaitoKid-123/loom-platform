@@ -26,14 +26,13 @@ from typing import Any
 
 import pyarrow as pa
 import pytest
-from httpx import ASGITransport, AsyncClient
 
 from loom_core.schemas import Principal
 from loom_iceberg import Lakehouse, build_catalog, create_warehouse
 from loom_query.config import Settings
 from loom_query.main import create_app
 
-from ..conftest import FakeAuthz, a_principal
+from ..conftest import FakeAuthz, a_principal, http_client
 from .conftest import ROOT_PASSWORD, ROOT_USER
 
 pytestmark = pytest.mark.integration
@@ -124,13 +123,12 @@ async def test_join_across_two_lakehouses_returns_the_correct_side_for_each(
 
     settings = Settings(catalog_uri=f"{lakekeeper}/catalog", s3_endpoint=s3_endpoint)
     app = create_app(settings=settings, authz=fake_authz)
-    transport = ASGITransport(app=app)
     sql = (
         "SELECT a.id AS id, a.label AS a_label, r.label AS b_label "
         "FROM finance.reports a JOIN b.finance.reports r ON a.id = r.id "
         "ORDER BY a.id"
     )
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         create_response = await client.post(
             "/api/v1/query", json=_body(lakehouse_a, workspace_id, sql, principal)
         )

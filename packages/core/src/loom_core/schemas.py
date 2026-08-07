@@ -295,6 +295,34 @@ class LakehouseResolveRequest(BaseModel):
     names: list[str]
 
 
+class QuerySubmitRequest(BaseModel):
+    """Body của `POST /api/v1/query` — cổng `loom-api` PHÍA TRÌNH DUYỆT
+    (Task 10/11, xem `loom_api.routers.query`).
+
+    Khác `loom-query`'s bản thân của nó (một schema RIÊNG, nội bộ, không phải
+    kiểu này — xem docstring `loom_query.schemas.QueryCreate`): request NÀY
+    không có `principal`. `loom-api` tự đọc principal từ cookie phiên
+    (`PrincipalDep`) — trình duyệt không tự khai được danh tính của chính nó
+    ở tầng này, đúng lời hứa của Giai đoạn 1 (một mặt xác thực DUY NHẤT).
+
+    `workspace_id` CÓ MẶT nhưng LUÔN bị bỏ qua: `loom-api` tự tra
+    `lakehouse_id` (một `Item` loại `lakehouse`) thuộc workspace nào rồi điền
+    giá trị THẬT khi chuyển tiếp sang `loom-query` — không bao giờ dùng giá
+    trị người gọi tự khai ở đây. Trường vẫn được khai (không bị `extra=
+    "forbid"` chặn) để một client gửi kèm nó không ăn 422 vô nghĩa; giữ nó lại
+    dưới dạng "được chấp nhận nhưng bị phớt lờ" là cố ý, KHÔNG phải sót — xem
+    docstring `routers/query.py` cho lý do tin giá trị này là một lỗ hổng
+    (client gửi `workspace_id` của workspace KHÁC thì phân giải tên bảng ba
+    phần sẽ chạy sai phạm vi).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lakehouse_id: uuid.UUID
+    sql: str
+    workspace_id: uuid.UUID | None = None
+
+
 class LakehouseResolveResponse(BaseModel):
     """`ids[ten]` là `None` cho tên không tồn tại HOẶC chỉ tồn tại ở trạng thái
     khác `active` — endpoint này không phân biệt hai lý do đó với nhau, cùng

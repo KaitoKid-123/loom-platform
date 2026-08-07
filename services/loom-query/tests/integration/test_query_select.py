@@ -14,13 +14,12 @@ import uuid
 from typing import Any
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 
 from loom_core.schemas import Principal
 from loom_query.config import Settings
 from loom_query.main import create_app
 
-from ..conftest import FakeAuthz
+from ..conftest import FakeAuthz, http_client
 
 # `fake_authz`/`principal` (tests/conftest.py) và `app_settings`/
 # `seeded_table`/`lakehouse_id` (tests/integration/conftest.py) là fixture,
@@ -58,8 +57,7 @@ async def test_select_over_http_returns_rows_from_a_real_iceberg_table(
     fake_authz.grant(lakehouse_id, "viewer")
 
     app = create_app(settings=app_settings, authz=fake_authz)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         create_response = await client.post(
             "/api/v1/query",
             json=_body(lakehouse_id, "SELECT id, amount FROM sales.orders ORDER BY id", principal),
@@ -94,8 +92,7 @@ async def test_a_table_outside_the_granted_lakehouse_is_forbidden(
     THẬT với tới được, câu trả lời vẫn phải là 403, và phải tới NGAY trong
     response của chính `POST` (không cần polling `GET`)."""
     app = create_app(settings=app_settings, authz=fake_authz)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with http_client(app) as client:
         response = await client.post(
             "/api/v1/query",
             json=_body(lakehouse_id, "SELECT id, amount FROM sales.orders", principal),

@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "loom.fullname" . }}-query
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loom.labels" . | nindent 4 }}
+    app.kubernetes.io/component: query
+spec:
+  # ClusterIP, KHÔNG ingress (xem `ingress.yaml`: chỉ hai path, `/api` và `/`).
+  # `loom-query` nhận principal của người dùng cuối ngay trong thân request và
+  # KHÔNG tự xác thực ai (xem docstring `loom_query.main`) — lộ nó qua ingress
+  # là mở một đường vào bỏ qua toàn bộ cookie phiên/RBAC của `loom-api`.
+  # `loom-api` (`routers/query.py`) là đường DUY NHẤT một request từ trình
+  # duyệt được phép chạm tới nó.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "loom.name" . }}
+    app.kubernetes.io/component: query
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

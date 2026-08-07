@@ -57,6 +57,14 @@ spec:
               value: {{ .Values.app.cookieSecure | quote }}
             - name: LOOM_SESSION_TTL_HOURS
               value: {{ .Values.app.sessionTtlHours | quote }}
+            # Đích chuyển tiếp `/api/v1/query*` (Task 10/11, xem `routers/
+            # query.py`) — cùng namespace "loom" viết cứng như mọi DNS nội bộ
+            # khác trong chart (xem comment ở `query-deployment.yaml`). GHI
+            # TƯỜNG MINH thay vì dựa vào mặc định trong `loom_core.config.
+            # Settings`: mặc định đó chỉ là placeholder cho test chạy ngoài
+            # cụm, không phải nguồn thật cho một pod triển khai.
+            - name: LOOM_QUERY_BASE_URL
+              value: "http://{{ include "loom.fullname" . }}-query.{{ .Release.Namespace }}.svc.cluster.local:8000/api/v1"
             - name: LOOM_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -67,6 +75,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "loom.appSecretName" . }}
                   key: session-secret
+            # Bí mật chia sẻ với loom-query qua header (Task 10/11) — CÙNG khoá
+            # Secret mà `query-deployment.yaml` đọc, xem `loom_core.internal_auth`.
+            - name: LOOM_QUERY_SHARED_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loom.appSecretName" . }}
+                  key: query-shared-secret
           # Cold start đo được 1.8s khi rảnh nhưng tới 35s khi CPU bị tranh chấp
           # (k3d + Dex + Tilt + docker build cùng chạy). Postgres không còn
           # chạy trong cụm (Aiven quản lý) nên không còn góp phần tranh chấp.
