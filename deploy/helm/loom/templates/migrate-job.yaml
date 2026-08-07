@@ -3,6 +3,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "loom.fullname" . }}-migrate
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "loom.labels" . | nindent 4 }}
   annotations:

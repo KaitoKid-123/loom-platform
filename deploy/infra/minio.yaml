@@ -1,0 +1,177 @@
+# MinIO — object storage cho lakehouse, CHỈ Ở LOCAL.
+#
+# Nằm ở deploy/infra/ chứ không trong Helm chart, cùng lý do với Dex: đây là hạ
+# tầng của môi trường, không phải một thành phần của ứng dụng. Chủ dự án dự định
+# chuyển MinIO sang một VPS riêng (spec Giai đoạn 2 mục 2.0), lúc đó file này
+# không còn được apply và chart chỉ đổi `storage.endpoint`.
+#
+# Ngân sách RAM: cụm có trần 1,8 GB và đang dùng ~880 MiB. Limit 320Mi ở dưới là
+# ~250 MiB đo được cộng biên. KHÔNG nâng nó lên mà không đo lại tổng (Task 14).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-root
+  namespace: loom
+type: Opaque
+stringData:
+  # CHỈ LOCAL. Đây là credential GỐC — nó có toàn quyền, và chính nó là thứ
+  # `MinioStsProvider` dùng để gọi AssumeRole rồi thu hẹp lại theo từng workspace.
+  # Ở dev/prod, Secret này do External Secrets đồng bộ từ Vault (xem
+  # deploy/infra/external-secret.yaml), KHÔNG phải file này.
+  root-user: loom-root
+  root-password: loom-root-dev-only
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: loom
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      # Phép đo 2 ở Giai đoạn 2c cần 50–100 GB. 20Gi đủ cho 2a và 2b; nâng khi
+      # tới đó, sau khi kiểm đĩa trống trên máy.
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: loom
+  labels: { app: minio }
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, KHÔNG RollingUpdate: PVC là ReadWriteOnce nên pod mới không mount
+    # được volume khi pod cũ còn giữ. RollingUpdate sẽ treo ở ContainerCreating
+    # cho tới khi hết timeout, và thông báo lỗi không hề nói về accessMode.
+    #
+    # KHÔNG có preStop/terminationGracePeriodSeconds như api và web, và đó là chủ
+    # đích: cơ chế đó vá cửa sổ pod-cũ-và-mới-cùng-nhận-traffic của RollingUpdate,
+    # mà `Recreate` ở dưới không có cửa sổ đó. Khách của MinIO là SDK S3 phía
+    # backend, tự retry lỗi kết nối tạm thời — khác traffic trình duyệt qua Traefik.
+    type: Recreate
+  selector:
+    matchLabels: { app: minio }
+  template:
+    metadata:
+      labels: { app: minio }
+    spec:
+      securityContext:
+        # ĐỌC KỸ TRƯỚC KHI SỬA — chỗ này đã tốn một lần CrashLoopBackOff.
+        #
+        # `fsGroup` ở đây gần như KHÔNG làm gì trên cụm local, và đừng tin ngược
+        # lại: k3d dùng provisioner `local-path` của Rancher, sinh ra PV kiểu
+        # `Local`. Kubelet KHÔNG chown đệ quy cho PV kiểu `Local` (cùng khoảng
+        # trống đã biết với `hostPath`) — nên `fsGroup` không đổi quyền của thư
+        # mục sẵn có.
+        #
+        # Thứ THẬT SỰ làm uid 1000 ghi được là script cấp phát của provisioner:
+        # nó `mkdir -m 0777` khi tạo volume MỚI. Hệ quả trực tiếp:
+        #
+        #   - Cụm dựng từ số không (Task 14) → volume mới, 0777, chạy tốt.
+        #   - Cụm ĐANG CÓ với volume đã dùng khi MinIO còn chạy bằng root →
+        #     thư mục con thuộc root, pod chết ngay:
+        #     "FATAL Unable to initialize backend: Unable to write to the backend"
+        #
+        # Gặp trường hợp thứ hai thì xoá PVC cho nó cấp phát lại, KHÔNG phải gỡ
+        # hardening (reclaimPolicy là Delete nên dữ liệu trong đó mất — ở local
+        # chấp nhận được, trên VPS thì không):
+        #
+        #     kubectl -n loom delete pvc minio-data
+        #     make infra
+        #
+        # Giữ `fsGroup` vì nó ĐÚNG với storage class thật (VPS, CSI driver) — chỉ
+        # là nó không phải lý do mọi thứ chạy được ở local.
+        fsGroup: 1000
+      containers:
+        - name: minio
+          image: ${MINIO_IMAGE}
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: minio-root, key: root-user } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: minio-root, key: root-password } }
+          ports:
+            - { containerPort: 9000, name: s3 }
+            - { containerPort: 9001, name: console }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 320Mi }
+          securityContext:
+            # Đã kiểm với đúng image pin: MinIO khởi động sạch dưới uid 1000 với
+            # rootfs read-only. `/data` là PVC nên vẫn ghi được, và MinIO không
+            # cần ghi vào chỗ nào khác.
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: 9000 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: minio-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: loom
+spec:
+  selector: { app: minio }
+  ports:
+    - { name: s3, port: 9000, targetPort: 9000 }
+    - { name: console, port: 9001, targetPort: 9001 }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-bucket
+  namespace: loom
+spec:
+  # Job bất biến ở spec.template, và `make infra` chạy được nhiều lần. Không có
+  # ttl thì lần apply thứ hai đỏ với "field is immutable". ttl 60s để Job tự dọn.
+  ttlSecondsAfterFinished: 60
+  backoffLimit: 10
+  # Vòng `until` bên dưới nuốt mọi lỗi kết nối, nên `backoffLimit` KHÔNG cứu được
+  # trường hợp MinIO không bao giờ Ready — Job sẽ lặp mãi mãi. Deadline là thứ
+  # duy nhất biến "treo" thành "hỏng", và chỉ khi hỏng thì `kubectl wait` trong
+  # `make infra` mới có gì để bắt.
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: ${MINIO_MC_IMAGE}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              until mc alias set loom http://minio:9000 "$ROOT_USER" "$ROOT_PASSWORD"; do
+                echo "chờ MinIO..."; sleep 2
+              done
+              mc mb --ignore-existing loom/loom-local
+              echo "bucket loom-local sẵn sàng"
+          env:
+            - name: ROOT_USER
+              valueFrom: { secretKeyRef: { name: minio-root, key: root-user } }
+            - name: ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: minio-root, key: root-password } }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }

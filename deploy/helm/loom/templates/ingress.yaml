@@ -3,6 +3,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "loom.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "loom.labels" . | nindent 4 }}
 spec:

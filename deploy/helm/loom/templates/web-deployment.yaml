@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "loom.fullname" . }}-web
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "loom.labels" . | nindent 4 }}
     app.kubernetes.io/component: web

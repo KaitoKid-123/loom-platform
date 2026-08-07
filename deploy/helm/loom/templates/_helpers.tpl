@@ -80,3 +80,58 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   mountPath: /etc/loom/db-ca
   readOnly: true
 {{- end -}}
+
+{{/* Biến môi trường dùng chung cho initContainer `migrate` VÀ container `lakekeeper`
+   của lakekeeper-deployment.yaml. Định nghĩa MỘT LẦN ở đây, cố ý: initContainer và
+   container phải trỏ vào đúng CÙNG một database, và một helper chung là cách duy
+   nhất để hai chỗ không thể lệch nhau khi ai đó sửa một bên mà quên bên kia. Xem
+   lakekeeper-deployment.yaml về vì sao migrate là initContainer, không phải Job. */}}
+{{- define "loom.lakekeeperEnv" -}}
+- name: LAKEKEEPER__PG_HOST_R
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.existingSecret }}
+      key: {{ .Values.database.hostKey }}
+- name: LAKEKEEPER__PG_HOST_W
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.existingSecret }}
+      key: {{ .Values.database.hostKey }}
+- name: LAKEKEEPER__PG_PORT
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.existingSecret }}
+      key: {{ .Values.database.portKey }}
+- name: LAKEKEEPER__PG_USER
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.existingSecret }}
+      key: {{ .Values.database.usernameKey }}
+- name: LAKEKEEPER__PG_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.existingSecret }}
+      key: {{ .Values.database.passwordKey }}
+# database RIÊNG của Lakekeeper trên cùng Aiven service — key khác với
+# database.nameKey mà api/migrate dùng. Xem values.yaml: database.lakekeeperNameKey.
+- name: LAKEKEEPER__PG_DATABASE
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.database.existingSecret }}
+      key: {{ .Values.database.lakekeeperNameKey }}
+# Aiven đi qua Internet công cộng, TLS bắt buộc.
+- name: LAKEKEEPER__PG_SSL_MODE
+  value: "require"
+{{- if .Values.lakekeeper.encryptionSecret }}
+- name: LAKEKEEPER__PG_ENCRYPTION_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.lakekeeper.encryptionSecret }}
+      key: encryption-key
+{{- else }}
+- name: LAKEKEEPER__PG_ENCRYPTION_KEY
+  value: {{ .Values.lakekeeper.encryptionKeyLocal | quote }}
+{{- end }}
+- name: LAKEKEEPER__LISTEN_PORT
+  value: "8181"
+{{- end -}}

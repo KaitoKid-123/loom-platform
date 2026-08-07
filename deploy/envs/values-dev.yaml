@@ -19,3 +19,12 @@ oidc:
   # Dev là môi trường triển khai thật — không được kế thừa khoá ký công khai
   # trong values.yaml. `Settings` sẽ từ chối khởi động nếu quên (xem Task 2).
   existingSecret: loom-app-secrets
+storage:
+  # dev/prod KHÔNG chạy MinIO trong cụm — deploy/infra/minio.yaml chỉ dành cho
+  # local. Điền endpoint thật khi dựng VPS; tới lúc đó chưa có mặt phẳng dữ liệu.
+  endpoint: ""
+  bucket: loom-dev
+lakekeeper:
+  # CỐ Ý tắt, và tạm thời: chưa có endpoint storage thì một Lakekeeper chạy được
+  # cũng không catalog được gì. Bật cùng lúc với VPS.
+  enabled: false

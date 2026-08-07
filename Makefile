@@ -43,7 +43,9 @@ test:  ## Unit test (không cần Docker)
 
 .PHONY: test-int
 test-int:  ## Integration test (cần Docker)
-	uv run pytest -m integration -o addopts=""
+	@# `not benchmark`: phép đo mất vài phút và không khẳng định gì — nó thuộc
+	@# `make measure-scan`, không thuộc cổng kiểm chạy mỗi lần push.
+	uv run pytest -m "integration and not benchmark" -o addopts=""
 
 .PHONY: check-context
 check-context:  ## Chặn mọi lệnh kubectl chạy nhầm vào cụm khác
@@ -154,6 +156,48 @@ helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
 	| kubeconform -strict -summary \
 		-kubernetes-version $(KUBECONFORM_K8S_VERSION)
 
+	@echo "→ infra/minio.yaml"
+	@# Cùng lý do với dex.yaml: kiểm bản ĐÃ render, vì bản thô có `image:
+	@# $${MINIO_IMAGE}` cũng hợp lệ với kubeconform nên kiểm nó không nói lên gì.
+	@set -eo pipefail; \
+	MINIO_IMAGE="$(MINIO_IMAGE)" MINIO_MC_IMAGE="$(MINIO_MC_IMAGE)" \
+	envsubst '$$MINIO_IMAGE $$MINIO_MC_IMAGE' < deploy/infra/minio.yaml \
+	| kubeconform -strict -summary \
+		-kubernetes-version $(KUBECONFORM_K8S_VERSION)
+
+	@echo "→ lakekeeper: initContainer và container phải cùng database"
+	@# helm lint và kubeconform đều KHÔNG thấy được lỗi này, mà nó là lỗi tệ nhất
+	@# có thể xảy ra: initContainer `migrate` trỏ nhầm sang database của control
+	@# plane sẽ chạy migration của Lakekeeper lên schema của loom-api.
+	@set -eo pipefail; \
+	keys=$$(helm template loom deploy/helm/loom -n $(NS) \
+		-f deploy/envs/values-local.yaml \
+		| grep -A4 'name: LAKEKEEPER__PG_DATABASE' \
+		| grep 'key:' | awk '{print $$2}' | sort -u); \
+	nkeys=$$(echo "$$keys" | grep -c .); \
+	test "$$nkeys" -eq 1 || { \
+		echo "initContainer và container trỏ KHÁC database: $$keys"; exit 1; }; \
+	want=$$(grep 'lakekeeperNameKey:' deploy/helm/loom/values.yaml | awk '{print $$2}'); \
+	test "$$keys" = "$$want" || { \
+		echo "khoá database sai: dùng '$$keys', values.yaml khai '$$want'"; exit 1; }; \
+	echo "  cả hai dùng khoá $$keys"
+
+	@echo "→ chart: mọi tài nguyên phải tự khai namespace"
+	@# `kubectl apply -f <ban render>` đặt tài nguyên KHÔNG khai namespace vào
+	@# namespace mặc định của context. Tilt và ArgoCD đều tự tiêm namespace nên
+	@# khoảng trống này im lặng — cho tới khi ai đó apply tay và mọi thứ lặng lẽ
+	@# vào `default`. Đã dính đúng thế một lần ở Task 14.
+	@set -eo pipefail; \
+	missing=$$(helm template loom deploy/helm/loom -n $(NS) \
+		-f deploy/envs/values-local.yaml \
+		| awk '/^kind:/{k=$$2} /^  name:/{n=$$2; has=0} \
+		       /^  namespace:/{has=1} \
+		       /^---$$/{if(k && !has) print k" "n; k=""; n=""; has=0} \
+		       END{if(k && !has) print k" "n}'); \
+	test -z "$$missing" || { \
+		echo "thiếu namespace: $$missing"; exit 1; }; \
+	echo "  mọi tài nguyên đều khai namespace"
+
 	@echo "→ argocd/"
 	@# ArgoCD Application là CRD nên không có trong catalog mặc định của
 	@# kubeconform. Cách thường thấy là thêm -ignore-missing-schemas, nhưng thế
@@ -201,7 +245,7 @@ cluster-down:  ## Xoá cụm k3d
 	k3d cluster delete $(CLUSTER)
 
 .PHONY: infra
-infra: check-context  ## Cài Dex (local — không có ESO). KHÔNG kèm Secret Aiven
+infra: check-context  ## Cài Dex + MinIO (local — không có ESO). KHÔNG kèm Secret Aiven
 	@# Dex dùng config tĩnh của chính nó, không đụng database. Gộp Secret Aiven
 	@# vào đây sẽ khiến không dựng nổi tầng đăng nhập chỉ vì chưa có credential.
 	@# `make dev` (Task 16) mới là chỗ phụ thuộc cả hai.
@@ -217,12 +261,35 @@ infra: check-context  ## Cài Dex (local — không có ESO). KHÔNG kèm Secret
 	@# biến hợp lệ nên envsubst bỏ qua. Đã kiểm: bản có và không có giới hạn
 	@# cho ra kết quả giống hệt nhau. Giữ giới hạn vì nó phòng tương lai.)
 	DEX_IMAGE="$(DEX_IMAGE)" envsubst '$$DEX_IMAGE' < deploy/infra/dex.yaml | kubectl apply -f -
+	@# MinIO CHỈ ở local — dev/prod trỏ endpoint ngoài (VPS), xem spec GĐ 2 mục 2.0.
+	MINIO_IMAGE="$(MINIO_IMAGE)" MINIO_MC_IMAGE="$(MINIO_MC_IMAGE)" \
+	envsubst '$$MINIO_IMAGE $$MINIO_MC_IMAGE' < deploy/infra/minio.yaml | kubectl apply -f -
+	kubectl -n $(NS) rollout status deployment/minio --timeout=180s
+	@# Chờ Job, không chỉ chờ Deployment. Không có dòng này thì `make infra` báo
+	@# thành công kể cả khi bucket chưa từng được tạo, và lỗi chỉ lộ ra ở Task 6
+	@# dưới dạng một 404 không nói gì về nguyên nhân. Đã chứng minh đỏ được: trỏ
+	@# Job vào một host không tồn tại thì target này thoát Error 1.
+	@#
+	@# `--for=condition=complete` KHÔNG thoát sớm khi Job chuyển sang Failed — nó
+	@# chờ hết timeout. Đường thành công vẫn trả về ngay, chỉ đường hỏng mới chậm,
+	@# nên đổi lấy sự đơn giản là đáng.
+	kubectl -n $(NS) wait --for=condition=complete job/minio-bucket --timeout=300s
 	@# Dex đọc config.yaml MỘT LẦN lúc khởi động. Sửa ConfigMap thôi thì `kubectl
 	@# apply` báo "configmap configured / deployment unchanged", `rollout status`
 	@# báo thành công, và Dex vẫn chạy cấu hình cũ — target nói "đã áp" trong khi
 	@# thực tế chưa. Restart vô điều kiện để "đã áp" nghĩa là "đang chạy".
 	kubectl -n $(NS) rollout restart deployment/dex
 	kubectl -n $(NS) rollout status deployment/dex --timeout=180s
+
+.PHONY: minio-console
+minio-console: check-context  ## Mở console MinIO ở http://localhost:9001
+	@echo "Console: http://localhost:9001  —  loom-root / loom-root-dev-only"
+	kubectl -n $(NS) port-forward svc/minio 9001:9001
+
+.PHONY: minio-s3
+minio-s3: check-context  ## Port-forward cổng S3 của MinIO ra localhost:9000
+	@echo "S3: http://localhost:9000  —  loom-root / loom-root-dev-only"
+	kubectl -n $(NS) port-forward svc/minio 9000:9000
 
 .PHONY: infra-eso
 infra-eso:  ## CHỈ dev/prod: ESO + ExternalSecret. Bắt buộc: make infra-eso CONTEXT=...
@@ -293,3 +360,63 @@ lint-shell:  ## shellcheck cho mọi script shell trong repo
 	@command -v shellcheck >/dev/null || { \
 		echo "Thiếu shellcheck — chạy 'make bootstrap'."; exit 1; }
 	shellcheck scripts/*.sh scripts/git-hooks/*
+
+.PHONY: measure-spill
+measure-spill:  ## Phép đo 1 mục 3 (CỬA CHẶN) — DuckDB trong cgroup 384Mi thật
+	@# Chạy trong một container có ĐÚNG limit mà Giai đoạn 2b sẽ đặt cho
+	@# loom-query. Chạy trên host thì không có cgroup nào để bị giết, và bài đo
+	@# xanh mà không chứng minh được gì.
+	docker run --rm --memory=384m --memory-swap=384m \
+		-v "$(PWD):/w" -w /w python:3.12-slim \
+		sh -c "pip install --quiet duckdb && python scripts/measure_duckdb_spill.py"
+
+.PHONY: measure-scan
+measure-scan:  ## Phép đo 1 mục 1 — thời gian lập kế hoạch quét bảng Iceberg
+	@# Dùng chính bộ container mà integration test dùng, không dựng bộ thứ hai:
+	@# một môi trường khác cho ra một con số nói về hệ thống không ai chạy.
+	uv run pytest -m benchmark -o addopts="" -s \
+		packages/icebergkit/tests/integration/test_scan_planning_benchmark.py
+
+.PHONY: ram
+ram: check-context  ## Tổng RAM cụm đang dùng, so với trần 1,8 GB
+	@# Cộng trên giấy ở spec Giai đoạn 2 mục 7.3 là ước lượng từ
+	@# `resources.requests`, KHÔNG phải mức dùng thật. Đây là số thật, đọc từ
+	@# cgroup của node — KHÔNG qua `kubectl exec`.
+	@#
+	@# Bản đầu exec vào từng pod rồi `cat /sys/fs/cgroup/memory.current`. Nó báo
+	@# Lakekeeper dùng 0 Mi, và 0 là SAI: image distroless không có `cat`, exec
+	@# hỏng, và target lặng lẽ cộng 0 vào tổng. Một phép đo báo thiếu thì tệ hơn
+	@# không đo, vì nó cho một con số trông như đã kiểm.
+	@#
+	@# Đọc từ node thì không phụ thuộc trong container có shell hay không.
+	@# So với TRẦN phải là số của CẢ NODE, không phải của riêng namespace $(NS):
+	@# k3s, traefik, coredns, local-path-provisioner đều ăn vào cùng trần đó.
+	@node=k3d-$(CLUSTER)-server-0; \
+	total=0; seen=0; \
+	for id in $$(docker exec $$node crictl ps -q 2>/dev/null); do \
+	  name=$$(docker exec $$node crictl inspect --output go-template \
+	          --template '{{ .status.labels }}' $$id 2>/dev/null \
+	        | grep -o 'io.kubernetes.pod.name:[^ ]*' | cut -d: -f2); \
+	  ns=$$(docker exec $$node crictl inspect --output go-template \
+	        --template '{{ .status.labels }}' $$id 2>/dev/null \
+	      | grep -o 'io.kubernetes.pod.namespace:[^ ]*' | cut -d: -f2); \
+	  [ "$$ns" = "$(NS)" ] || continue; \
+	  pid=$$(docker exec $$node crictl inspect --output go-template \
+	         --template '{{ .info.pid }}' $$id 2>/dev/null); \
+	  [ -n "$$pid" ] && [ "$$pid" != "0" ] || { \
+	     printf '  %-34s   ĐỌC HỎNG\n' "$$name"; continue; }; \
+	  cg=$$(docker exec $$node cat /proc/$$pid/cgroup 2>/dev/null | head -1 | cut -d: -f3); \
+	  m=$$(docker exec $$node cat "/sys/fs/cgroup$$cg/memory.current" 2>/dev/null); \
+	  [ -n "$$m" ] || { printf '  %-34s   ĐỌC HỎNG\n' "$$name"; continue; }; \
+	  mib=$$(( m / 1048576 )); total=$$(( total + mib )); seen=$$(( seen + 1 )); \
+	  printf '  %-34s %5d Mi\n' "$$name" "$$mib"; \
+	done; \
+	printf '\n  Namespace $(NS): %d Mi (%d container)\n' "$$total" "$$seen"; \
+	node_mib=$$(docker stats --no-stream --format '{{ .MemUsage }}' $$node \
+	  | awk '{v=$$1; sub(/GiB/,"",v); if ($$1 ~ /GiB/) print int(v*1024); \
+	          else {sub(/MiB/,"",v); print int(v)}}'); \
+	printf '  CẢ NODE:         %d Mi   trần 1843 Mi\n' "$$node_mib"; \
+	printf '  còn dư %d Mi — Giai đoạn 2b thêm loom-query, đỉnh đo được 348 Mi\n' \
+	  $$(( 1843 - node_mib )); \
+	if [ "$$node_mib" -gt 1843 ]; then \
+	  echo "  VƯỢT TRẦN — xem spec Giai đoạn 2 mục 7.3, ba lối ra"; exit 1; fi
