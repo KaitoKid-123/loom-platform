@@ -150,3 +150,64 @@ KHÔNG xoá warehouse của nó.
   item — chỉ có `restore_version` (phục hồi NỘI DUNG trên một item đang sống). Một lakehouse
   bị xoá mềm hôm nay không có đường quay lại qua API; nợ đó nằm ở Giai đoạn 1, không phải
   của warehouse.
+
+## Giai đoạn 2b — dịch vụ truy vấn
+
+Chạy được `SELECT` trên bảng Iceberg qua HTTP, với cổng quyền của Giai đoạn 1 và năm giới
+hạn tài nguyên. Chưa có giao diện — đó là 2c.
+
+```
+POST   /api/v1/query   { lakehouse_id, sql }  → 202 { query_id }   (hoặc 400 / 403)
+GET    /api/v1/query/{id}                     → trạng thái + kết quả
+DELETE /api/v1/query/{id}                     → huỷ, và nó dừng công việc thật
+```
+
+Trình duyệt chỉ nói chuyện với `loom-api`; `loom-query` là ClusterIP, không lộ ra ingress.
+
+### Thành phần mới
+
+| | |
+|---|---|
+| `packages/sqlkit` (`loom_sql`) | Đọc AST — `validate`, `dependencies`, `transpile`. **Không I/O**, có phép canh |
+| `services/loom-query` | Pod ấm chạy DuckDB, 384Mi, không state |
+| `POST /internal/authz/items` | `loom-query` **hỏi** quyền, không tự tính |
+| `POST /internal/lakehouses/resolve` | Dịch tên lakehouse sang id, trong phạm vi một workspace |
+
+### Ba ranh giới, và ai canh cái gì
+
+**Quyền** — một nguồn luật duy nhất. Đường theo lô dùng lại `_chain_conditions` của Giai
+đoạn 1 thay vì viết lại chuỗi tổ tiên, và có differential test đối chiếu lô-vs-đơn qua năm
+cấu hình quyền.
+
+**Nguồn dữ liệu** — `dependencies()` tách bảng catalog khỏi `external` (đường dẫn file, hàm
+bảng). Cổng quyền từ chối `external`, trừ đúng một khe hẹp: `read_parquet`/`read_csv` với
+đường dẫn **tương đối** trong `Files/` của chính lakehouse trong request.
+
+**Mạng nội bộ** — `loom-api` gửi bí mật chia sẻ qua header, `loom-query` so bằng
+`hmac.compare_digest`.
+
+### Hai đường tới storage, và chúng khác nhau
+
+```
+Đường Iceberg   →  Lakekeeper cấp credential STS hẹp theo key-prefix của warehouse
+Đường Files/    →  MinioStsProvider.for_workspace() → DuckDB httpfs, KHÔNG qua Iceberg
+```
+
+Mỗi item `lakehouse` ứng với một warehouse Lakekeeper, do `loom-api` tạo **trước khi** commit
+hàng item — warehouse hỏng thì item không được tạo, thay vì để lại một lakehouse rỗng mà lỗi
+chỉ lộ ra khi có người mở nó.
+
+### Nợ đã biết sau Giai đoạn 2b
+
+- **`loom-api` cầm credential gốc MinIO.** Giai đoạn 1 xây nó như một control plane không đọc
+  secret nào; giờ nó giữ chìa khoá mở được mọi prefix của mọi workspace. Có phép canh AST
+  (`services/api/tests/test_root_credential_guard.py`) khẳng định đúng một module chạm tới nó.
+  Giai đoạn 6 tách việc cấp phát warehouse ra, hoặc dùng credential hẹp hơn nếu MinIO cho.
+- **Bí mật chia sẻ không chống được pod đọc được chính Secret đó.** Cần ký lên principal hoặc
+  mTLS — Giai đoạn 6.
+- **`range()`/`generate_series()` bị từ chối.** Chúng không đọc dữ liệu từ đâu cả, nhưng
+  sqlglot xếp chúng cùng nhóm với `read_parquet`. Nới ra là một quyết định riêng.
+- **Warehouse mồ côi.** Nếu tạo warehouse xong mà tạo item hỏng, warehouse ở lại. Tốn chỗ,
+  không gây hiểu nhầm — đổi một lỗi im lặng lấy một lỗi rác là có chủ đích.
+- **Xoá mềm không xoá warehouse**, vì `restore` cần nó và Lakekeeper từ chối xoá warehouse
+  còn bảng (`409`, `force=true` không vượt được).
