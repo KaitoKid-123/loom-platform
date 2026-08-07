@@ -38,6 +38,7 @@ import uuid
 import pytest
 
 from loom_query import runner
+from loom_query.authz import ResolvedTable
 from loom_query.config import Settings
 from loom_query.store import QueryStatus, QueryStore
 from loom_sql import TableRef
@@ -79,8 +80,11 @@ async def test_the_pinned_thread_count_lets_a_heavy_query_finish(
         runner.execute(
             query_id=query_id,
             sql=HEAVY_SORT_SQL,
-            lakehouse_id=lakehouse_id,
-            table_refs=(TableRef(namespace="sales", name="orders"),),
+            resolved_tables=(
+                ResolvedTable(
+                    ref=TableRef(namespace="sales", name="orders"), lakehouse_id=lakehouse_id
+                ),
+            ),
             settings=app_settings,
             store=store,
         ),

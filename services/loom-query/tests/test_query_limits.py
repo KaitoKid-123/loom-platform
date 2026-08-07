@@ -12,7 +12,6 @@ import pyarrow as pa
 import pytest
 
 from loom_query.limits import ScanBytesExceeded, check_scan_bytes, truncate_table
-from loom_sql import TableRef
 
 
 class FakeScanStats:
@@ -32,7 +31,7 @@ def test_check_scan_bytes_sums_every_table_in_the_query() -> None:
     stats = FakeScanStats({"ns.a": 4_000, "ns.b": 4_000})
 
     with pytest.raises(ScanBytesExceeded) as exc_info:
-        check_scan_bytes(stats, (TableRef("ns", "a"), TableRef("ns", "b")), max_bytes=6_000)
+        check_scan_bytes([(stats, "ns.a"), (stats, "ns.b")], max_bytes=6_000)
 
     assert exc_info.value.scanned_bytes == 8_000
     assert exc_info.value.max_bytes == 6_000
@@ -41,7 +40,7 @@ def test_check_scan_bytes_sums_every_table_in_the_query() -> None:
 def test_check_scan_bytes_under_the_cap_returns_the_total_without_raising() -> None:
     stats = FakeScanStats({"ns.a": 1_000, "ns.b": 2_000})
 
-    total = check_scan_bytes(stats, (TableRef("ns", "a"), TableRef("ns", "b")), max_bytes=10_000)
+    total = check_scan_bytes([(stats, "ns.a"), (stats, "ns.b")], max_bytes=10_000)
 
     assert total == 3_000
 
@@ -51,9 +50,22 @@ def test_check_scan_bytes_at_exactly_the_cap_is_allowed() -> None:
     "nhỏ hơn". Một cài đặt lỡ dùng `>=` thay vì `>` sẽ đỏ ở đây."""
     stats = FakeScanStats({"ns.a": 10_000})
 
-    total = check_scan_bytes(stats, (TableRef("ns", "a"),), max_bytes=10_000)
+    total = check_scan_bytes([(stats, "ns.a")], max_bytes=10_000)
 
     assert total == 10_000
+
+
+def test_check_scan_bytes_sums_across_two_different_lakehouses() -> None:
+    """`JOIN` hai LAKEHOUSE khác nhau (hai `ScanStats` khác nhau, một cho mỗi
+    catalog): trần vẫn áp cho CẢ CÂU, cộng dồn qua cả hai catalog — không phải
+    một trần riêng cho mỗi lakehouse."""
+    stats_a = FakeScanStats({"ns.a": 4_000})
+    stats_b = FakeScanStats({"ns.a": 4_000})  # tên trùng CỐ Ý — hai catalog riêng
+
+    with pytest.raises(ScanBytesExceeded) as exc_info:
+        check_scan_bytes([(stats_a, "ns.a"), (stats_b, "ns.a")], max_bytes=6_000)
+
+    assert exc_info.value.scanned_bytes == 8_000
 
 
 def test_scan_bytes_exceeded_message_names_both_numbers() -> None:

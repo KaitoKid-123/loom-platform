@@ -24,6 +24,7 @@ import uuid
 import pytest
 
 from loom_query import runner
+from loom_query.authz import ResolvedTable
 from loom_query.config import Settings
 from loom_query.store import QueryStatus, QueryStore
 from loom_sql import TableRef
@@ -40,11 +41,15 @@ HEAVY_SQL = (
     ") > 999999999999"
 )
 
-TABLE_REFS = (TableRef(namespace="sales", name="orders"),)
-
 # Ngắn hơn nhiều so với ~3s chạy trọn, nhưng đủ dài để không đỏ vì máy chậm
 # khởi động chậm hơn dự kiến (network tới Lakekeeper thật, mở catalog...).
 SHORT_TIMEOUT_SECONDS = 0.5
+
+
+def _resolved_tables(lakehouse_id: uuid.UUID) -> tuple[ResolvedTable, ...]:
+    return (
+        ResolvedTable(ref=TableRef(namespace="sales", name="orders"), lakehouse_id=lakehouse_id),
+    )
 
 
 async def test_a_query_over_the_time_limit_is_failed_and_stopped_quickly(
@@ -65,8 +70,7 @@ async def test_a_query_over_the_time_limit_is_failed_and_stopped_quickly(
     await runner.execute(
         query_id=query_id,
         sql=HEAVY_SQL,
-        lakehouse_id=lakehouse_id,
-        table_refs=TABLE_REFS,
+        resolved_tables=_resolved_tables(lakehouse_id),
         settings=short_timeout,
         store=store,
     )
@@ -100,8 +104,7 @@ async def test_a_query_within_the_time_limit_succeeds_normally(
     await runner.execute(
         query_id=query_id,
         sql="SELECT id, amount FROM sales.orders ORDER BY id",
-        lakehouse_id=lakehouse_id,
-        table_refs=TABLE_REFS,
+        resolved_tables=_resolved_tables(lakehouse_id),
         settings=app_settings,  # mặc định 120s
         store=store,
     )

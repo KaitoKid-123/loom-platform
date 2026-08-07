@@ -42,7 +42,7 @@ router = APIRouter(tags=["query"])
 async def create_query(body: QueryCreate, request: Request) -> QueryCreated:
     authz: AuthzPort = request.app.state.authz
     resolver: LakehouseResolver = request.app.state.resolver
-    table_refs = await run_gate(
+    resolved_tables = await run_gate(
         sql=body.sql,
         lakehouse_id=body.lakehouse_id,
         workspace_id=body.workspace_id,
@@ -64,8 +64,7 @@ async def create_query(body: QueryCreate, request: Request) -> QueryCreated:
         runner.execute(
             query_id=query_id,
             sql=body.sql,
-            lakehouse_id=body.lakehouse_id,
-            table_refs=table_refs,
+            resolved_tables=resolved_tables,
             settings=settings,
             store=store,
         )

@@ -204,9 +204,14 @@ class AuthzClient:
         }
 
 
-def _lakehouse_name_of(namespace: str) -> str | None:
+def lakehouse_alias_of(namespace: str) -> str | None:
     """`name` của lakehouse nêu trong một tên bảng BA phần, hoặc `None` nếu
     `namespace` chỉ có một phần (tên bảng HAI phần, `namespace.table`).
+
+    KHÔNG còn là chi tiết riêng của module này (đã bỏ dấu `_` đầu tên): `xem
+    `runner.py` cho lý do nó cần biết chính điều này để quyết định CATALOG
+    DuckDB nào phải mở cho một bảng — ATTACH một catalog mới mang đúng tên
+    lakehouse, hay dùng catalog mặc định của connection.
 
     `namespace` tới từ `TableRef.namespace` — `loom_sql.deps.dependencies` nối
     `table.catalog` và `table.db` bằng một dấu chấm khi cả hai có giá trị.
@@ -218,15 +223,48 @@ def _lakehouse_name_of(namespace: str) -> str | None:
     return lakehouse_name if dot else None
 
 
-async def _resolve_item_ids(
+def strip_lakehouse_alias(namespace: str) -> str:
+    """Namespace THẬT bên trong lakehouse sở hữu bảng — bỏ tiền tố tên
+    lakehouse nếu `namespace` là ba phần; giữ nguyên nếu đã là hai phần (không
+    có gì để bỏ).
+
+    Cặp với `lakehouse_alias_of`. `runner.py` dùng hàm này để biết
+    namespace/tên THẬT cần đưa cho `Lakehouse.scan()` trên catalog Iceberg của
+    lakehouse sở hữu bảng — catalog đó không biết gì về cái tên (alias) mà câu
+    SQL của người dùng dùng để TRỎ tới nó, nó chỉ biết namespace THẬT của
+    chính nó.
+    """
+    _prefix, dot, rest = namespace.partition(".")
+    return rest if dot else namespace
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedTable:
+    """Một bảng đã qua bước phân giải, cùng id lakehouse SỞ HỮU nó.
+
+    `runner.py` cần vế `lakehouse_id` để mở ĐÚNG catalog Iceberg cho bảng này
+    (xem docstring `runner._run_sync`): với bảng hai phần, đó luôn là
+    `lakehouse_id` của chính request; với bảng ba phần, đó là id đã phân giải
+    từ tên lakehouse khác qua `resolver.resolve_lakehouses`. `ref` giữ nguyên
+    `namespace`/`name` NHƯ CÂU SQL VIẾT (kể cả tiền tố alias ba phần) — đó là
+    thứ `runner.py` cần để tạo lại đúng tên bảng trong DuckDB, phân biệt với
+    tên THẬT trên catalog Iceberg (`strip_lakehouse_alias`).
+    """
+
+    ref: TableRef
+    lakehouse_id: uuid.UUID
+
+
+async def _resolve_tables(
     refs: tuple[TableRef, ...],
     *,
     lakehouse_id: uuid.UUID,
     workspace_id: uuid.UUID,
     resolver: LakehouseResolver,
-) -> tuple[uuid.UUID, ...]:
-    """Mọi `TableRef` trong `refs` -> id item `lakehouse` tương ứng — quy ước
-    đặt tên bảng đã chốt (xem module docstring và spec Giai đoạn 2b Task 6/7):
+) -> tuple[ResolvedTable, ...]:
+    """Mọi `TableRef` trong `refs` -> `ResolvedTable` (bảng + id lakehouse sở
+    hữu nó) — quy ước đặt tên bảng đã chốt (xem module docstring và spec Giai
+    đoạn 2b Task 6/7):
 
     - `namespace.table` (HAI phần): trỏ THẲNG về `lakehouse_id` của request —
       không có gì để hỏi, mọi bảng hai phần hợp lệ trỏ về CÙNG một id.
@@ -248,8 +286,15 @@ async def _resolve_item_ids(
     điệp) — đúng quy tắc 404-trước-403 mà `QueryForbidden` đã ghi trong
     docstring của chính nó, áp dụng ở đây cho danh mục lakehouse thay vì cho
     một item bên trong nó.
+
+    **KHÔNG tự quyết "có cần hỏi quyền trên `lakehouse_id` hay không" ở đây.**
+    Hàm này chỉ trả về bảng nào thuộc lakehouse nào — người gọi (`run_gate`)
+    mới là chỗ quyết định tập id cần hỏi quyền, và `lakehouse_id` PHẢI có mặt
+    trong tập đó VÔ ĐIỀU KIỆN dù `refs` ở đây có bảng hai phần hay không (xem
+    comment ở `run_gate`) — đó là lỗi bảo mật đã sửa: catalog của `lakehouse_id`
+    vẫn có thể bị `runner` mở dù không có bảng hai phần nào trỏ tới nó.
     """
-    namespaces: list[str] = []
+    checked: list[tuple[TableRef, str]] = []
     for ref in refs:
         if ref.namespace is None:
             raise UnsupportedTableName(
@@ -257,10 +302,10 @@ async def _resolve_item_ids(
                 f"table '{ref.name}' has no namespace — write it as "
                 f"'<namespace>.{ref.name}' (unqualified table names are not supported)",
             )
-        namespaces.append(ref.namespace)
+        checked.append((ref, ref.namespace))
 
     cross_lakehouse_names = tuple(
-        dict.fromkeys(name for ns in namespaces if (name := _lakehouse_name_of(ns)) is not None)
+        dict.fromkeys(name for _, ns in checked if (name := lakehouse_alias_of(ns)) is not None)
     )
     resolved = (
         await resolver.resolve_lakehouses(workspace_id, cross_lakehouse_names)
@@ -268,17 +313,17 @@ async def _resolve_item_ids(
         else {}
     )
 
-    item_ids: list[uuid.UUID] = []
-    for ns in namespaces:
-        name = _lakehouse_name_of(ns)
-        if name is None:
-            item_ids.append(lakehouse_id)
+    resolved_tables: list[ResolvedTable] = []
+    for ref, ns in checked:
+        alias = lakehouse_alias_of(ns)
+        if alias is None:
+            resolved_tables.append(ResolvedTable(ref=ref, lakehouse_id=lakehouse_id))
             continue
-        other_id = resolved.get(name)
+        other_id = resolved.get(alias)
         if other_id is None:
             raise QueryForbidden
-        item_ids.append(other_id)
-    return tuple(dict.fromkeys(item_ids))
+        resolved_tables.append(ResolvedTable(ref=ref, lakehouse_id=other_id))
+    return tuple(resolved_tables)
 
 
 async def run_gate(
@@ -289,19 +334,21 @@ async def run_gate(
     principal: Principal,
     authz: AuthzPort,
     resolver: LakehouseResolver,
-) -> tuple[TableRef, ...]:
+) -> tuple[ResolvedTable, ...]:
     """Chạy năm bước đầu của cổng quyền. Ném `HTTPException` nếu bị chặn.
 
     `workspace_id` là workspace CHỨA `lakehouse_id` của request — cần nó để
-    phân giải tên bảng ba phần (`_resolve_item_ids`) đúng phạm vi: tên lakehouse
+    phân giải tên bảng ba phần (`_resolve_tables`) đúng phạm vi: tên lakehouse
     là duy nhất trong MỘT workspace, không phải toàn hệ thống, nên tìm nó mà
     không giới hạn workspace là tìm ở phạm vi sai. `routers/query.py` lấy giá
     trị này từ `QueryCreate.workspace_id` — xem docstring trường đó cho lý do
     nó tới qua thân request thay vì `loom-query` tự tra cứu (không có database).
 
-    Trả về danh sách bảng đã kiểm quyền — người gọi (`routers/query.py`) đưa
-    thẳng nó cho `runner.py` ở bước 6, để SQL không bị `sqlglot.parse` một lần
-    thứ hai cho cùng một câu.
+    Trả về danh sách bảng đã kiểm quyền, MỖI bảng kèm id lakehouse sở hữu nó
+    (`ResolvedTable`) — người gọi (`routers/query.py`) đưa thẳng nó cho
+    `runner.py` ở bước 6, để SQL không bị `sqlglot.parse` một lần thứ hai cho
+    cùng một câu, VÀ để `runner.py` biết mở catalog Iceberg nào cho bảng nào
+    (xem docstring `runner._run_sync`).
     """
     errors = validate(sql, DIALECT)
     if errors:
@@ -316,12 +363,28 @@ async def run_gate(
 
     refs = tuple(deps.tables)
 
-    # `_resolve_item_ids` tự khử trùng lặp NHƯNG kiểm quyền trên TOÀN BỘ id thu
+    # `_resolve_tables` tự khử trùng lặp NHƯNG kiểm quyền trên TOÀN BỘ id thu
     # được — không rút gọn xuống "bảng đầu tiên" ở đây hay bên trong nó. Một
     # `JOIN` hai lakehouse phải hỏi quyền trên CẢ HAI id, xem
     # `tests/test_query_authz_gate.py` cho phép kiểm canh đúng lỗi này.
-    item_ids = await _resolve_item_ids(
+    resolved_tables = await _resolve_tables(
         refs, lakehouse_id=lakehouse_id, workspace_id=workspace_id, resolver=resolver
+    )
+
+    # BẤT BIẾN BẮT BUỘC, đã từng bị vi phạm: **catalog mà `runner` mở PHẢI nằm
+    # trong tập đã được cấp quyền.** `runner._run_sync` mở catalog cho MỌI
+    # lakehouse xuất hiện trong `resolved_tables` — VÀ với `lakehouse_id` của
+    # chính request, nó luôn coi đây là catalog "nhà" của mọi bảng hai phần dù
+    # câu SQL có bảng hai phần nào hay không (bảng hai phần trỏ THẲNG về nó,
+    # xem `_resolve_tables`). `lakehouse_id` vì vậy PHẢI luôn nằm trong tập id
+    # được hỏi quyền dưới đây — kể cả khi TOÀN BỘ bảng trong câu SQL là tên ba
+    # phần trỏ tới lakehouse KHÁC. Thiếu dòng `lakehouse_id` này: một câu SQL
+    # toàn-ba-phần trỏ tới lakehouse B (người dùng CÓ quyền) trong khi
+    # `lakehouse_id=A` của chính request KHÔNG có quyền vẫn lọt qua cổng —
+    # `resolved_tables` khi đó không chứa `A` ở đâu cả, nên `A` không bao giờ
+    # được hỏi quyền, dù runner vẫn mở catalog của A một cách vô điều kiện.
+    item_ids = tuple(
+        dict.fromkeys((lakehouse_id, *(table.lakehouse_id for table in resolved_tables)))
     )
 
     roles = await authz.roles_for_items(principal, item_ids)
@@ -335,4 +398,4 @@ async def run_gate(
     if missing:
         raise QueryForbidden
 
-    return refs
+    return resolved_tables

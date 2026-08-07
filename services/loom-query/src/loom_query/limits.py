@@ -15,8 +15,6 @@ from typing import Protocol
 # dùng ở `runner.py`/`loom_iceberg.lakehouse`.
 import pyarrow as pa  # type: ignore[import-untyped]
 
-from loom_sql import TableRef
-
 
 class ScanStats(Protocol):
     """Thứ `check_scan_bytes` cần từ một lakehouse — CHỈ một phép hỏi thống kê,
@@ -44,21 +42,27 @@ class ScanBytesExceeded(Exception):
         )
 
 
-def check_scan_bytes(lakehouse: ScanStats, table_refs: Iterable[TableRef], max_bytes: int) -> int:
-    """Cộng byte của MỌI bảng trong `table_refs` từ thống kê manifest Iceberg,
+def check_scan_bytes(tables: Iterable[tuple[ScanStats, str]], max_bytes: int) -> int:
+    """Cộng byte của MỌI bảng trong `tables` từ thống kê manifest Iceberg,
     KHÔNG đọc một byte dữ liệu nào (xem `Lakehouse.scan_size_bytes`). Ném
     `ScanBytesExceeded` nếu tổng vượt `max_bytes`; trả tổng khi không vượt.
 
+    `tables` là `(lakehouse, qualified)` — MỖI bảng kèm ĐÚNG lakehouse (catalog
+    Iceberg) sở hữu nó, không phải một `lakehouse` duy nhất cho tất cả: một
+    `JOIN` hai lakehouse (xem `runner.py`) phải cộng byte quét trên ĐÚNG catalog
+    của từng bảng, và `qualified` phải là tên THẬT trên catalog đó (namespace
+    ĐÃ bỏ tiền tố alias ba phần nếu có — xem `authz.strip_lakehouse_alias`).
+    Hàm này vì vậy không cần biết gì về `TableRef`/quy ước đặt tên bảng nữa —
+    người gọi (`runner.py`) đã tính xong cặp (lakehouse, tên thật) trước khi
+    gọi tới đây.
+
     Cộng dồn CẢ CÂU trước khi so sánh — không so từng bảng riêng lẻ — vì một
     `JOIN` hai bảng nhỏ-vừa-đủ-lọt-trần-riêng vẫn có thể vượt trần khi cộng
-    lại, và đó chính xác là byte engine sẽ đọc nếu để lọt qua.
+    lại, và đó chính xác là byte engine sẽ đọc nếu để lọt qua. Đúng với cả khi
+    hai bảng đó nằm ở HAI lakehouse khác nhau — trần áp cho CẢ CÂU, không phải
+    cho từng lakehouse riêng.
     """
-    total = 0
-    for ref in table_refs:
-        # `run_gate` đã từ chối mọi `TableRef` không có namespace bằng 400
-        # trước khi runner từng thấy nó — xem `authz._resolve_item_id`.
-        assert ref.namespace is not None
-        total += lakehouse.scan_size_bytes(f"{ref.namespace}.{ref.name}")
+    total = sum(lakehouse.scan_size_bytes(qualified) for lakehouse, qualified in tables)
     if total > max_bytes:
         raise ScanBytesExceeded(total, max_bytes)
     return total

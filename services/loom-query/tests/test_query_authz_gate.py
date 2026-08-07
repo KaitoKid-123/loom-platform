@@ -65,7 +65,8 @@ async def test_two_part_table_resolves_to_the_lakehouse_of_the_request(
         resolver=fake_authz,
     )
 
-    assert [(r.namespace, r.name) for r in refs] == [("ns", "orders")]
+    assert [(t.ref.namespace, t.ref.name) for t in refs] == [("ns", "orders")]
+    assert {t.lakehouse_id for t in refs} == {lakehouse_id}
     # Hỏi ĐÚNG MỘT id — chính `lakehouse_id` — không phải id nào khác bịa ra.
     assert fake_authz.calls == [(lakehouse_id,)]
     # Bảng hai phần không có gì để dịch tên — không được gọi resolver.
@@ -224,7 +225,7 @@ async def test_an_ordinary_query_still_passes_the_external_check(
         authz=fake_authz,
         resolver=fake_authz,
     )
-    assert [r.name for r in refs] == ["orders"]
+    assert [t.ref.name for t in refs] == ["orders"]
 
 
 # --------------------------------------------------------- Task 7: hai lakehouse
@@ -235,25 +236,80 @@ async def test_three_part_table_resolves_the_named_lakehouse_within_the_workspac
 ) -> None:
     """Tên BA phần (`lakehouse.namespace.table`) giờ được hỗ trợ: `lakehouse`
     là `name` của một item `lakehouse` KHÁC, cùng workspace — không còn bị từ
-    chối 400 "chưa hỗ trợ" như bản cũ (Task 6)."""
+    chối 400 "chưa hỗ trợ" như bản cũ (Task 6).
+
+    `lakehouse_id` của request (KHÔNG được trỏ tới bởi bất kỳ bảng nào trong
+    câu SQL — mọi bảng ở đây đều là ba phần, trỏ tới "other") vẫn PHẢI được
+    cấp quyền: `runner._run_sync` mở catalog của nó vô điều kiện (đó là catalog
+    "nhà" cho MỌI bảng hai phần dù câu SQL này không có bảng nào như vậy), nên
+    thiếu quyền trên `lakehouse_id` vẫn phải chặn — xem
+    `test_three_part_only_query_still_needs_the_primary_lakehouses_permission`
+    cho phép kiểm khẳng định đúng NGƯỢC LẠI của tiền đề này (không cấp quyền
+    `lakehouse_id` -> 403)."""
     workspace_id = uuid.uuid4()
+    lakehouse_id = uuid.uuid4()
     other_lakehouse_id = uuid.uuid4()
     fake_authz.register_lakehouse(workspace_id, "other", other_lakehouse_id)
+    fake_authz.grant(lakehouse_id, "viewer")
     fake_authz.grant(other_lakehouse_id, "viewer")
 
     refs = await run_gate(
         sql="SELECT * FROM other.ns.orders",
-        lakehouse_id=uuid.uuid4(),  # KHÔNG dùng tới — bảng chỉ trỏ tới "other"
+        lakehouse_id=lakehouse_id,
         workspace_id=workspace_id,
         principal=principal,
         authz=fake_authz,
         resolver=fake_authz,
     )
 
-    assert [(r.namespace, r.name) for r in refs] == [("other.ns", "orders")]
-    # Hỏi quyền trên ID ĐÃ PHÂN GIẢI, không phải trên `lakehouse_id` của request.
-    assert fake_authz.calls == [(other_lakehouse_id,)]
+    assert [(t.ref.namespace, t.ref.name) for t in refs] == [("other.ns", "orders")]
+    assert [t.lakehouse_id for t in refs] == [other_lakehouse_id]
+    # Hỏi quyền trên CẢ hai: id đã phân giải cho bảng, VÀ `lakehouse_id` của
+    # chính request (bất biến bảo mật — xem `run_gate`).
+    assert set(fake_authz.calls[0]) == {lakehouse_id, other_lakehouse_id}
     assert fake_authz.resolve_calls == [(workspace_id, ("other",))]
+
+
+async def test_three_part_only_query_still_needs_the_primary_lakehouses_permission(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Chứng minh đỏ QUAN TRỌNG NHẤT của lần sửa này — lỗ bảo mật đã bị vi
+    phạm: một câu SQL toàn tên BA phần (không một bảng hai phần nào trỏ về
+    `lakehouse_id` của chính request) vẫn PHẢI hỏi quyền trên `lakehouse_id`
+    đó.
+
+    `runner._run_sync` mở catalog Iceberg của `lakehouse_id` VÔ ĐIỀU KIỆN cho
+    mọi bảng hai phần tiềm năng — nếu `run_gate` chỉ hỏi quyền trên những
+    lakehouse THẬT SỰ được một bảng trỏ tới, một câu SQL toàn-ba-phần trỏ tới
+    lakehouse B (người dùng CÓ quyền) trong khi `lakehouse_id=A` của chính
+    request KHÔNG có quyền vẫn lọt qua cổng — runner vẫn mở catalog của A một
+    cách vô điều kiện dù A chưa hề được cấp quyền.
+
+    Bỏ `lakehouse_id` ra khỏi biểu thức xây `item_ids` trong `run_gate` (quay
+    lại bản chỉ đưa lakehouse của bảng hai phần vào) sẽ làm phép kiểm này ĐỎ:
+    `other_id` (B) được cấp quyền và là lakehouse DUY NHẤT một bảng nào đó trỏ
+    tới, nên `item_ids` sẽ chỉ còn `{other_id}`, `roles_for_items` trả đủ vai
+    trò, và `run_gate` sai lầm cho qua."""
+    workspace_id = uuid.uuid4()
+    lakehouse_id = uuid.uuid4()  # A — request dùng id này, KHÔNG được cấp quyền
+    other_id = uuid.uuid4()  # B — CÓ quyền, và là lakehouse DUY NHẤT được trỏ tới
+    fake_authz.register_lakehouse(workspace_id, "b", other_id)
+    fake_authz.grant(other_id, "viewer")
+    # `lakehouse_id` (A) KHÔNG được `grant` gì — đây chính là tiền đề của lỗ.
+
+    with pytest.raises(QueryForbidden):
+        await run_gate(
+            sql="SELECT * FROM b.finance.reports",
+            lakehouse_id=lakehouse_id,
+            workspace_id=workspace_id,
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+    # `roles_for_items` PHẢI được hỏi cho CẢ `lakehouse_id` (A) — bằng chứng
+    # nó thật sự nằm trong tập được kiểm, không chỉ "bị từ chối vì lý do khác".
+    assert set(fake_authz.calls[0]) == {lakehouse_id, other_id}
 
 
 async def test_join_across_two_lakehouses_runs_when_both_are_permitted(
@@ -275,9 +331,13 @@ async def test_join_across_two_lakehouses_runs_when_both_are_permitted(
         resolver=fake_authz,
     )
 
-    assert {(r.namespace, r.name) for r in refs} == {
+    assert {(t.ref.namespace, t.ref.name) for t in refs} == {
         ("aaa", "orders"),
         ("other.finance", "reports"),
+    }
+    assert {t.ref.name: t.lakehouse_id for t in refs} == {
+        "orders": lakehouse_id,
+        "reports": other_id,
     }
     assert set(fake_authz.calls[0]) == {lakehouse_id, other_id}
 

@@ -29,6 +29,25 @@ connection vẫn dùng được (đã kiểm ở Giai đoạn 2a,
 `packages/icebergkit/tests/test_duckdb_memory.py`). `execute()` dưới đây publish
 connection ra ngay khi nó vừa được tạo — TRƯỚC `build_catalog`/bất kỳ câu SQL
 nào — để cửa sổ "có việc đang chạy mà chưa huỷ được" hẹp nhất có thể.
+
+**Một catalog Iceberg riêng cho MỖI lakehouse mà câu SQL chạm tới, không một
+catalog chung cho tất cả.** `run_gate` (`authz.py`) trả về `ResolvedTable` —
+mỗi bảng kèm ĐÚNG id lakehouse sở hữu nó — chính xác để `_run_sync` mở đúng
+catalog cho đúng bảng. Trộn chung một catalog cho mọi bảng (bản trước bản sửa
+này) có hai lỗi, một bảo mật một đúng đắn:
+
+- **Bảo mật:** catalog mà `_run_sync` mở PHẢI nằm trong tập đã được cấp quyền
+  (xem comment ở `run_gate`) — mở catalog của `lakehouse_id` cho một bảng
+  THẬT RA thuộc lakehouse khác là mở một catalog không được cấp quyền cho
+  đúng bảng đó.
+- **Đúng đắn, im lặng:** nếu hai lakehouse có `namespace.table` TRÙNG TÊN (ví
+  dụ cả hai đều có `finance.reports`), dồn chúng vào MỘT catalog DuckDB khiến
+  view của lakehouse chèn sau ĐÈ lên view của lakehouse chèn trước — câu SQL
+  vẫn CHẠY ĐƯỢC, không lỗi, nhưng một trong hai lakehouse đọc nhầm dữ liệu của
+  lakehouse kia. Không ném ngoại lệ nào để báo — đây là loại lỗi tệ nhất.
+
+Giải: `ATTACH ':memory:' AS <alias>` một catalog DuckDB THẬT cho mỗi tên
+lakehouse (alias) xuất hiện trong một tên bảng BA phần, xem `_view_target`.
 """
 
 from __future__ import annotations
@@ -36,6 +55,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -49,6 +69,7 @@ import duckdb
 import pyarrow as pa  # type: ignore[import-untyped]
 
 from loom_iceberg import Lakehouse, build_catalog
+from loom_query.authz import ResolvedTable, lakehouse_alias_of, strip_lakehouse_alias
 from loom_query.config import Settings
 from loom_query.limits import check_scan_bytes, truncate_table
 from loom_query.schemas import ColumnOut
@@ -104,31 +125,106 @@ def _to_result(table: pa.Table, *, truncated: bool, row_count: int) -> QueryResu
     return QueryResult(columns=columns, rows=rows, truncated=truncated, row_count=row_count)
 
 
+def _real_qualified_name(ref: TableRef) -> str:
+    """`namespace.table` THẬT bên trong lakehouse sở hữu `ref` — dùng để gọi
+    `Lakehouse.scan()`/`scan_size_bytes()` trên catalog Iceberg của chính
+    lakehouse đó.
+
+    Với bảng ba phần, `ref.namespace` mang tiền tố alias lakehouse
+    (`"kho_khac.finance"`) — catalog Iceberg của `kho_khac` không biết gì về
+    cái tên `kho_khac` (đó là tên item trong control plane, không phải một
+    phần của namespace Iceberg thật), nên phải `strip_lakehouse_alias` trước
+    khi hỏi nó.
+    """
+    assert ref.namespace is not None  # `run_gate` đã từ chối namespace=None
+    return f"{strip_lakehouse_alias(ref.namespace)}.{ref.name}"
+
+
+def _view_target(
+    connection: duckdb.DuckDBPyConnection,
+    ref: TableRef,
+    *,
+    attached_catalogs: set[str],
+    schemas_created: dict[str, set[str]],
+) -> str:
+    """Tạo (nếu chưa có) schema/catalog DuckDB cần thiết cho `ref`, trả về tên
+    view đủ điều kiện — ĐÚNG hình dạng SQL người dùng đã gõ, để câu SQL chạy
+    KHÔNG sửa đổi.
+
+    **Bảng HAI phần** (`namespace.table`): dùng catalog MẶC ĐỊNH của
+    connection (`memory`, do `duckdb.connect(":memory:")` tạo) — SQL người
+    dùng viết `namespace.table`, không mang tiền tố catalog nào, nên DuckDB tự
+    tìm trong catalog hiện hành.
+
+    **Bảng BA phần** (`lakehouse.namespace.table`): đã kiểm bằng thực nghiệm
+    (duckdb 1.5.5) rằng ba phần cách nhau bởi dấu chấm, KHÔNG đặt trong ngoặc
+    kép, LUÔN được DuckDB đọc là `catalog.schema.table` — không có cách nào
+    khác để một chuỗi "ba định danh cách dấu chấm" khớp một schema/tên mang
+    dấu chấm bên trong (đã thử: tạo schema tên `"finance.reports"`/view tên
+    ghép gạch dưới rồi hỏi bằng cú pháp ba phần — đều ném `Binder Error:
+    Catalog "..." does not exist`). Nên phải `ATTACH ':memory:' AS <alias>`
+    một catalog DuckDB THẬT mang đúng tên `alias` (bí danh người dùng gõ trong
+    SQL, KHÔNG phải id lakehouse), rồi tạo schema/view bên trong catalog đó.
+
+    Hai lakehouse khác nhau LUÔN được `ATTACH` dưới hai alias khác nhau (tên
+    lakehouse là duy nhất trong một workspace — xem `uq_item_active_name`),
+    nên `namespace.table` trùng tên giữa hai lakehouse KHÔNG đè lên nhau: mỗi
+    bên nằm trong catalog DuckDB riêng của nó, đã kiểm bằng thực nghiệm (hai
+    catalog `ATTACH` cùng có schema/view `finance.reports`, đọc độc lập, không
+    lệch dữ liệu).
+    """
+    assert ref.namespace is not None
+    alias = lakehouse_alias_of(ref.namespace)
+
+    if alias is None:
+        schema = ref.namespace
+        if schema not in schemas_created[""]:
+            connection.execute(f"CREATE SCHEMA IF NOT EXISTS {_quote_ident(schema)}")
+            schemas_created[""].add(schema)
+        return f"{_quote_ident(schema)}.{_quote_ident(ref.name)}"
+
+    if alias not in attached_catalogs:
+        connection.execute(f"ATTACH ':memory:' AS {_quote_ident(alias)}")
+        attached_catalogs.add(alias)
+    schema = strip_lakehouse_alias(ref.namespace)
+    if schema not in schemas_created[alias]:
+        connection.execute(
+            f"CREATE SCHEMA IF NOT EXISTS {_quote_ident(alias)}.{_quote_ident(schema)}"
+        )
+        schemas_created[alias].add(schema)
+    return f"{_quote_ident(alias)}.{_quote_ident(schema)}.{_quote_ident(ref.name)}"
+
+
 def _run_sync(
     *,
     sql: str,
-    lakehouse_id: uuid.UUID,
-    table_refs: tuple[TableRef, ...],
+    resolved_tables: tuple[ResolvedTable, ...],
     settings: Settings,
     publish_connection: Callable[[duckdb.DuckDBPyConnection], None],
 ) -> QueryResult:
-    """Phần CHẶN: mở connection, mở catalog, đăng ký từng bảng, chạy `sql`.
+    """Phần CHẶN: mở connection, mở MỘT catalog Iceberg cho mỗi lakehouse chạm
+    tới, đăng ký từng bảng trên đúng catalog của nó, chạy `sql`.
 
-    Warehouse của Lakekeeper đặt tên theo `str(lakehouse_id)` — quy ước tạm của
-    Giai đoạn 2b (xem `config.py`); Task vòng đời warehouse (bước tạo warehouse
-    khi tạo item `lakehouse`) là việc của task sau, chưa dựng ở đây.
+    `resolved_tables` (trả về từ `authz.run_gate`) đã gắn sẵn id lakehouse sở
+    hữu MỖI bảng — bảng hai phần mang id của chính request, bảng ba phần mang
+    id đã phân giải từ tên lakehouse khác. `_lakehouse_for` bên dưới dựng MỘT
+    `Lakehouse` (catalog Iceberg) cho mỗi id KHÁC NHAU, dùng lại khi hai bảng
+    cùng lakehouse — không dựng lại cho từng bảng, và không dồn hai lakehouse
+    khác nhau vào chung một catalog (xem module docstring cho lý do cả hai vế
+    đó đều bắt buộc).
 
-    Mỗi lời gọi dựng một `RestCatalog` MỚI qua `build_catalog` — đúng khuyến
-    nghị của `loom_iceberg.catalog`: mỗi query một catalog riêng của chính nó,
+    Mỗi lời gọi `build_catalog` dựng một `RestCatalog` MỚI — đúng khuyến nghị
+    của `loom_iceberg.catalog`: mỗi query một catalog riêng của chính nó,
     không chia sẻ giữa các query chạy đồng thời.
 
     DuckDB không hiểu `namespace.table` trỏ thẳng vào một object Python đã
-    đăng ký (`register()` luôn đặt object vào schema `main`, có thử nghiệm ở
-    Task này) — nên với mỗi bảng: đăng ký `RecordBatchReader` dưới một tên
-    KHÔNG dấu chấm, tạo `SCHEMA` mang tên namespace nếu chưa có, rồi tạo một
-    `VIEW` mang đúng tên `namespace.table` chiếu qua object đã đăng ký. SQL của
-    người dùng vì vậy chạy KHÔNG sửa đổi, tham chiếu `namespace.table` y hệt
-    những gì họ gõ.
+    đăng ký (`register()` luôn đặt object vào schema `main` của catalog HIỆN
+    HÀNH, có thử nghiệm ở Task 6) — nên với mỗi bảng: đăng ký
+    `RecordBatchReader` dưới một tên KHÔNG dấu chấm, rồi tạo một `VIEW` mang
+    đúng tên bảng NHƯ SQL VIẾT (`_view_target`) chiếu qua object đã đăng ký.
+    Đã kiểm bằng thực nghiệm rằng một `CREATE VIEW` trong một catalog ATTACH
+    vẫn `SELECT` được từ một object `register()` ở catalog mặc định — không
+    cần `USE` catalog nào cả.
 
     `connection` được `publish_connection` NGAY sau khi tạo — TRƯỚC cả
     `build_catalog` — để `execute()` (chạy trên event loop) có cơ chế
@@ -136,11 +232,12 @@ def _run_sync(
     bảng không tồn tại, byte quét vượt trần...) không bao giờ làm `execute()`
     chờ vô hạn một connection không tới (xem docstring `execute`).
 
-    Giới hạn 2 (byte quét, Task 8) kiểm NGAY SAU khi có `lakehouse`, TRƯỚC
-    vòng lặp đăng ký bảng bên dưới — tức là trước MỌI lời gọi `lakehouse.scan()`
-    (đọc thật). Đảo thứ tự hai khối này là đúng lỗi "chứng minh đỏ 1" của Task
-    8 chặn: phép kiểm phải thấy `Lakehouse.scan` chưa từng được gọi khi bị từ
-    chối, xem `tests/integration/test_query_scan_bytes.py`.
+    Giới hạn 2 (byte quét, Task 8) kiểm NGAY SAU khi có mọi `Lakehouse` cần
+    dùng, TRƯỚC vòng lặp đăng ký bảng bên dưới — tức là trước MỌI lời gọi
+    `lakehouse.scan()` (đọc thật), của BẤT KỲ lakehouse nào. Đảo thứ tự hai
+    khối này là đúng lỗi "chứng minh đỏ 1" của Task 8 chặn: phép kiểm phải
+    thấy `Lakehouse.scan` chưa từng được gọi khi bị từ chối, xem
+    `tests/integration/test_query_scan_bytes.py`.
     """
     connection = duckdb.connect(":memory:")
     publish_connection(connection)
@@ -148,35 +245,48 @@ def _run_sync(
         connection.execute(f"SET memory_limit='{_MEMORY_LIMIT}'")
         connection.execute(f"SET threads={_THREADS}")
 
-        catalog = build_catalog(
-            catalog_uri=settings.catalog_uri,
-            warehouse=str(lakehouse_id),
-            s3_endpoint=settings.s3_endpoint,
-        )
-        lakehouse = Lakehouse(catalog)
+        lakehouses: dict[uuid.UUID, Lakehouse] = {}
 
-        check_scan_bytes(lakehouse, table_refs, settings.max_scan_bytes)
+        def lakehouse_for(lakehouse_id: uuid.UUID) -> Lakehouse:
+            cached = lakehouses.get(lakehouse_id)
+            if cached is None:
+                catalog = build_catalog(
+                    catalog_uri=settings.catalog_uri,
+                    warehouse=str(lakehouse_id),
+                    s3_endpoint=settings.s3_endpoint,
+                )
+                cached = Lakehouse(catalog)
+                lakehouses[lakehouse_id] = cached
+            return cached
 
-        namespaces_created: set[str] = set()
-        for index, ref in enumerate(table_refs):
-            # `run_gate` đã từ chối mọi `TableRef` có `namespace is None` bằng
-            # 400 trước khi `run_sync` từng được gọi — xem `_resolve_item_id`.
-            assert ref.namespace is not None
-            reader = lakehouse.scan(f"{ref.namespace}.{ref.name}")
+        scan_targets = [
+            (lakehouse_for(table.lakehouse_id), _real_qualified_name(table.ref))
+            for table in resolved_tables
+        ]
+        check_scan_bytes(scan_targets, settings.max_scan_bytes)
+
+        attached_catalogs: set[str] = set()
+        schemas_created: dict[str, set[str]] = defaultdict(set)
+
+        for index, table in enumerate(resolved_tables):
+            ref = table.ref
+            lakehouse = lakehouse_for(table.lakehouse_id)
+            reader = lakehouse.scan(_real_qualified_name(ref))
 
             raw_name = f"__loom_raw_{index}"
             connection.register(raw_name, reader)
 
-            if ref.namespace not in namespaces_created:
-                connection.execute(f"CREATE SCHEMA IF NOT EXISTS {_quote_ident(ref.namespace)}")
-                namespaces_created.add(ref.namespace)
-
-            # S608 (SQL injection qua f-string) là báo động giả ở đây: cả hai
-            # định danh đi qua `_quote_ident` (trích dẫn + thoát dấu `"`), và
-            # `raw_name` do CHÍNH hàm này sinh từ `index`, không phải input
-            # người dùng — không đoạn nào trong chuỗi dưới đây mang một chuỗi
-            # SQL do người gọi tự do gõ vào.
-            qualified_view = f"{_quote_ident(ref.namespace)}.{_quote_ident(ref.name)}"
+            qualified_view = _view_target(
+                connection,
+                ref,
+                attached_catalogs=attached_catalogs,
+                schemas_created=schemas_created,
+            )
+            # S608 (SQL injection qua f-string) là báo động giả ở đây:
+            # `qualified_view` chỉ chứa định danh đã qua `_quote_ident` (trích
+            # dẫn + thoát dấu `"`), và `raw_name` do CHÍNH hàm này sinh từ
+            # `index`, không phải input người dùng — không đoạn nào trong
+            # chuỗi dưới đây mang một chuỗi SQL do người gọi tự do gõ vào.
             connection.execute(f"CREATE VIEW {qualified_view} AS SELECT * FROM {raw_name}")  # noqa: S608
 
         # `.arrow()` trả `pa.RecordBatchReader` (đã kiểm bằng thực nghiệm trên
@@ -196,12 +306,18 @@ async def execute(
     *,
     query_id: uuid.UUID,
     sql: str,
-    lakehouse_id: uuid.UUID,
-    table_refs: tuple[TableRef, ...],
+    resolved_tables: tuple[ResolvedTable, ...],
     settings: Settings,
     store: QueryStore,
 ) -> None:
     """Task nền của một query — ghi kết quả (hoặc lỗi) vào `store` khi xong.
+
+    KHÔNG nhận `lakehouse_id` riêng: mỗi phần tử của `resolved_tables` đã tự
+    mang id lakehouse sở hữu nó (kể cả bảng hai phần, mang id của chính
+    request — xem `authz._resolve_tables`), và `_run_sync` mở catalog theo
+    ĐÚNG những id đó. Một tham số `lakehouse_id` riêng ở đây sẽ là một nguồn sự
+    thật THỨ HAI về "lakehouse nào" — dễ trôi khỏi `resolved_tables` khi một
+    trong hai đổi mà quên đổi bên kia.
 
     Bắt MỌI ngoại lệ: đây là ranh giới của một `asyncio.Task` không ai `await`
     trực tiếp (`routers/query.py` chỉ giữ tham chiếu để huỷ, không đợi nó),
@@ -243,8 +359,7 @@ async def execute(
         asyncio.to_thread(
             _run_sync,
             sql=sql,
-            lakehouse_id=lakehouse_id,
-            table_refs=table_refs,
+            resolved_tables=resolved_tables,
             settings=settings,
             publish_connection=publish_connection,
         )

@@ -33,6 +33,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from loom_query import runner
+from loom_query.authz import ResolvedTable
 from loom_query.config import Settings
 from loom_query.main import create_app
 from loom_query.store import QueryStatus, QueryStore
@@ -53,20 +54,20 @@ HEAVY_SQL = (
 
 LIGHT_SQL = "SELECT id, amount FROM sales.orders ORDER BY id"
 
-TABLE_REFS = (TableRef(namespace="sales", name="orders"),)
-
 
 async def _run_in_background(
     settings: Settings, lakehouse_id: uuid.UUID, store: QueryStore, sql: str
 ) -> tuple[uuid.UUID, asyncio.Task[None]]:
     query_id = uuid.uuid4()
     await store.create(query_id)
+    resolved_tables = (
+        ResolvedTable(ref=TableRef(namespace="sales", name="orders"), lakehouse_id=lakehouse_id),
+    )
     task = asyncio.create_task(
         runner.execute(
             query_id=query_id,
             sql=sql,
-            lakehouse_id=lakehouse_id,
-            table_refs=TABLE_REFS,
+            resolved_tables=resolved_tables,
             settings=settings,
             store=store,
         )
