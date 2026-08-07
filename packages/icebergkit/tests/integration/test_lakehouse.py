@@ -9,7 +9,7 @@ import uuid
 import pyarrow as pa
 import pytest
 
-from loom_iceberg import Lakehouse
+from loom_iceberg import Lakehouse, build_catalog
 
 pytestmark = pytest.mark.integration
 
@@ -92,3 +92,46 @@ def test_scan_returns_a_streaming_reader_not_a_materialised_table(
 
     reader = lakehouse.scan(qualified)
     assert isinstance(reader, pa.RecordBatchReader)
+
+
+def test_scan_size_bytes_matches_pyiceberg_manifest_stats_and_two_files_sum(
+    lakehouse: Lakehouse,
+    ns: str,
+    lakekeeper: str,
+    s3_endpoint: str,
+    warehouse_name: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Thăm dò + canh cho `Lakehouse.scan_size_bytes` (Task 8, loom-query).
+
+    In nguyên văn thứ `Table.scan().plan_files()` phơi ra — xem docstring
+    `scan_size_bytes` cho lý do đây là con số đúng để kiểm trần byte quét
+    TRƯỚC khi đọc. `append` tạo data file THỨ HAI, nên phép cộng dồn (không
+    phải chỉ đọc file đầu) thật sự bị kiểm.
+    """
+    qualified = f"{ns}.t7"
+    lakehouse.create_from(qualified, pa.table({"i": pa.array([1, 2, 3], type=pa.int64())}))
+    lakehouse.append(qualified, pa.table({"i": pa.array([4, 5], type=pa.int64())}))
+
+    # Catalog RIÊNG cho thăm dò — cùng quy ước "mỗi query một catalog" mà
+    # `runner.py` dùng, để không chia sẻ trạng thái với fixture `lakehouse`.
+    probe_catalog = build_catalog(
+        catalog_uri=f"{lakekeeper}/catalog", warehouse=warehouse_name, s3_endpoint=s3_endpoint
+    )
+    table = probe_catalog.load_table(qualified)
+    tasks = list(table.scan().plan_files())
+
+    with capsys.disabled():
+        print(f"\nplan_files() cho {qualified}: {len(tasks)} FileScanTask")
+        for task in tasks:
+            print(
+                f"  file_path={task.file.file_path!r} "
+                f"file_size_in_bytes={task.file.file_size_in_bytes} "
+                f"record_count={task.file.record_count}"
+            )
+
+    assert len(tasks) == 2, "hai lần create_from/append phải cho ra hai data file riêng"
+    expected_total = sum(task.file.file_size_in_bytes for task in tasks)
+    assert all(task.file.file_size_in_bytes > 0 for task in tasks)
+
+    assert lakehouse.scan_size_bytes(qualified) == expected_total

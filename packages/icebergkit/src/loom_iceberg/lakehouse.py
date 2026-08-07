@@ -74,3 +74,24 @@ class Lakehouse:
         yêu cầu của bên đọc, thay vì vật chất hoá toàn bộ bảng trước.
         """
         return self._catalog.load_table(qualified).scan().to_arrow_batch_reader()
+
+    def scan_size_bytes(self, qualified: str) -> int:
+        """Tổng byte của MỌI data file mà một scan không lọc sẽ đọc — lấy
+        THẲNG từ thống kê manifest Iceberg, KHÔNG mở một data file nào.
+
+        Thăm dò (`services/loom-query`, Task 8, trên PyIceberg 0.11.1 thật với
+        Lakekeeper thật): `Table.scan()` trả một `DataScan`; `.plan_files()`
+        trả `Iterable[FileScanTask]`; mỗi `FileScanTask.file` là một
+        `DataFile` với thuộc tính `.file_size_in_bytes` — đúng con số đã nằm
+        sẵn trong manifest (Iceberg ghi nó lúc commit), không phải một phép đo
+        cần mở file để tính. `plan_files()` tự nó chỉ đọc manifest list và
+        manifest file (metadata, nhỏ và không co giãn theo kích thước bảng) —
+        KHÔNG chạm data file nào, nên gọi hàm này trước một `scan()` (đọc
+        thật) là kiểm được trần byte quét TRƯỚC khi tốn một request nào tới
+        chính data file.
+
+        Không lọc (giống hệt `scan()` ở trên): quét trần phải là quét THẬT sự
+        engine sẽ làm, và `Lakehouse.scan()` không nhận filter/projection.
+        """
+        table = self._catalog.load_table(qualified)
+        return sum(task.file.file_size_in_bytes for task in table.scan().plan_files())

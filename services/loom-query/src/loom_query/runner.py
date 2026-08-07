@@ -14,15 +14,29 @@ thẳng trong một coroutine sẽ khoá nguyên event loop tới khi câu SQL x
 `memory_limit=256MB` và `threads=2` GHIM CỨNG, không phải cấu hình đọc từ
 `Settings`: đây là hai con số đã ĐO ở Giai đoạn 2a (RSS đỉnh 348 Mi trong
 container 384Mi ứng với `threads=2` — không hơn — để không OOM trên một node
-nhiều core). Ba giới hạn còn lại (byte quét, thời gian, số dòng) là việc của
-task sau; hai giá trị này không đợi task đó vì chúng là cấu hình khởi tạo
-DuckDB, không phải một điều kiện kiểm sau khi đã chạy.
+nhiều core). Ba giới hạn còn lại (byte quét, thời gian, số dòng) đọc từ
+`Settings` (Task 8); hai giá trị này thì không, vì chúng là cấu hình khởi tạo
+DuckDB đến từ một phép đo, không phải một tham số vận hành.
+
+**Huỷ/timeout đều đi qua CÙNG một cơ chế: `connection.interrupt()`.** Đã kiểm
+bằng thực nghiệm (xem báo cáo Task 9) rằng `asyncio.Task.cancel()` trên một
+task đang `await asyncio.to_thread(...)` KHÔNG dừng được thread OS bên dưới —
+nó chỉ từ bỏ việc CHỜ, thread nền vẫn chạy hết. `duckdb.DuckDBPyConnection.
+interrupt()` thì khác: gọi được từ MỘT thread khác trong khi thread kia đang
+chặn trong DuckDB, và DuckDB tự kiểm cờ ngắt đó định kỳ, ném
+`duckdb.InterruptException` gần như ngay lập tức — kể cả sau khi bị ngắt,
+connection vẫn dùng được (đã kiểm ở Giai đoạn 2a,
+`packages/icebergkit/tests/test_duckdb_memory.py`). `execute()` dưới đây publish
+connection ra ngay khi nó vừa được tạo — TRƯỚC `build_catalog`/bất kỳ câu SQL
+nào — để cửa sổ "có việc đang chạy mà chưa huỷ được" hẹp nhất có thể.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +50,7 @@ import pyarrow as pa  # type: ignore[import-untyped]
 
 from loom_iceberg import Lakehouse, build_catalog
 from loom_query.config import Settings
+from loom_query.limits import check_scan_bytes, truncate_table
 from loom_query.schemas import ColumnOut
 from loom_query.store import QueryStore
 from loom_sql import TableRef
@@ -48,6 +63,8 @@ _THREADS = 2
 class QueryResult:
     columns: list[ColumnOut]
     rows: list[list[Any]]
+    truncated: bool
+    row_count: int
 
 
 def _quote_ident(name: str) -> str:
@@ -81,10 +98,10 @@ def _jsonable(value: object) -> object:
     return value
 
 
-def _to_result(table: pa.Table) -> QueryResult:
+def _to_result(table: pa.Table, *, truncated: bool, row_count: int) -> QueryResult:
     columns = [ColumnOut(name=f.name, type=str(f.type)) for f in table.schema]
     rows = [[_jsonable(row[name]) for name in table.column_names] for row in table.to_pylist()]
-    return QueryResult(columns=columns, rows=rows)
+    return QueryResult(columns=columns, rows=rows, truncated=truncated, row_count=row_count)
 
 
 def _run_sync(
@@ -93,8 +110,9 @@ def _run_sync(
     lakehouse_id: uuid.UUID,
     table_refs: tuple[TableRef, ...],
     settings: Settings,
+    publish_connection: Callable[[duckdb.DuckDBPyConnection], None],
 ) -> QueryResult:
-    """Phần CHẶN: mở catalog, đăng ký từng bảng vào DuckDB, chạy `sql`.
+    """Phần CHẶN: mở connection, mở catalog, đăng ký từng bảng, chạy `sql`.
 
     Warehouse của Lakekeeper đặt tên theo `str(lakehouse_id)` — quy ước tạm của
     Giai đoạn 2b (xem `config.py`); Task vòng đời warehouse (bước tạo warehouse
@@ -111,18 +129,33 @@ def _run_sync(
     `VIEW` mang đúng tên `namespace.table` chiếu qua object đã đăng ký. SQL của
     người dùng vì vậy chạy KHÔNG sửa đổi, tham chiếu `namespace.table` y hệt
     những gì họ gõ.
-    """
-    catalog = build_catalog(
-        catalog_uri=settings.catalog_uri,
-        warehouse=str(lakehouse_id),
-        s3_endpoint=settings.s3_endpoint,
-    )
-    lakehouse = Lakehouse(catalog)
 
+    `connection` được `publish_connection` NGAY sau khi tạo — TRƯỚC cả
+    `build_catalog` — để `execute()` (chạy trên event loop) có cơ chế
+    `interrupt()` sớm nhất có thể, và để một lỗi xảy ra SAU đó (catalog sập,
+    bảng không tồn tại, byte quét vượt trần...) không bao giờ làm `execute()`
+    chờ vô hạn một connection không tới (xem docstring `execute`).
+
+    Giới hạn 2 (byte quét, Task 8) kiểm NGAY SAU khi có `lakehouse`, TRƯỚC
+    vòng lặp đăng ký bảng bên dưới — tức là trước MỌI lời gọi `lakehouse.scan()`
+    (đọc thật). Đảo thứ tự hai khối này là đúng lỗi "chứng minh đỏ 1" của Task
+    8 chặn: phép kiểm phải thấy `Lakehouse.scan` chưa từng được gọi khi bị từ
+    chối, xem `tests/integration/test_query_scan_bytes.py`.
+    """
     connection = duckdb.connect(":memory:")
+    publish_connection(connection)
     try:
         connection.execute(f"SET memory_limit='{_MEMORY_LIMIT}'")
         connection.execute(f"SET threads={_THREADS}")
+
+        catalog = build_catalog(
+            catalog_uri=settings.catalog_uri,
+            warehouse=str(lakehouse_id),
+            s3_endpoint=settings.s3_endpoint,
+        )
+        lakehouse = Lakehouse(catalog)
+
+        check_scan_bytes(lakehouse, table_refs, settings.max_scan_bytes)
 
         namespaces_created: set[str] = set()
         for index, ref in enumerate(table_refs):
@@ -150,10 +183,11 @@ def _run_sync(
         # duckdb 1.5.5 — KHÁC tài liệu cũ hơn từng nói nó trả `pa.Table`).
         # `.to_arrow_table()` là API thay thế cho `.fetch_arrow_table()` (bản
         # cũ đã bị deprecate) và trả đúng `pa.Table` mà `_to_result` cần —
-        # bảng kết quả cuối (đã bị trần 10.000 dòng của task sau giới hạn)
-        # không cần đọc theo luồng như `Lakehouse.scan()` ở trên.
+        # bảng kết quả cuối (đã bị trần 10.000 dòng của giới hạn 3) không cần
+        # đọc theo luồng như `Lakehouse.scan()` ở trên.
         arrow_result = connection.sql(sql).to_arrow_table()
-        return _to_result(arrow_result)
+        limited, truncated, row_count = truncate_table(arrow_result, settings.max_result_rows)
+        return _to_result(limited, truncated=truncated, row_count=row_count)
     finally:
         connection.close()
 
@@ -175,16 +209,71 @@ async def execute(
     never retrieved" thay vì trở thành một trạng thái `failed` mà client
     `GET` được — với người đang chờ kết quả thì hai thứ đó khác nhau hoàn
     toàn: một cái nói được lý do, một cái treo mãi ở "running".
+
+    **Giới hạn 1 (thời gian, Task 8) và huỷ thật (Task 9) dùng CHUNG một cơ
+    chế.** `_run_sync` chạy trong một thread riêng (`asyncio.to_thread`); ngay
+    khi nó tạo connection, nó gọi `publish_connection` (bên dưới) để đưa
+    connection đó về LẠI event loop qua `loop.call_soon_threadsafe` — đây là
+    đường DUY NHẤT an toàn để một thread khác chạm vào một `asyncio.Future`
+    (không được gọi `set_result` trực tiếp từ ngoài event loop). Từ đó,
+    `store.attach_interrupt` gắn `connection.interrupt` làm cơ chế huỷ (Task
+    9 dùng khi `DELETE` tới), và nếu quá `settings.query_timeout_seconds`
+    giây mà `run_task` chưa xong, nhánh timeout bên dưới gọi CHÍNH cơ chế đó
+    rồi mới báo lỗi — tức là timeout cũng THẬT SỰ dừng việc, không chỉ báo lỗi
+    rồi bỏ mặc thread nền chạy tiếp.
+
+    `asyncio.shield(run_task)`: khi `wait_for` hết giờ, nó chỉ huỷ CÁI SHIELD
+    (từ bỏ việc chờ), không huỷ `run_task` — `run_task` (và thread bên dưới nó)
+    tiếp tục sống để nhánh `except TimeoutError` tự tay `interrupt()` rồi
+    `await run_task` lấy nốt kết quả (bỏ đi) của nó, tránh cảnh báo "Task
+    exception was never retrieved" từ MỘT future khác (future bọc thread, không
+    phải `run_task`).
     """
-    try:
-        result = await asyncio.to_thread(
+    loop = asyncio.get_running_loop()
+    connection_future: asyncio.Future[duckdb.DuckDBPyConnection] = loop.create_future()
+
+    def publish_connection(connection: duckdb.DuckDBPyConnection) -> None:
+        # Gọi TỪ thread nền — không được chạm `store`/`connection_future`
+        # trực tiếp ở đây (chỉ event loop mới an toàn sửa chúng, xem docstring
+        # `store.py`: "một event loop DUY NHẤT"). `call_soon_threadsafe` marshal
+        # đúng việc `set_result` về event loop.
+        loop.call_soon_threadsafe(connection_future.set_result, connection)
+
+    run_task = asyncio.create_task(
+        asyncio.to_thread(
             _run_sync,
             sql=sql,
             lakehouse_id=lakehouse_id,
             table_refs=table_refs,
             settings=settings,
+            publish_connection=publish_connection,
         )
+    )
+
+    connection = await connection_future
+    await store.attach_interrupt(query_id, connection.interrupt)
+
+    try:
+        result = await asyncio.wait_for(
+            asyncio.shield(run_task), timeout=settings.query_timeout_seconds
+        )
+    except TimeoutError:
+        connection.interrupt()
+        with contextlib.suppress(Exception):
+            await run_task
+        await store.set_failed(
+            query_id,
+            f"query exceeded the {settings.query_timeout_seconds:g}s time limit and was stopped",
+        )
+        return
     except Exception as exc:  # mọi lỗi đều thành "failed" (BLE001 không nằm trong ruleset dự án)
         await store.set_failed(query_id, str(exc))
         return
-    await store.set_succeeded(query_id, result.columns, result.rows)
+
+    await store.set_succeeded(
+        query_id,
+        result.columns,
+        result.rows,
+        truncated=result.truncated,
+        row_count=result.row_count,
+    )

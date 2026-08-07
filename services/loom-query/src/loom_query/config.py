@@ -9,7 +9,7 @@ cạnh nhau không đọc nhầm biến của nhau.
 
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     # `runner.py`) — KHÔNG theo `item.name`, vì tên đổi được còn id thì không.
     catalog_uri: str = "http://lakekeeper.loom.svc.cluster.local:8181/catalog"
     s3_endpoint: str = "http://minio.loom.svc.cluster.local:9000"
+
+    # Ba trong năm giới hạn tài nguyên (Task 8) — CẤU HÌNH ĐƯỢC theo yêu cầu
+    # ràng buộc của Giai đoạn 2b, khác `memory_limit`/`threads` DuckDB (GHIM
+    # CỨNG trong `runner.py`, xem docstring ở đó: hai giá trị đó là kết quả đo
+    # đạc của Giai đoạn 2a, không phải một tham số vận hành nên KHÔNG lộ ra
+    # đây — lộ chúng ra biến môi trường là mời một lần chỉnh tay làm trôi mất
+    # phép đo).
+    query_timeout_seconds: float = Field(default=120.0, gt=0)
+    max_scan_bytes: int = Field(default=10 * 1024**3, gt=0)  # 10 GiB
+    max_result_rows: int = Field(default=10_000, gt=0)
 
     @field_validator("authz_base_url", "catalog_uri", "s3_endpoint")
     @classmethod

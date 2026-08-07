@@ -86,6 +86,8 @@ async def get_query(query_id: uuid.UUID, request: Request) -> QueryStatusOut:
         columns=state.columns,
         rows=state.rows,
         error=state.error,
+        truncated=state.truncated,
+        row_count=state.row_count,
     )
 
 

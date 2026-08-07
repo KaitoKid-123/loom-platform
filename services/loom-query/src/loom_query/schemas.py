@@ -43,9 +43,17 @@ class QueryStatusOut(BaseModel):
     `columns`/`rows`/`error` là `None` chừng nào chưa có gì để nói — route dùng
     `response_model_exclude_none=True` để chúng biến mất khỏi JSON thay vì
     hiện ra là `null`, cùng quy ước với `ProblemDetail` bên `loom-api`.
+
+    `truncated`/`row_count` (Task 8, giới hạn 3): chỉ có giá trị khi
+    `status == "succeeded"`. `truncated=True` nghĩa là `rows` KHÔNG phải toàn
+    bộ kết quả — chỉ 10.000 (mặc định, cấu hình được) dòng đầu; `row_count` là
+    tổng số dòng THẬT trước khi cắt. Thiếu cờ này thì 10.000 dòng đầu trông y
+    hệt toàn bộ kết quả, và một báo cáo dựa trên nó sẽ sai mà không ai biết.
     """
 
     status: str
     columns: list[ColumnOut] | None = None
     rows: list[list[Any]] | None = None
     error: str | None = None
+    truncated: bool | None = None
+    row_count: int | None = None

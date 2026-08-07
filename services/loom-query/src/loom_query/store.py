@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -41,12 +42,20 @@ class QueryState:
     columns: list[ColumnOut] | None = None
     rows: list[list[object]] | None = None
     error: str | None = None
-    # Tham chiếu tới task nền — Task sau (huỷ thật sự dừng công việc) sẽ gọi
-    # `task.cancel()` ở đây. Ở Giai đoạn 2b, `QueryStore.cancel` CHỈ đổi cờ
-    # trạng thái (xem docstring của nó) nên trường này chưa được đọc ở đâu cả,
-    # nhưng chỗ để gắn nó vào đã có sẵn — không phải thêm một trường mới rồi
-    # dời dữ liệu khi Task sau tới.
+    truncated: bool | None = None
+    row_count: int | None = None
+    # Tham chiếu tới task nền — giữ để bookkeeping (vd. chờ nó xong lúc
+    # shutdown sau này); KHÔNG phải cơ chế huỷ. `task.cancel()` chỉ dừng việc
+    # CHỜ một coroutine đang `await asyncio.to_thread(...)` — nó không giết
+    # được thread OS bên dưới, đã kiểm bằng thực nghiệm khi viết Task 9 (một
+    # `task.cancel()` giữa chừng vẫn để thread nền chạy hết). Cơ chế huỷ thật
+    # là `interrupt` bên dưới.
     task: asyncio.Task[None] | None = field(default=None, repr=False, compare=False)
+    # Hàm KHÔNG đối số dừng NGAY công việc DuckDB đang chạy — bound method
+    # `connection.interrupt` (xem `runner.execute`), gắn vào ngay khi
+    # connection tồn tại. `QueryStore.cancel` gọi nó cùng lúc lật cờ trạng
+    # thái; đây là điều làm cho huỷ THẬT SỰ dừng việc, không chỉ đổi nhãn.
+    interrupt: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 class QueryStore:
@@ -64,11 +73,35 @@ class QueryStore:
         if state is not None:
             state.task = task
 
+    async def attach_interrupt(self, query_id: uuid.UUID, interrupt: Callable[[], None]) -> None:
+        """Gắn cơ chế huỷ THẬT — gọi ngay khi `runner.execute` có một
+        connection DuckDB để đưa cho `cancel()` dùng sau này.
+
+        Nếu query đã bị `cancel()` TRƯỚC KHI connection kịp tồn tại — một race
+        hẹp nhưng có thật: `POST` trả `202` ngay, và `DELETE` có thể tới trước
+        khi luồng nền kịp mở connection — gọi `interrupt` NGAY tại đây thay vì
+        chỉ cất nó đi. Không có nhánh này, một query bị huỷ đúng vào khoảnh
+        khắc đó sẽ không bao giờ được `interrupt()`, và chạy trọn vẹn dù trạng
+        thái đã hiện `cancelled`.
+        """
+        state = self._queries.get(query_id)
+        if state is None:
+            return
+        state.interrupt = interrupt
+        if state.status == QueryStatus.cancelled:
+            interrupt()
+
     async def get(self, query_id: uuid.UUID) -> QueryState | None:
         return self._queries.get(query_id)
 
     async def set_succeeded(
-        self, query_id: uuid.UUID, columns: list[ColumnOut], rows: list[list[object]]
+        self,
+        query_id: uuid.UUID,
+        columns: list[ColumnOut],
+        rows: list[list[object]],
+        *,
+        truncated: bool = False,
+        row_count: int | None = None,
     ) -> None:
         state = self._queries.get(query_id)
         # `state is None`: hàng đã bị dọn (chưa xảy ra ở Giai đoạn 2b — không
@@ -82,6 +115,11 @@ class QueryStore:
         state.status = QueryStatus.succeeded
         state.columns = columns
         state.rows = rows
+        state.truncated = truncated
+        # `row_count` mặc định bằng `len(rows)` cho chỗ gọi chưa biết tổng số
+        # dòng THẬT trước khi cắt (test cũ, không phải đường đi thật của
+        # `runner.py` — nó luôn truyền `row_count` tường minh).
+        state.row_count = row_count if row_count is not None else len(rows)
 
     async def set_failed(self, query_id: uuid.UUID, error: str) -> None:
         state = self._queries.get(query_id)
@@ -91,16 +129,22 @@ class QueryStore:
         state.error = error
 
     async def cancel(self, query_id: uuid.UUID) -> bool:
-        """Đổi trạng thái sang `cancelled`. KHÔNG dừng công việc THẬT đang chạy.
+        """Đổi trạng thái sang `cancelled` VÀ dừng công việc THẬT đang chạy.
 
-        Dừng công việc thật (huỷ task DuckDB đang quét giữa chừng) là Task sau
-        — spec Giai đoạn 2b liệt kê nó riêng vì nó là chỗ dễ viết một phép kiểm
-        mù nhất trong cả plan (chỉ đọc cờ trạng thái, không quan sát được công
-        việc có thật sự dừng hay không). Ở đây, task nền (`runner.execute`) vẫn
-        chạy tới khi xong hoặc lỗi; `set_succeeded`/`set_failed` phía trên chỉ
-        từ chối GHI ĐÈ một trạng thái `cancelled` — nên kết quả của một query
-        đã bị người dùng bỏ sẽ bị ÂM THẦM vứt đi thay vì hiện ra sau đó, dù
-        công việc tính nó vẫn tốn CPU cho tới khi xong.
+        Task 6 để lại đây một bản CHỈ lật cờ — spec Giai đoạn 2b gọi tên nó là
+        chỗ dễ viết một phép kiểm mù nhất trong cả plan (`DELETE` rồi `GET`
+        thấy `status == "cancelled"` xanh ngay cả khi task nền vẫn chạy trọn
+        vẹn). Task 9 sửa nó: nếu có `interrupt` đã gắn (xem `attach_interrupt`
+        — bound method `connection.interrupt`, gắn bởi `runner.execute` ngay
+        khi connection DuckDB tồn tại), gọi nó ở đây. `connection.interrupt()`
+        là hàm ĐỒNG BỘ, không chặn (đã kiểm bằng thực nghiệm: nó chỉ đặt một
+        cờ ngắt phía DuckDB rồi trả về ngay — DuckDB tự kiểm cờ đó định kỳ
+        trong lúc thực thi và ném `duckdb.InterruptException`), nên gọi nó
+        ngay trong một hàm không có `await` này là an toàn.
+
+        `set_succeeded`/`set_failed` vẫn từ chối GHI ĐÈ một trạng thái đã
+        `cancelled` — kết quả (nếu công việc lỡ kịp xong đúng lúc bị huỷ) bị
+        vứt đi thay vì hiện ra sau đó.
 
         Trả `False` nếu không có query nào mang id này (404 ở tầng route).
         Trả `True` cả khi query đã ở trạng thái cuối (succeeded/failed/đã
@@ -111,4 +155,6 @@ class QueryStore:
             return False
         if state.status == QueryStatus.running:
             state.status = QueryStatus.cancelled
+            if state.interrupt is not None:
+                state.interrupt()
         return True
