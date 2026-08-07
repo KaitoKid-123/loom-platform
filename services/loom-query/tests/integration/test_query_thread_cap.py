@@ -42,6 +42,7 @@ from loom_query.authz import ResolvedTable
 from loom_query.config import Settings
 from loom_query.store import QueryStatus, QueryStore
 from loom_sql import TableRef
+from loom_storage import StorageCredentials
 
 from ..conftest import FakeAuthz
 
@@ -64,6 +65,8 @@ async def test_the_pinned_thread_count_lets_a_heavy_query_finish(
     app_settings: Settings,
     seeded_table: str,
     lakehouse_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    unused_storage: StorageCredentials,
     fake_authz: FakeAuthz,
 ) -> None:
     """Baseline XANH của Task 8/giới hạn 5: `256MB` + `threads=2` GHIM trong
@@ -87,6 +90,9 @@ async def test_the_pinned_thread_count_lets_a_heavy_query_finish(
             ),
             settings=app_settings,
             store=store,
+            workspace_id=workspace_id,
+            lakehouse_id=lakehouse_id,
+            storage=unused_storage,
         ),
         timeout=60.0,
     )

@@ -39,6 +39,7 @@ from loom_query.config import Settings
 from loom_query.schemas import QueryCreate, QueryCreated, QueryStatusOut
 from loom_query.security import require_shared_secret
 from loom_query.store import QueryStore
+from loom_storage import StorageCredentials
 
 router = APIRouter(tags=["query"], dependencies=[Depends(require_shared_secret)])
 
@@ -58,6 +59,7 @@ async def create_query(body: QueryCreate, request: Request) -> QueryCreated:
 
     store: QueryStore = request.app.state.store
     settings: Settings = request.app.state.settings
+    storage: StorageCredentials = request.app.state.storage
 
     query_id = uuid.uuid4()
     # Tạo hàng TRƯỚC khi lập lịch task nền: `runner.execute` ghi kết quả bằng
@@ -72,6 +74,12 @@ async def create_query(body: QueryCreate, request: Request) -> QueryCreated:
             resolved_tables=resolved_tables,
             settings=settings,
             store=store,
+            # `workspace_id`/`lakehouse_id` CỦA REQUEST — không phải của một
+            # bảng catalog nào trong `resolved_tables` (có thể rỗng, một câu
+            # SQL chỉ đọc `Files/`) — xem docstring `runner.execute`.
+            workspace_id=body.workspace_id,
+            lakehouse_id=body.lakehouse_id,
+            storage=storage,
         )
     )
     await store.attach_task(query_id, task)

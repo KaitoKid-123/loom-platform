@@ -7,6 +7,7 @@ dependencies = [
     "loom-core",
     "loom-sql",
     "loom-iceberg",
+    "loom-storage",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "httpx>=0.28",
@@ -19,6 +20,7 @@ dependencies = [
 loom-core = { workspace = true }
 loom-sql = { workspace = true }
 loom-iceberg = { workspace = true }
+loom-storage = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

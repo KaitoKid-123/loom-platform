@@ -28,6 +28,7 @@ from loom_query.authz import ResolvedTable
 from loom_query.config import Settings
 from loom_query.store import QueryStatus, QueryStore
 from loom_sql import TableRef
+from loom_storage import StorageCredentials
 
 from ..conftest import FakeAuthz
 
@@ -56,6 +57,8 @@ async def test_a_query_over_the_time_limit_is_failed_and_stopped_quickly(
     app_settings: Settings,
     seeded_table: str,
     lakehouse_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    unused_storage: StorageCredentials,
     fake_authz: FakeAuthz,
 ) -> None:
     assert seeded_table == "sales.orders"
@@ -73,6 +76,9 @@ async def test_a_query_over_the_time_limit_is_failed_and_stopped_quickly(
         resolved_tables=_resolved_tables(lakehouse_id),
         settings=short_timeout,
         store=store,
+        workspace_id=workspace_id,
+        lakehouse_id=lakehouse_id,
+        storage=unused_storage,
     )
     elapsed = time.perf_counter() - start
 
@@ -93,6 +99,8 @@ async def test_a_query_within_the_time_limit_succeeds_normally(
     app_settings: Settings,
     seeded_table: str,
     lakehouse_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    unused_storage: StorageCredentials,
     fake_authz: FakeAuthz,
 ) -> None:
     """Đối chứng: timeout không được đá cả những query bình thường."""
@@ -107,6 +115,9 @@ async def test_a_query_within_the_time_limit_succeeds_normally(
         resolved_tables=_resolved_tables(lakehouse_id),
         settings=app_settings,  # mặc định 120s
         store=store,
+        workspace_id=workspace_id,
+        lakehouse_id=lakehouse_id,
+        storage=unused_storage,
     )
 
     state = await store.get(query_id)

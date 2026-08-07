@@ -25,6 +25,7 @@ from loom_query.authz import AuthzClient, AuthzPort, LakehouseResolver
 from loom_query.config import Settings, get_settings
 from loom_query.routers import health, query
 from loom_query.store import QueryStore
+from loom_storage import MinioStsProvider, StorageCredentials
 
 
 def create_app(
@@ -33,9 +34,24 @@ def create_app(
     resolver: LakehouseResolver | None = None,
     authz_http: httpx.AsyncClient | None = None,
     query_store: QueryStore | None = None,
+    storage: StorageCredentials | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     store = query_store or QueryStore()
+
+    # `storage=` cho test tiêm một `MinioStsProvider` trỏ vào MinIO testcontainer
+    # thật (`tests/integration/`), hoặc một fake thuần Python cho test không
+    # cần I/O. Mặc định dựng `MinioStsProvider` THẬT — KHÔNG cần `owns_http`-
+    # kiểu ownership tracking như `authz`/`http` phía dưới: `MinioStsProvider`
+    # không giữ resource nào cần đóng ở `lifespan` (chỉ một `boto3.client`
+    # "sts", không mở kết nối lúc khởi tạo — đã kiểm bằng thực nghiệm, xem báo
+    # cáo hoàn tất Task 13), nên dựng nó vô điều kiện là an toàn và rẻ.
+    resolved_storage: StorageCredentials = storage or MinioStsProvider(
+        endpoint_url=settings.s3_endpoint,
+        bucket=settings.storage_bucket,
+        root_access_key=settings.storage_root_access_key,
+        root_secret_key=settings.storage_root_secret_key,
+    )
 
     # Cùng quy tắc sở hữu của `loom_api.main.create_app`: chỉ đóng client HTTP
     # mà CHÍNH hàm này tạo ra. Khi test tiêm hẳn một `AuthzPort` giả (`authz=`),
@@ -73,6 +89,7 @@ def create_app(
     app.state.authz = resolved_authz
     app.state.resolver = resolved_resolver
     app.state.store = store
+    app.state.storage = resolved_storage
     # KHÔNG dependencies bí mật chia sẻ — probe của kubelet, xem docstring
     # `routers/health.py`.
     app.include_router(health.router)

@@ -32,6 +32,7 @@ from testcontainers.core.container import DockerContainer
 
 from loom_iceberg import Lakehouse, build_catalog, create_warehouse, ensure_bootstrapped
 from loom_query.config import Settings
+from loom_storage import S3Credentials, StorageCredentials
 
 ROOT_USER = "loom-root"
 ROOT_PASSWORD = "loom-root-test"  # container dùng một lần
@@ -177,6 +178,40 @@ def lakekeeper(catalog_pg: PostgresContainer) -> Iterator[str]:
 @pytest.fixture
 def lakehouse_id() -> uuid.UUID:
     return uuid.uuid4()
+
+
+@pytest.fixture
+def workspace_id() -> uuid.UUID:
+    """`runner.execute` (Task 13) đòi `workspace_id` VÔ ĐIỀU KIỆN, kể cả cho
+    một câu SQL không hề chạm `Files/` — xem docstring của nó. Các bài gọi
+    thẳng `runner.execute` (`test_query_cancel.py`, `test_query_timeout.py`,
+    `test_query_thread_cap.py`) không cần giá trị này CÓ Ý NGHĨA gì (SQL của
+    chúng chỉ đọc bảng catalog), nhưng vẫn phải truyền MỘT giá trị hợp lệ."""
+    return uuid.uuid4()
+
+
+class _UnusedStorage:
+    """`StorageCredentials` giả mà `for_workspace` KHÔNG ĐƯỢC PHÉP gọi.
+
+    Ba bài gọi thẳng `runner.execute` (xem fixture `workspace_id`) chỉ đọc
+    bảng catalog — `resolve_files_query` phải tự thấy KHÔNG có `read_parquet`/
+    `read_csv` nào trong SQL của chúng và không bao giờ chạm `storage`. Nếu
+    `for_workspace` BỊ gọi, đó là bằng chứng một thay đổi tương lai đã vô tình
+    kích hoạt đường Files/ cho các câu SQL này — raise ngay tại đây (một
+    `AssertionError` rõ ràng) rẻ hơn nhiều so với một lỗi mạng khó hiểu tới
+    một MinIO không hề được dựng cho các bài test này.
+    """
+
+    def for_workspace(self, workspace_id: uuid.UUID) -> S3Credentials:
+        raise AssertionError(
+            "storage.for_workspace() should never be called — these tests only read "
+            "catalog tables, never 'Files/'"
+        )
+
+
+@pytest.fixture
+def unused_storage() -> StorageCredentials:
+    return _UnusedStorage()
 
 
 @pytest.fixture

@@ -46,8 +46,9 @@ import httpx
 from fastapi import HTTPException, status
 
 from loom_core.schemas import Principal
+from loom_query.files import UnsafeFilesPath, validate_files_paths
 from loom_sql import SqlError, TableRef, validate
-from loom_sql.deps import dependencies
+from loom_sql.deps import FILE_READ_FUNCTIONS, dependencies
 
 # DuckDB là engine DUY NHẤT ở Giai đoạn 2b — spec mục 5.9 để ngỏ việc đổi sang
 # Trino cho Giai đoạn 4, nhưng chưa tới lượt. SQL người dùng gửi lên vì vậy LUÔN
@@ -94,14 +95,23 @@ class ExternalSourceRejected(HTTPException):
     tích cả ba thành `exp.Table`, và `loom_sql.deps.dependencies` tách chúng ra
     `external` thay vì trộn vào danh sách bảng.
 
-    Vì sao chặn thay vì bỏ qua: đường đọc file thô trong `Files/` chưa được xây
-    (Giai đoạn 2b sau), nên chưa có gì phân quyền cho nó. Thứ duy nhất đứng chắn
-    một `read_parquet('s3://workspace-khac/…')` lúc này là phạm vi của credential
-    do Lakekeeper cấp — và một ranh giới duy nhất, không có lớp thứ hai, là chỗ
-    một lỗi cấu hình biến thành rò rỉ dữ liệu chéo workspace.
+    **CẬP NHẬT — Task 13 (Giai đoạn 2b) mở một khe hẹp trong lệnh cấm này:**
+    `read_parquet`/`read_csv` trỏ vào `Files/` của ĐÚNG lakehouse trong request
+    giờ ĐƯỢC PHỤC VỤ (`_check_files_access` bên dưới, dùng `loom_query.files`),
+    thay vì lệnh cấm rơi vào MỌI thứ trong `external`. Vì sao vẫn còn class
+    này thay vì xoá hẳn: mọi thứ khác trong `external` — path trần
+    (`FROM 's3://…'`), `range`/`generate_series` (không đọc dữ liệu từ đâu cả,
+    quyết định KHÔNG mở khoá — xem báo cáo hoàn tất Task 13), bốn hàm còn lại
+    của `_KNOWN_READERS` bên `loom_sql.deps` (`read_csv_auto`, `read_json`,
+    `read_json_auto`, `parquet_scan`) — vẫn bị chặn NGUYÊN VẸN như trước, và
+    một `read_parquet('s3://workspace-khac/…')` (path KHÔNG an toàn) cũng vậy
+    (dù giờ raise qua `InvalidFilesPath`, không phải class này — xem đó).
 
-    Chặn ở đây rẻ và nói rõ lý do cho người dùng. Khi đường file thô có mặt, chỗ
-    này đổi từ "từ chối" thành "phân quyền theo prefix của workspace".
+    Vì sao chặn thay vì bỏ qua, cho PHẦN CÒN LẠI: chưa có gì phân quyền cho
+    chúng. Thứ duy nhất đứng chắn một `FROM 's3://workspace-khac/…'` lúc này là
+    phạm vi của credential do Lakekeeper cấp — và một ranh giới duy nhất, không
+    có lớp thứ hai, là chỗ một lỗi cấu hình biến thành rò rỉ dữ liệu chéo
+    workspace. Chặn ở đây rẻ và nói rõ lý do cho người dùng.
     """
 
     def __init__(self, sources: list[str]) -> None:
@@ -110,6 +120,21 @@ class ExternalSourceRejected(HTTPException):
             "query đọc dữ liệu không qua catalog, chưa hỗ trợ ở giai đoạn này: "
             + ", ".join(sources),
         )
+
+
+class InvalidFilesPath(HTTPException):
+    """400 — một `read_parquet`/`read_csv` trỏ ra ngoài `Files/` của lakehouse
+    (tuyệt đối, có scheme, thoát prefix...), hoặc không dùng literal chuỗi làm
+    path — xem `loom_query.files.UnsafeFilesPath`.
+
+    KHÁC `ExternalSourceRejected` dù cùng 400: thông điệp ở đây nói RÕ lý do
+    (thoát prefix, tuyệt đối...), vì đọc `Files/` bằng `read_parquet`/
+    `read_csv` LÀ tính năng được hỗ trợ ở Giai đoạn 2b (Task 13) — chỉ ĐÚNG
+    path này không an toàn, không phải "loom-query chưa biết đọc file thô".
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(status.HTTP_400_BAD_REQUEST, f"invalid path under 'Files/': {reason}")
 
 
 class QueryForbidden(HTTPException):
@@ -326,6 +351,37 @@ async def _resolve_tables(
     return tuple(resolved_tables)
 
 
+def _check_files_access(sql: str, external: list[str]) -> None:
+    """Quyết định phần CÒN LẠI của lệnh cấm `ExternalSourceRejected`, sau khi
+    Task 13 mở đúng một khe hẹp — đọc docstring của class đó trước khi sửa
+    hàm này.
+
+    `external` (nhãn từ `dependencies()`, xem `loom_sql.deps`) khớp
+    `sql_name()` mà sqlglot trả cho MỘT lời gọi hàm — CHỮ HOA, có gạch dưới
+    (`"READ_PARQUET"`), hoặc chính path trần nếu đó là `FROM 's3://…'` (không
+    khớp gì trong `FILE_READ_FUNCTIONS`, luôn bị chặn). So sánh bằng
+    `.lower()` để khớp `FILE_READ_FUNCTIONS` (chữ thường, xem `loom_sql.deps`)
+    — MỘT nguồn sự thật cho "hai hàm nào được phục vụ", không phải một bản
+    sao chữ hoa tự chép tay ở đây.
+
+    BẤT KỲ nhãn nào KHÔNG khớp `FILE_READ_FUNCTIONS` giữ NGUYÊN hành vi CŨ —
+    `ExternalSourceRejected` cho TOÀN BỘ danh sách, không phân biệt: đây là
+    bằng chứng "lệnh cấm cũ còn nguyên" (chứng minh đỏ 5 của Task 13). Chỉ khi
+    MỌI nhãn đều thuộc `FILE_READ_FUNCTIONS`, hàm này mới hỏi tiếp
+    `loom_query.files.validate_files_paths` — trọng tài THẬT về an toàn của
+    TỪNG path — và biến một `UnsafeFilesPath` (nếu có) thành `InvalidFilesPath`
+    (400, nói rõ lý do), KHÁC thông điệp "chưa hỗ trợ" chung chung của
+    `ExternalSourceRejected`: đọc `Files/` LÀ tính năng được hỗ trợ, chỉ path
+    cụ thể này không an toàn.
+    """
+    if any(label.lower() not in FILE_READ_FUNCTIONS for label in external):
+        raise ExternalSourceRejected(external)
+    try:
+        validate_files_paths(sql, DIALECT)
+    except UnsafeFilesPath as exc:
+        raise InvalidFilesPath(str(exc)) from exc
+
+
 async def run_gate(
     *,
     sql: str,
@@ -358,8 +414,10 @@ async def run_gate(
 
     # TRƯỚC khi phân giải và kiểm quyền: một nguồn ngoài catalog không có item
     # nào để hỏi quyền, nên nếu để nó đi tiếp thì nó lặng lẽ không bị kiểm gì.
+    # `_check_files_access` mở ĐÚNG MỘT khe hẹp trong lệnh cấm đó (Task 13) —
+    # xem docstring của nó và của `ExternalSourceRejected`.
     if deps.external:
-        raise ExternalSourceRejected(deps.external)
+        _check_files_access(sql, deps.external)
 
     refs = tuple(deps.tables)
 

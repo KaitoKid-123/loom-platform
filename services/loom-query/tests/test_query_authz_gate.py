@@ -38,6 +38,7 @@ from fastapi import status
 from loom_core.schemas import Principal
 from loom_query.authz import (
     ExternalSourceRejected,
+    InvalidFilesPath,
     QueryForbidden,
     SqlSyntaxError,
     UnsupportedTableName,
@@ -180,8 +181,19 @@ async def test_a_query_reading_outside_the_catalog_is_rejected(
     Chặn ở đây là lớp thứ hai. Lớp thứ nhất là phạm vi credential do Lakekeeper
     cấp; một ranh giới duy nhất không có lớp dự phòng là chỗ một lỗi cấu hình
     biến thành rò rỉ dữ liệu chéo workspace.
+
+    **Đổi exception ở Task 13:** trước đó bài này khẳng định `ExternalSourceRejected`
+    — đúng lúc `read_parquet` CHƯA được phục vụ chút nào. Giờ `read_parquet`/
+    `read_csv` LÀ tính năng được hỗ trợ (đọc `Files/` của lakehouse), nên một
+    path tuyệt đối/có scheme bị từ chối vì nó KHÔNG AN TOÀN
+    (`InvalidFilesPath`, nói rõ lý do), không phải vì `read_parquet` "chưa hỗ
+    trợ" (`ExternalSourceRejected`) — hai thông điệp khác nhau cho hai người
+    dùng khác nhau: một người gõ sai path, một người gọi một hàm hoàn toàn lạ.
+    Vẫn 400, vẫn từ chối TRƯỚC khi chạm S3 — hành vi bên ngoài không đổi, chỉ
+    lý do được nói rõ hơn. `test_generate_series_is_still_rejected` bên dưới
+    là bài giữ nguyên `ExternalSourceRejected` cho phần KHÔNG được nới.
     """
-    with pytest.raises(ExternalSourceRejected):
+    with pytest.raises(InvalidFilesPath):
         await run_gate(
             sql="SELECT * FROM read_parquet('s3://workspace-khac/bi-mat.parquet')",
             lakehouse_id=uuid.uuid4(),
@@ -519,3 +531,184 @@ async def test_cross_lakehouse_names_are_resolved_in_a_single_call_not_per_table
 
     assert len(fake_authz.resolve_calls) == 1
     assert fake_authz.resolve_calls[0] == (workspace_id, ("other",))
+
+
+# --------------------------------------------------------- Task 13: Files/
+
+
+async def test_read_parquet_under_files_of_the_request_lakehouse_is_allowed(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Vế KHẲNG ĐỊNH của cổng quyền cho Task 13: một `read_parquet('Files/…')`
+    hợp lệ, với quyền viewer trên `lakehouse_id`, không bị `run_gate` chặn.
+    Không có bài này, ba bài TỪ CHỐI bên dưới cũng xanh với một bản cài từ
+    chối MỌI query — xem cảnh báo ở đầu module `authz.py`/báo cáo Task 13."""
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+
+    refs = await run_gate(
+        sql="SELECT * FROM read_parquet('Files/thang-01/a.parquet')",
+        lakehouse_id=lakehouse_id,
+        workspace_id=uuid.uuid4(),
+        principal=principal,
+        authz=fake_authz,
+        resolver=fake_authz,
+    )
+
+    assert refs == ()  # không có bảng catalog nào trong câu này
+
+
+async def test_a_files_only_query_without_the_lakehouses_permission_is_forbidden(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Chứng minh đỏ 2 của Task 13: `read_parquet('Files/…')` không kèm bảng
+    catalog nào (`deps.tables == []`) — nếu `run_gate` chỉ hỏi quyền cho bảng
+    trong `deps.tables`, KHÔNG có id nào để hỏi, và query lọt qua mà chưa hề
+    kiểm quyền viewer trên `lakehouse_id`.
+
+    Bài này KHÔNG grant gì, nên `fake_authz` trả `None` cho mọi id — phải ra
+    403, và `calls` phải cho thấy `lakehouse_id` THẬT SỰ đã bị hỏi (bằng chứng
+    nó nằm trong tập được kiểm, không phải trùng hợp bị chặn vì lý do khác).
+
+    Đã xác nhận bằng thực nghiệm (xem báo cáo hoàn tất Task 13): tạm đổi dòng
+    xây `item_ids` trong `run_gate` từ `(lakehouse_id, *(...))` thành chỉ
+    `tuple(t.lakehouse_id for t in resolved_tables)` (bỏ phần đưa `lakehouse_id`
+    vô điều kiện — invariant đã sửa ở Task 7) làm bài này ĐỎ: `item_ids` rỗng,
+    `roles_for_items` không bị gọi, không có `missing`, và `run_gate` trả về
+    `()` thay vì ném `QueryForbidden`.
+    """
+    lakehouse_id = uuid.uuid4()
+
+    with pytest.raises(QueryForbidden):
+        await run_gate(
+            sql="SELECT * FROM read_parquet('Files/thang-01/a.parquet')",
+            lakehouse_id=lakehouse_id,
+            workspace_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+    assert fake_authz.calls == [(lakehouse_id,)]
+
+
+async def test_read_parquet_with_an_absolute_path_is_rejected(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """`InvalidFilesPath`, không `ExternalSourceRejected` — xem docstring
+    `test_a_query_reading_outside_the_catalog_is_rejected` cho lý do đổi.
+
+    Quyền viewer được CẤP SẴN trên `lakehouse_id` (khác các bài `FakeAuthz()`
+    trần trụi khác) — có chủ đích: nếu phép kiểm path bị gỡ, câu SQL này phải
+    THÀNH CÔNG hoàn toàn (không exception nào), không bị che bởi một 403 tình
+    cờ do thiếu quyền. `pytest.raises(InvalidFilesPath)` khi đó sẽ đỏ vì
+    KHÔNG CÓ exception nào được ném, chứ không phải vì một exception SAI loại
+    — tín hiệu đỏ rõ ràng, không mập mờ (xem cảnh báo về "chứng minh đỏ bị
+    che" trong báo cáo hoàn tất Task 13)."""
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+    with pytest.raises(InvalidFilesPath):
+        await run_gate(
+            sql="SELECT * FROM read_parquet('/etc/passwd')",
+            lakehouse_id=lakehouse_id,
+            workspace_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+
+async def test_read_parquet_escaping_the_files_prefix_is_rejected(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Chứng minh đỏ 1 của Task 13 — xem `services/loom-query/tests/
+    test_files.py::test_escaping_the_files_prefix_with_dotdot_is_rejected`
+    cho phép kiểm chi tiết ở tầng `safe_relative_path`; bài này khẳng định
+    ĐÚNG cùng lỗ đó bị chặn ở tầng `run_gate` (400 TRƯỚC khi có bất kỳ tác vụ
+    nền nào, KHÔNG phải một `failed` sau khi đã trả `202`).
+
+    Quyền viewer CẤP SẴN — cùng lý do đã ghi ở
+    `test_read_parquet_with_an_absolute_path_is_rejected`: gỡ phép kiểm path
+    phải làm câu SQL này CHẠY ĐƯỢC, không bị một 403 không liên quan che mất
+    tín hiệu đỏ."""
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+    with pytest.raises(InvalidFilesPath):
+        await run_gate(
+            sql="SELECT * FROM read_parquet('Files/../../khac/x.parquet')",
+            lakehouse_id=lakehouse_id,
+            workspace_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+
+async def test_read_parquet_without_a_literal_path_is_rejected(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+    with pytest.raises(InvalidFilesPath):
+        await run_gate(
+            sql="SELECT * FROM read_parquet(some_column)",
+            lakehouse_id=lakehouse_id,
+            workspace_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+
+async def test_generate_series_is_still_rejected_not_widened_by_files_support(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Chứng minh đỏ 5 của Task 13 (lệnh cấm cũ còn nguyên), phần bền vững:
+    `range`/`generate_series` không đọc dữ liệu từ đâu cả — QUYẾT ĐỊNH của
+    Task 13 là KHÔNG mở khoá cho chúng (xem báo cáo hoàn tất).
+
+    Quyền viewer CẤP SẴN trên `lakehouse_id` — có chủ đích: câu SQL này không
+    có bảng catalog nào (`deps.tables == []`), nên nếu cổng nhãn trong
+    `_check_files_access` bị gỡ (nới quá tay, hỏi thẳng `validate_files_paths`
+    cho MỌI hàm bảng), `range(10)` sẽ trót lọt qua HOÀN TOÀN (không có path
+    nào để `validate_files_paths` từ chối — `file_read_calls` không hề biết
+    tới `range`) và `run_gate` trả về `()` thành công thay vì ném
+    `ExternalSourceRejected` — một tín hiệu đỏ SẠCH (không exception, không bị
+    một 403 không liên quan che mất), đã kiểm bằng thực nghiệm (xem báo cáo
+    hoàn tất Task 13)."""
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+    with pytest.raises(ExternalSourceRejected):
+        await run_gate(
+            sql="SELECT * FROM range(10)",
+            lakehouse_id=lakehouse_id,
+            workspace_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+
+async def test_read_json_is_still_rejected_only_two_readers_were_widened(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """`read_json` là một trong bốn hàm của `_KNOWN_READERS` (`loom_sql.deps`)
+    KHÔNG được Task 13 phục vụ — vẫn `ExternalSourceRejected` NGUYÊN VẸN, kể
+    cả với một path nằm trong `Files/` (path an toàn không cứu được một hàm
+    không được phục vụ).
+
+    Quyền viewer CẤP SẴN — cùng lý do đã ghi ở bài `generate_series` phía
+    trên: gỡ cổng nhãn làm `read_json('Files/a.json')` lọt qua HOÀN TOÀN
+    (path AN TOÀN, `validate_files_paths` không có gì để từ chối), không bị
+    che bởi một 403 không liên quan."""
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+    with pytest.raises(ExternalSourceRejected):
+        await run_gate(
+            sql="SELECT * FROM read_json('Files/a.json')",
+            lakehouse_id=lakehouse_id,
+            workspace_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )

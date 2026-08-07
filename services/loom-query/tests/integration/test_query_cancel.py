@@ -37,6 +37,7 @@ from loom_query.config import Settings
 from loom_query.main import create_app
 from loom_query.store import QueryStatus, QueryStore
 from loom_sql import TableRef
+from loom_storage import StorageCredentials
 
 from ..conftest import FakeAuthz, http_client
 
@@ -55,7 +56,12 @@ LIGHT_SQL = "SELECT id, amount FROM sales.orders ORDER BY id"
 
 
 async def _run_in_background(
-    settings: Settings, lakehouse_id: uuid.UUID, store: QueryStore, sql: str
+    settings: Settings,
+    lakehouse_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    storage: StorageCredentials,
+    store: QueryStore,
+    sql: str,
 ) -> tuple[uuid.UUID, asyncio.Task[None]]:
     query_id = uuid.uuid4()
     await store.create(query_id)
@@ -69,6 +75,9 @@ async def _run_in_background(
             resolved_tables=resolved_tables,
             settings=settings,
             store=store,
+            workspace_id=workspace_id,
+            lakehouse_id=lakehouse_id,
+            storage=storage,
         )
     )
     await store.attach_task(query_id, task)
@@ -79,6 +88,8 @@ async def test_cancel_of_a_running_query_stops_the_background_work_early(
     app_settings: Settings,
     seeded_table: str,
     lakehouse_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    unused_storage: StorageCredentials,
     fake_authz: FakeAuthz,
 ) -> None:
     assert seeded_table == "sales.orders"
@@ -86,7 +97,9 @@ async def test_cancel_of_a_running_query_stops_the_background_work_early(
     store = QueryStore()
 
     start = time.perf_counter()
-    query_id, task = await _run_in_background(app_settings, lakehouse_id, store, HEAVY_SQL)
+    query_id, task = await _run_in_background(
+        app_settings, lakehouse_id, workspace_id, unused_storage, store, HEAVY_SQL
+    )
 
     await asyncio.sleep(0.5)  # để chắc DuckDB đã thật sự bắt đầu chạy câu nặng
     cancelled = await store.cancel(query_id)
@@ -110,7 +123,9 @@ async def test_cancel_of_a_running_query_stops_the_background_work_early(
     # Giai đoạn 2a có một cửa chặn flaky mà chỉ CI mới lộ, vì nó khẳng định một
     # con số tuyệt đối phụ thuộc số core. Đây là cùng một cái bẫy.
     control_start = time.perf_counter()
-    _, control_task = await _run_in_background(app_settings, lakehouse_id, QueryStore(), HEAVY_SQL)
+    _, control_task = await _run_in_background(
+        app_settings, lakehouse_id, workspace_id, unused_storage, QueryStore(), HEAVY_SQL
+    )
     await asyncio.wait_for(control_task, timeout=60.0)
     uninterrupted = time.perf_counter() - control_start
 
@@ -125,13 +140,17 @@ async def test_cancelling_an_already_finished_query_does_not_change_its_result(
     app_settings: Settings,
     seeded_table: str,
     lakehouse_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    unused_storage: StorageCredentials,
     fake_authz: FakeAuthz,
 ) -> None:
     """Vế thứ hai bắt buộc của Task 9: huỷ một query ĐÃ XONG không lỗi, và
     không đổi kết quả — qua đúng `runner.execute` thật, không phải store giả."""
     fake_authz.grant(lakehouse_id, "viewer")
     store = QueryStore()
-    query_id, task = await _run_in_background(app_settings, lakehouse_id, store, LIGHT_SQL)
+    query_id, task = await _run_in_background(
+        app_settings, lakehouse_id, workspace_id, unused_storage, store, LIGHT_SQL
+    )
     await task  # câu nhẹ — chạy xong gần như ngay lập tức
 
     state_before = await store.get(query_id)

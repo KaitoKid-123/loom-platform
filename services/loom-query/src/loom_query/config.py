@@ -21,7 +21,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # là điều kiện để `_reject_default_secrets_outside_local` của MỖI service tự
 # đứng vững — dev/prod quên set biến môi trường ở BÊN NÀO cũng khiến chính
 # service đó từ chối khởi động, không đợi tới lúc hai bên gọi nhau rồi 401.
-_INSECURE_DEFAULTS = {"shared_secret": "dev-only-do-not-use-in-production"}
+_INSECURE_DEFAULTS = {
+    "shared_secret": "dev-only-do-not-use-in-production",
+    "storage_root_secret_key": "dev-only-do-not-use-in-production",
+}
 
 
 class Settings(BaseSettings):
@@ -47,6 +50,29 @@ class Settings(BaseSettings):
     # `runner.py`) — KHÔNG theo `item.name`, vì tên đổi được còn id thì không.
     catalog_uri: str = "http://lakekeeper.loom.svc.cluster.local:8181/catalog"
     s3_endpoint: str = "http://minio.loom.svc.cluster.local:9000"
+
+    # Đường Files/ (Task 13) — KHÔNG đi qua Lakekeeper, nên `loom-query` cần
+    # biết bucket và cầm CHÍNH credential gốc MinIO để tự cấp credential STS
+    # hẹp-theo-workspace qua `MinioStsProvider.for_workspace` (`main.py`); xem
+    # docstring `loom_query.files` và spec Giai đoạn 2 mục 2 ("loom-query ─►
+    # MinioStsProvider.for_workspace() ─► AssumeRole tới MinIO").
+    #
+    # `storage_bucket` PHẢI trỏ cùng bucket vật lý với `loom_core.config.
+    # Settings.storage_bucket` bên loom-api — cùng khuôn `shared_secret`: bản
+    # sao CỦA CHÍNH `loom-query`, đọc qua biến môi trường RIÊNG (`LOOM_QUERY_
+    # STORAGE_BUCKET`, không phải `LOOM_STORAGE_BUCKET`) vì `loom-query` không
+    # mở rộng `loom_core.config.Settings` (xem docstring đầu file).
+    #
+    # Đây là bản sao THỨ HAI của credential gốc MinIO, đọc bởi MỘT service
+    # khác (`loom-api`/`warehouse_provisioning.py` giữ bản đầu, để cấp
+    # warehouse Lakekeeper) cho MỘT mục đích khác — không phải một rò rỉ tình
+    # cờ: spec Giai đoạn 2 mục 2 CHỦ Ý đặt `loom-query` là bên gọi STS cho
+    # đường Files/. `services/api/tests/test_root_credential_guard.py` chỉ
+    # canh phạm vi bên trong `loom_api`; nó không canh (và không cần canh)
+    # `loom-query`.
+    storage_bucket: str = "loom-local"
+    storage_root_access_key: str = "loom-dev-minio-root"
+    storage_root_secret_key: str = "dev-only-do-not-use-in-production"  # noqa: S105
 
     # Ba trong năm giới hạn tài nguyên (Task 8) — CẤU HÌNH ĐƯỢC theo yêu cầu
     # ràng buộc của Giai đoạn 2b, khác `memory_limit`/`threads` DuckDB (GHIM

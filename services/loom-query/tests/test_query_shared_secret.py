@@ -112,8 +112,13 @@ def test_the_insecure_default_is_rejected_outside_local(monkeypatch: pytest.Monk
 def test_a_real_value_is_accepted_outside_local(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOOM_QUERY_ENVIRONMENT", "prod")
     monkeypatch.setenv("LOOM_QUERY_SHARED_SECRET", "a-real-secret-value")
+    # Task 13 thêm MỘT trường bị canh thứ hai (`storage_root_secret_key`) —
+    # cả hai phải có giá trị thật, không chỉ `shared_secret`, để `Settings()`
+    # dựng được ngoài `local` (xem `_INSECURE_DEFAULTS`).
+    monkeypatch.setenv("LOOM_QUERY_STORAGE_ROOT_SECRET_KEY", "a-real-minio-secret")
     settings = Settings()
     assert settings.shared_secret == "a-real-secret-value"
+    assert settings.storage_root_secret_key == "a-real-minio-secret"
 
 
 def test_default_is_allowed_in_local() -> None:

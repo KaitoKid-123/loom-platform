@@ -69,15 +69,31 @@ import duckdb
 import pyarrow as pa  # type: ignore[import-untyped]
 
 from loom_iceberg import Lakehouse, build_catalog
-from loom_query.authz import ResolvedTable, lakehouse_alias_of, strip_lakehouse_alias
+from loom_query.authz import DIALECT, ResolvedTable, lakehouse_alias_of, strip_lakehouse_alias
 from loom_query.config import Settings
+from loom_query.files import resolve_files_query
 from loom_query.limits import check_scan_bytes, truncate_table
 from loom_query.schemas import ColumnOut
 from loom_query.store import QueryStore
 from loom_sql import TableRef
+from loom_storage import StorageCredentials
 
 _MEMORY_LIMIT = "256MB"
 _THREADS = 2
+
+# MinIO bỏ qua region trong thực tế (đã kiểm bằng thực nghiệm — xem báo cáo
+# hoàn tất Task 13), nhưng `CREATE SECRET ... (TYPE s3, ...)` của DuckDB đòi
+# một giá trị. Khớp mặc định của `MinioStsProvider` (`packages/storagekit`) —
+# một hằng số, không phải một trường `Settings` mới, vì không có gì để cấu
+# hình: giá trị này KHÔNG đổi khi MinIO chuyển ra VPS riêng (spec Giai đoạn 2
+# mục 2.0 — đó là đổi endpoint/TLS, không đổi region).
+_FILES_S3_REGION = "us-east-1"
+
+# Tên định danh của SECRET nạp vào MỖI connection DuckDB — cục bộ trong phạm vi
+# MỘT connection (`:memory:`, một cái mới cho mỗi query, xem `_run_sync`), nên
+# một tên cố định không va chạm giữa các query chạy đồng thời (mỗi query một
+# connection riêng, một process riêng — không có gì dùng chung).
+_FILES_SECRET_NAME = "loom_files_secret"  # noqa: S105 — tên định danh, không phải mật khẩu
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +113,67 @@ def _quote_ident(name: str) -> str:
     đây rẻ hơn nhiều so với debug một namespace tình cờ mang dấu `"`.
     """
     return '"' + name.replace('"', '""') + '"'
+
+
+def _quote_secret_value(value: str) -> str:
+    """Thoát dấu `'` trong một giá trị chèn vào `CREATE SECRET` bằng f-string —
+    cùng lý do và cùng cách `_quote_ident` thoát dấu `"` cho định danh: giá trị
+    tới từ STS (AWS/MinIO) trong thực tế không bao giờ chứa dấu `'`, nhưng
+    dựng DDL bằng f-string vẫn không được PHÉP giả định vậy.
+    """
+    return value.replace("'", "''")
+
+
+def _install_files_secret(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    storage: StorageCredentials,
+    workspace_id: uuid.UUID,
+    settings: Settings,
+) -> None:
+    """Nạp credential STS hẹp-theo-WORKSPACE (`MinioStsProvider.for_workspace`,
+    `packages/storagekit`) vào DuckDB qua httpfs — LỚP BẢO VỆ THỨ HAI của
+    đường Files/, xem module docstring `loom_query.files` cho lý do nó KHÔNG
+    thay được lớp MỘT (`safe_relative_path`, đã chạy trong `authz.run_gate`
+    TRƯỚC khi tới đây, ĐỒNG BỘ, chưa từng chạm S3): credential ở đây hợp lệ
+    cho CẢ workspace, RỘNG HƠN một lakehouse.
+
+    `LOAD` — KHÔNG `INSTALL` — httpfs ở đây: extension đã được NẠP SẴN lúc
+    build image (xem `Dockerfile`) vì container chạy `readOnlyRootFilesystem:
+    true` (`query-deployment.yaml`) — `INSTALL` lúc runtime sẽ cố ghi file
+    extension vào một filesystem chỉ đọc. Đã kiểm bằng thực nghiệm: `LOAD` một
+    extension ĐÃ có sẵn trong `extension_directory` mặc định (`$HOME/.duckdb/
+    extensions/v<version>/<platform>/`) không cần ghi gì và không gọi mạng,
+    chạy được trên một `$HOME` chỉ có quyền đọc.
+
+    CHỈ gọi hàm này khi CHẮC CHẮN có ít nhất một `read_parquet`/`read_csv` cần
+    phục vụ (`FilesQuery.has_file_reads`, xem `_run_sync`) — một round trip STS
+    (`storage.for_workspace`, gọi mạng THẬT tới MinIO) cho MỌI query, kể cả
+    query chỉ đọc catalog, là phí vô ích.
+    """
+    connection.execute("LOAD httpfs")
+    credentials = storage.for_workspace(workspace_id)
+    endpoint = settings.s3_endpoint.removeprefix("https://").removeprefix("http://")
+    use_ssl = "true" if settings.s3_endpoint.startswith("https://") else "false"
+    # Dựng DDL bằng f-string: mọi giá trị chèn vào đây hoặc là hằng số cục bộ
+    # (`_FILES_SECRET_NAME`/`_FILES_S3_REGION`/`URL_STYLE`) hoặc đã qua
+    # `_quote_secret_value` (thoát dấu `'`) — không đoạn nào mang một chuỗi
+    # SQL do người dùng cuối tự do gõ vào (path `Files/…` không xuất hiện ở
+    # đây, nó nằm trong CHÍNH câu SQL, xử lý riêng ở `resolve_files_query`).
+    connection.execute(
+        f"""
+        CREATE SECRET {_FILES_SECRET_NAME} (
+            TYPE s3,
+            KEY_ID '{_quote_secret_value(credentials.access_key_id)}',
+            SECRET '{_quote_secret_value(credentials.secret_access_key)}',
+            SESSION_TOKEN '{_quote_secret_value(credentials.session_token)}',
+            REGION '{_FILES_S3_REGION}',
+            ENDPOINT '{_quote_secret_value(endpoint)}',
+            URL_STYLE 'path',
+            USE_SSL {use_ssl}
+        )
+        """
+    )
 
 
 def _jsonable(value: object) -> object:
@@ -201,9 +278,19 @@ def _run_sync(
     resolved_tables: tuple[ResolvedTable, ...],
     settings: Settings,
     publish_connection: Callable[[duckdb.DuckDBPyConnection], None],
+    workspace_id: uuid.UUID,
+    lakehouse_id: uuid.UUID,
+    storage: StorageCredentials,
 ) -> QueryResult:
     """Phần CHẶN: mở connection, mở MỘT catalog Iceberg cho mỗi lakehouse chạm
     tới, đăng ký từng bảng trên đúng catalog của nó, chạy `sql`.
+
+    `workspace_id`/`lakehouse_id`/`storage` phục vụ ĐƯỜNG KHÁC, ĐỘC LẬP với
+    `resolved_tables` — đọc `Files/` thô qua `read_parquet`/`read_csv` (Task
+    13), không đi qua Iceberg/Lakekeeper chút nào (xem module docstring
+    `loom_query.files`). Cần truyền RIÊNG (không suy ra từ `resolved_tables`)
+    vì một câu SQL CHỈ đọc `Files/` có `resolved_tables == ()` — không có
+    bảng catalog nào để lấy `lakehouse_id` ra từ đó.
 
     `resolved_tables` (trả về từ `authz.run_gate`) đã gắn sẵn id lakehouse sở
     hữu MỖI bảng — bảng hai phần mang id của chính request, bảng ba phần mang
@@ -244,6 +331,31 @@ def _run_sync(
     try:
         connection.execute(f"SET memory_limit='{_MEMORY_LIMIT}'")
         connection.execute(f"SET threads={_THREADS}")
+
+        # Đường Files/ (Task 13) — ĐỘC LẬP với đường Iceberg bên dưới, không
+        # chạm `resolved_tables`/`lakehouses` gì cả. `resolve_files_query` AN
+        # TOÀN gọi trên MỌI câu SQL: nó tự trả nguyên `sql` không đổi nếu
+        # không có `read_parquet`/`read_csv` nào (xem docstring của nó), nên
+        # gọi VÔ ĐIỀU KIỆN ở đây rẻ hơn nhiều so với một nhánh rẽ dựa vào một
+        # cờ TÍNH SẴN lúc `run_gate` — cờ đó sẽ là một nguồn sự thật THỨ HAI
+        # về "câu SQL này có đọc Files/ hay không", đúng cái bẫy mà
+        # `authz.run_gate`/`_resolve_tables` đã né cho `lakehouse_id` (xem
+        # comment ở đó). `validate_files_paths` (bên trong) đã chạy một lần ở
+        # `run_gate` TRƯỚC khi có `202` — gọi lại ở đây là một lớp phòng hờ
+        # RẺ (thuần AST, không I/O), không phải một round trip STS lãng phí:
+        # round trip đó (`_install_files_secret`) CHỈ chạy nếu `has_file_reads`.
+        files_query = resolve_files_query(
+            sql,
+            DIALECT,
+            workspace_id=workspace_id,
+            lakehouse_id=lakehouse_id,
+            bucket=settings.storage_bucket,
+        )
+        if files_query.has_file_reads:
+            _install_files_secret(
+                connection, storage=storage, workspace_id=workspace_id, settings=settings
+            )
+        sql_to_run = files_query.sql
 
         lakehouses: dict[uuid.UUID, Lakehouse] = {}
 
@@ -295,7 +407,7 @@ def _run_sync(
         # cũ đã bị deprecate) và trả đúng `pa.Table` mà `_to_result` cần —
         # bảng kết quả cuối (đã bị trần 10.000 dòng của giới hạn 3) không cần
         # đọc theo luồng như `Lakehouse.scan()` ở trên.
-        arrow_result = connection.sql(sql).to_arrow_table()
+        arrow_result = connection.sql(sql_to_run).to_arrow_table()
         limited, truncated, row_count = truncate_table(arrow_result, settings.max_result_rows)
         return _to_result(limited, truncated=truncated, row_count=row_count)
     finally:
@@ -309,15 +421,24 @@ async def execute(
     resolved_tables: tuple[ResolvedTable, ...],
     settings: Settings,
     store: QueryStore,
+    workspace_id: uuid.UUID,
+    lakehouse_id: uuid.UUID,
+    storage: StorageCredentials,
 ) -> None:
     """Task nền của một query — ghi kết quả (hoặc lỗi) vào `store` khi xong.
 
-    KHÔNG nhận `lakehouse_id` riêng: mỗi phần tử của `resolved_tables` đã tự
-    mang id lakehouse sở hữu nó (kể cả bảng hai phần, mang id của chính
-    request — xem `authz._resolve_tables`), và `_run_sync` mở catalog theo
-    ĐÚNG những id đó. Một tham số `lakehouse_id` riêng ở đây sẽ là một nguồn sự
-    thật THỨ HAI về "lakehouse nào" — dễ trôi khỏi `resolved_tables` khi một
-    trong hai đổi mà quên đổi bên kia.
+    Bảng catalog KHÔNG nhận `lakehouse_id` riêng: mỗi phần tử của
+    `resolved_tables` đã tự mang id lakehouse sở hữu nó (kể cả bảng hai phần,
+    mang id của chính request — xem `authz._resolve_tables`), và `_run_sync`
+    mở catalog theo ĐÚNG những id đó.
+
+    **`workspace_id`/`lakehouse_id`/`storage` ở đây LÀ một trường hợp khác —
+    và KHÔNG mâu thuẫn với đoạn trên:** chúng phục vụ đường Files/ (Task 13),
+    ĐỘC LẬP với `resolved_tables`, xem docstring `_run_sync`. Một câu SQL CHỈ
+    đọc `Files/` có `resolved_tables == ()`, nên `lakehouse_id`/`workspace_id`
+    của REQUEST (không phải của một bảng catalog nào) là nguồn duy nhất để
+    biết "Files/ của lakehouse nào" — không có cách nào suy ra nó từ
+    `resolved_tables` khi danh sách đó rỗng.
 
     Bắt MỌI ngoại lệ: đây là ranh giới của một `asyncio.Task` không ai `await`
     trực tiếp (`routers/query.py` chỉ giữ tham chiếu để huỷ, không đợi nó),
@@ -362,6 +483,9 @@ async def execute(
             resolved_tables=resolved_tables,
             settings=settings,
             publish_connection=publish_connection,
+            workspace_id=workspace_id,
+            lakehouse_id=lakehouse_id,
+            storage=storage,
         )
     )
 

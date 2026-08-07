@@ -39,7 +39,25 @@ COPY --from=builder --chown=loom:loom /app /app
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/home/loom
+
+# httpfs NẠP SẴN lúc build (Task 13, đường đọc `Files/`) — container chạy
+# `readOnlyRootFilesystem: true` (`query-deployment.yaml`), nên `INSTALL
+# httpfs` lúc RUNTIME sẽ cố ghi file extension vào một filesystem chỉ đọc, và
+# cụm không chắc có egress ra ngoài để tải nó lần đầu. `LOAD` (khác `INSTALL`)
+# chỉ ĐỌC file đã có trong `extension_directory` mặc định ($HOME/.duckdb/
+# extensions/v<version>/<platform>/) — đã kiểm bằng thực nghiệm: `LOAD httpfs`
+# chạy được trên một $HOME chỉ có quyền đọc, không cần `INSTALL` lại trong
+# tiến trình runtime, miễn phiên bản DuckDB/nền tảng khớp đúng bản đã `INSTALL`
+# ở đây. `runner._install_files_secret` vì vậy CHỈ gọi `LOAD httpfs`.
+#
+# Chạy SAU khi chuyển `USER loom` (không phải root): `HOME=/home/loom` phải
+# TRÙNG với `HOME` mà tiến trình runtime thấy (USER 10001 == loom, cùng UID) —
+# khác `HOME` giữa lúc build và lúc chạy thì file đã cài nằm sai chỗ, và
+# `LOAD` runtime lại phải tự tải qua mạng như chưa từng cài gì.
+USER loom
+RUN python -c "import duckdb; duckdb.connect().execute('INSTALL httpfs')"
 
 USER 10001
 EXPOSE 8000
