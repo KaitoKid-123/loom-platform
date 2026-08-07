@@ -689,6 +689,153 @@ async def test_generate_series_is_still_rejected_not_widened_by_files_support(
         )
 
 
+# --------------------------------------------------------- Giai đoạn 2c: CTAS
+
+
+async def test_ctas_requires_contributor_viewer_is_forbidden(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Chứng minh đỏ 2 (bắt buộc) của Giai đoạn 2c: GHI đòi `contributor`
+    (`item.update`, `loom_core.roles.ACTION_MATRIX`), không chỉ `viewer` như
+    ĐỌC. Một principal chỉ có `viewer` chạy CTAS phải bị 403 — hạ yêu cầu
+    xuống `viewer` (ví dụ đổi `Action.item_update` thành `Action.item_read`
+    cho vế ghi trong `run_gate`) phải làm bài này ĐỎ."""
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+
+    with pytest.raises(QueryForbidden):
+        await run_gate(
+            sql="CREATE TABLE bronze.moi AS SELECT * FROM bronze.nguon",
+            lakehouse_id=lakehouse_id,
+            workspace_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+
+async def test_ctas_succeeds_with_contributor(fake_authz: FakeAuthz, principal: Principal) -> None:
+    """Vế KHẲNG ĐỊNH của bài trên — không có nó, một bản cài từ chối MỌI CTAS
+    (kể cả với contributor) cũng làm bài trên xanh mà không chứng minh gì.
+    Cũng khoá đúng hình dạng `ResolvedTable` mà `runner` cần: đích (`moi`) là
+    GHI, không ĐỌC; nguồn (`nguon`) là ĐỌC, không GHI."""
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "contributor")
+
+    refs = await run_gate(
+        sql="CREATE TABLE bronze.moi AS SELECT * FROM bronze.nguon",
+        lakehouse_id=lakehouse_id,
+        workspace_id=uuid.uuid4(),
+        principal=principal,
+        authz=fake_authz,
+        resolver=fake_authz,
+    )
+
+    by_name = {t.ref.name: t for t in refs}
+    assert by_name["moi"].is_write is True
+    assert by_name["moi"].is_read is False
+    assert by_name["nguon"].is_write is False
+    assert by_name["nguon"].is_read is True
+
+
+async def test_a_read_only_query_still_only_requires_viewer_not_contributor(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Chứng minh đỏ 3 (bắt buộc): ĐỌC vẫn chỉ đòi `viewer`. Không có bài này,
+    một bản cài đòi `contributor` cho MỌI THỨ (kể cả đọc thuần) vẫn làm bài
+    `test_ctas_requires_contributor_viewer_is_forbidden` xanh — hai bài phải
+    đứng CẠNH nhau để phân biệt được hai cách hỏng đối lập."""
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+
+    await run_gate(
+        sql="SELECT * FROM bronze.nguon",
+        lakehouse_id=lakehouse_id,
+        workspace_id=uuid.uuid4(),
+        principal=principal,
+        authz=fake_authz,
+        resolver=fake_authz,
+    )
+
+
+async def test_insert_into_select_requires_contributor(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+
+    with pytest.raises(QueryForbidden):
+        await run_gate(
+            sql="INSERT INTO bronze.dest SELECT * FROM bronze.src",
+            lakehouse_id=lakehouse_id,
+            workspace_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+
+async def test_self_referencing_insert_requires_contributor_and_is_still_a_read(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Chứng minh đỏ 6 (bắt buộc): `INSERT INTO t SELECT * FROM t` phải đòi
+    `contributor` VÀ `t` vẫn phải nằm trong tập ĐỌC (`is_read=True`) — runner
+    vẫn phải quét nó (xem `test_query_ctas.py::
+    test_self_referencing_insert_still_scans_the_table` cho vế runner thật)."""
+    lakehouse_id = uuid.uuid4()
+    fake_authz.grant(lakehouse_id, "viewer")
+
+    with pytest.raises(QueryForbidden):
+        await run_gate(
+            sql="INSERT INTO ns.t SELECT * FROM ns.t",
+            lakehouse_id=lakehouse_id,
+            workspace_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+    fake_authz.grant(lakehouse_id, "contributor")
+    refs = await run_gate(
+        sql="INSERT INTO ns.t SELECT * FROM ns.t",
+        lakehouse_id=lakehouse_id,
+        workspace_id=uuid.uuid4(),
+        principal=principal,
+        authz=fake_authz,
+        resolver=fake_authz,
+    )
+    assert len(refs) == 1
+    assert refs[0].is_read is True
+    assert refs[0].is_write is True
+
+
+async def test_write_in_a_cross_lakehouse_query_requires_contributor_on_that_lakehouse(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Quyền GHI được hỏi ĐÚNG lakehouse sở hữu đích, không phải lakehouse của
+    request: đích (`other.finance.reports`) thuộc `other_id`, và `other_id`
+    được cấp `viewer` — KHÔNG đủ để ghi — trong khi `lakehouse_id` của chính
+    request (chỉ đọc `aaa.orders`) được cấp `contributor` (thừa, không cần).
+    Nếu `run_gate` nhầm lẫn áp yêu cầu ghi lên SAI lakehouse, bài này sẽ xanh
+    một cách tình cờ dù lỗ hổng vẫn còn."""
+    workspace_id = uuid.uuid4()
+    lakehouse_id = uuid.uuid4()
+    other_id = uuid.uuid4()
+    fake_authz.register_lakehouse(workspace_id, "other", other_id)
+    fake_authz.grant(lakehouse_id, "contributor")
+    fake_authz.grant(other_id, "viewer")
+
+    with pytest.raises(QueryForbidden):
+        await run_gate(
+            sql="CREATE TABLE other.finance.reports AS SELECT * FROM aaa.orders",
+            lakehouse_id=lakehouse_id,
+            workspace_id=workspace_id,
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+
 async def test_read_json_is_still_rejected_only_two_readers_were_widened(
     fake_authz: FakeAuthz, principal: Principal
 ) -> None:

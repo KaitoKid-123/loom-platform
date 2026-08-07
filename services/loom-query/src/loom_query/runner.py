@@ -76,6 +76,7 @@ from loom_query.limits import check_scan_bytes, truncate_table
 from loom_query.schemas import ColumnOut
 from loom_query.store import QueryStore
 from loom_sql import TableRef
+from loom_sql.deps import write_target
 from loom_storage import StorageCredentials
 
 _MEMORY_LIMIT = "256MB"
@@ -102,6 +103,28 @@ class QueryResult:
     rows: list[list[Any]]
     truncated: bool
     row_count: int
+
+
+class UnsupportedWriteError(Exception):
+    """Câu SQL này GHI vào catalog (`loom_sql.deps.Dependencies.writes` không
+    rỗng — `authz.run_gate` đã đòi đúng `contributor` cho nó) nhưng KHÔNG khớp
+    hình dạng CTAS duy nhất mà `runner` biết CHẠY — `CREATE [OR REPLACE] TABLE
+    ... AS SELECT` (xem `loom_sql.deps.write_target`). Ném lỗi RÕ RÀNG ở đây
+    thay vì để `connection.sql(sql_to_run)` chạy thẳng: DuckDB SẼ tạo một bảng
+    "thành công" trong catalog `:memory:` riêng của CHÍNH connection này —
+    KHÔNG phải trong Iceberg — rồi bảng đó biến mất khi connection đóng. Một
+    `succeeded` giả như vậy tệ hơn nhiều một lỗi thật, và spec Giai đoạn 2
+    quyết định #4 chọn CTAS làm đường ghi DUY NHẤT của giai đoạn này — `INSERT
+    INTO ... SELECT` (đích thường đã tồn tại, cần `Lakehouse.append`) và
+    `CREATE TABLE` không `AS SELECT` (không có dữ liệu nào để chạy) là việc
+    của một task sau.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "writing data is only supported via 'CREATE TABLE ... AS SELECT' "
+            "(with an optional OR REPLACE) at this stage — this statement is not"
+        )
 
 
 def _quote_ident(name: str) -> str:
@@ -371,16 +394,27 @@ def _run_sync(
                 lakehouses[lakehouse_id] = cached
             return cached
 
+        # Giai đoạn 2c: CHỈ vế ĐỌC (`ResolvedTable.is_read`) được `Lakehouse.
+        # scan()`/tính vào trần byte quét — một đích CTAS thường CHƯA TỒN TẠI
+        # (`is_write=True, is_read=False`), và `scan()`/`scan_size_bytes()`
+        # trên một bảng không tồn tại ném lỗi "table not found" của PyIceberg
+        # TRƯỚC KHI câu `CREATE` kịp chạy — đúng lỗi khiến CTAS luôn hỏng
+        # trước task này (xem module docstring). Một bảng vừa đọc vừa ghi
+        # (`INSERT INTO t SELECT * FROM t`) mang CẢ HAI cờ nên VẪN được quét —
+        # nó có được đọc thật.
+        resolved_reads = tuple(table for table in resolved_tables if table.is_read)
+        resolved_writes = tuple(table for table in resolved_tables if table.is_write)
+
         scan_targets = [
             (lakehouse_for(table.lakehouse_id), _real_qualified_name(table.ref))
-            for table in resolved_tables
+            for table in resolved_reads
         ]
         check_scan_bytes(scan_targets, settings.max_scan_bytes)
 
         attached_catalogs: set[str] = set()
         schemas_created: dict[str, set[str]] = defaultdict(set)
 
-        for index, table in enumerate(resolved_tables):
+        for index, table in enumerate(resolved_reads):
             ref = table.ref
             lakehouse = lakehouse_for(table.lakehouse_id)
             reader = lakehouse.scan(_real_qualified_name(ref))
@@ -400,6 +434,42 @@ def _run_sync(
             # `index`, không phải input người dùng — không đoạn nào trong
             # chuỗi dưới đây mang một chuỗi SQL do người gọi tự do gõ vào.
             connection.execute(f"CREATE VIEW {qualified_view} AS SELECT * FROM {raw_name}")  # noqa: S608
+
+        if resolved_writes:
+            # Đường CTAS THẬT (Giai đoạn 2c, spec quyết định #4): chạy RIÊNG
+            # câu `SELECT` nhúng trong `CREATE ... AS SELECT` trên connection
+            # đã có sẵn view của mọi bảng ĐỌC ở trên, lấy kết quả Arrow, rồi tự
+            # COMMIT ra Iceberg qua `Lakehouse.create_from()` — KHÔNG đưa cả
+            # câu `CREATE` cho `connection.sql()` chạy thẳng. Đã kiểm bằng
+            # thực nghiệm: `CREATE TABLE ns.t AS SELECT ...` của DuckDB tạo
+            # bảng trong catalog `:memory:` RIÊNG của chính connection này,
+            # không phải trong Iceberg — bảng đó biến mất khi connection đóng,
+            # một `succeeded` giả nếu không có bước COMMIT tường minh này.
+            target = write_target(sql_to_run, DIALECT)
+            if target is None:
+                raise UnsupportedWriteError
+            write_table = next(
+                (table for table in resolved_writes if table.ref == target.ref), None
+            )
+            # Không phải input người dùng sai: `authz.run_gate` (qua
+            # `loom_sql.deps.dependencies`) và `write_target` ở trên PHẢI luôn
+            # đồng ý về đích ghi của CÙNG một câu SQL — cả hai dùng chung
+            # `_write_destination`/`_create_table_info`. Một `assert` ở đây
+            # (không phải một exception nuốt được) là trung thực: lệch nhau là
+            # lỗi LẬP TRÌNH, không phải điều kiện runtime hợp lệ.
+            assert write_table is not None, (
+                "run_gate và write_target lệch nhau về đích ghi — lỗi nội bộ"
+            )
+
+            select_result = connection.sql(target.select_sql).to_arrow_table()
+            lakehouse = lakehouse_for(write_table.lakehouse_id)
+            real_name = _real_qualified_name(target.ref)
+            namespace, _, _ = real_name.rpartition(".")
+            lakehouse.create_namespace_if_not_exists(namespace)
+            lakehouse.create_from(real_name, select_result, replace=target.replace)
+
+            limited, truncated, row_count = truncate_table(select_result, settings.max_result_rows)
+            return _to_result(limited, truncated=truncated, row_count=row_count)
 
         # `.arrow()` trả `pa.RecordBatchReader` (đã kiểm bằng thực nghiệm trên
         # duckdb 1.5.5 — KHÁC tài liệu cũ hơn từng nói nó trả `pa.Table`).

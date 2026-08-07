@@ -303,58 +303,77 @@ else
   fi
 fi
 
-# 13 — một câu SQL đi hết đường: trình duyệt -> loom-api -> bí mật chia sẻ ->
-#      cổng quyền -> runner -> Lakekeeper THẬT, và ngược lại. Đây là phép "một câu
-#      SQL đi hết đường" mà cả Giai đoạn 2 tồn tại để làm được.
+# 13 — CTAS đi hết đường: trình duyệt -> loom-api -> bí mật chia sẻ -> cổng quyền
+#      -> runner -> Lakekeeper THẬT, và ngược lại — rồi SELECT lại đúng dòng vừa
+#      tạo. Đây CHÍNH XÁC là tiêu chí nghiệm thu của Giai đoạn 2 quyết định #4:
+#      "Tạo được bảng Iceberg bằng CTAS trong SQL editor, thấy nó trong Lakehouse
+#      Explorer".
 #
-#      KHÔNG làm bằng CTAS như đề xuất ban đầu — đã kiểm bằng thực nghiệm trên cụm
-#      thật (nộp một CTAS thật, đọc lại kết quả) VÀ bằng cách đọc thẳng
-#      `loom_sql.deps.dependencies`: `loom-query` không có đường COMMIT nào vào
-#      Iceberg qua SQL. `dependencies()` coi ĐÍCH của một CTAS là một bảng cần đọc,
-#      y hệt một bảng nguồn — `authz.run_gate` đòi quyền trên nó và `runner` cố
-#      `scan_size_bytes` nó TRƯỚC KHI câu CREATE kịp chạy — nên một CTAS luôn hỏng
-#      với lỗi "table not found", không bao giờ tới lượt CREATE. Cũng không có
-#      đường HTTP nào khác nạp được dữ liệu vào một bảng Iceberg: không route upload
-#      file, `Files/` không có gì để đọc nếu không ai nạp trước, và Lakekeeper không
-#      lộ ra ingress. "SELECT lại từ một bảng vừa CTAS" vì vậy không khả thi thuần
-#      qua HTTP ở trạng thái hôm nay của hệ thống — ghi nhận là một khoảng trống,
-#      không phải một việc bỏ qua.
+#      TRƯỚC bản sửa CTAS (`loom_sql.deps.dependencies` tách đọc/ghi,
+#      `loom_query.runner` tự COMMIT kết quả SELECT ra Iceberg qua
+#      `Lakehouse.create_from`), phép này CHỈ kiểm được bằng một SELECT nhắm vào
+#      bảng không tồn tại — CTAS luôn hỏng với "table not found" TRƯỚC KHI câu
+#      CREATE kịp chạy (`dependencies()` cũ coi đích CTAS là một bảng cần ĐỌC, y
+#      hệt bảng nguồn). Giờ CTAS chạy được, phép này mạnh lên đúng như spec đòi:
+#      KHẲNG ĐỊNH thật, không chỉ TỪ CHỐI.
 #
-#      Phép THAY THẾ dưới đây canh CÙNG một chuỗi (proxy, bí mật chia sẻ, cổng
-#      quyền, runner) bằng một SELECT nhắm vào một bảng THẬT không tồn tại trong
-#      lakehouse vừa tạo ở phép 12. Cổng quyền THẬT vẫn được hỏi trên CHÍNH id
-#      lakehouse đó — khác `SELECT 1` (không chạm bảng nào, `dependencies()` trả
-#      zero bảng): `lakehouse_id` LUÔN có mặt trong tập id được hỏi quyền, bất kể SQL
-#      có bảng nào hay không (bất biến bắt buộc ghi ở `authz.run_gate`), nhưng chỉ
-#      một câu SQL THAM CHIẾU một bảng mới khiến `runner` thật sự mở catalog Iceberg
-#      và gọi Lakekeeper — `SELECT 1` có `resolved_tables == ()` nên vòng lặp mở
-#      catalog trong `runner._run_sync` không chạy lần nào. Kết quả mong đợi là
-#      "not found" từ CHÍNH Lakekeeper, không phải một lỗi proxy chung chung — không
-#      nhận "202 hay gì cũng được": phải ĐÚNG 202 lúc nộp (proxy + bí mật chia sẻ còn
-#      sống) rồi ĐÚNG "failed" kèm lý do thật lúc đọc kết quả (runner chạm Lakekeeper
-#      thật, không lặng lẽ trả "succeeded" giả).
+#      `SELECT 1 AS id` (không `FROM` gì): lakehouse vừa cấp phát ở phép 12 RỖNG
+#      (`namespaces == []`), nên CTAS ở đây không cần một bảng nguồn có sẵn nào —
+#      tự đủ để chứng minh đường "SELECT -> Arrow -> Lakehouse.create_from()".
+#      Namespace đích (`smoke_ns`) chưa tồn tại — `runner` phải tự tạo nó
+#      (`create_namespace_if_not_exists`) trước khi commit, không phải việc của
+#      smoke.
+#
+#      Tài khoản smoke là admin cấp TENANT (xem phép 10) — thừa hưởng
+#      `contributor` trở lên trên MỌI lakehouse trong tenant qua chuỗi tổ tiên
+#      RBAC (`loom_api.permissions`), nên CTAS ở đây chạy được mà không cần cấp
+#      quyền riêng cho lakehouse vừa tạo.
 if [ -z "$smoke_lakehouse_id" ]; then
-  bad "SELECT qua /api/v1/query đi hết đường" "không có lakehouse từ phép 12 để kiểm"
+  bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" "không có lakehouse từ phép 12 để kiểm"
 else
-  q_payload=$(printf '{"lakehouse_id":"%s","sql":"SELECT * FROM ns.does_not_exist"}' "$smoke_lakehouse_id")
-  q_code=$(curl -s -b "$JAR" -o "$tmpdir/q.json" -w '%{http_code}' --max-time 15 \
-           -X POST -H 'Content-Type: application/json' -d "$q_payload" \
-           "$BASE/api/v1/query")
-  if [ "$q_code" != 202 ]; then
-    bad "SELECT qua /api/v1/query đi hết đường" "nộp query trả $q_code (mong 202) — proxy hoặc bí mật chia sẻ hỏng?"
+  ctas_payload=$(printf '{"lakehouse_id":"%s","sql":"CREATE TABLE smoke_ns.ctas_result AS SELECT 1 AS id"}' "$smoke_lakehouse_id")
+  ctas_code=$(curl -s -b "$JAR" -o "$tmpdir/ctas.json" -w '%{http_code}' --max-time 15 \
+              -X POST -H 'Content-Type: application/json' -d "$ctas_payload" \
+              "$BASE/api/v1/query")
+  if [ "$ctas_code" != 202 ]; then
+    bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" \
+        "nộp CTAS trả $ctas_code (mong 202) — proxy hoặc bí mật chia sẻ hỏng?"
   else
-    query_id=$(jq -r '.query_id' < "$tmpdir/q.json")
-    q_status=""
+    ctas_query_id=$(jq -r '.query_id' < "$tmpdir/ctas.json")
+    ctas_status=""
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-      curl -s -b "$JAR" --max-time 10 -o "$tmpdir/qs.json" "$BASE/api/v1/query/$query_id"
-      q_status=$(jq -r '.status' < "$tmpdir/qs.json" 2>/dev/null)
-      [ "$q_status" = running ] || break
+      curl -s -b "$JAR" --max-time 10 -o "$tmpdir/ctas_status.json" "$BASE/api/v1/query/$ctas_query_id"
+      ctas_status=$(jq -r '.status' < "$tmpdir/ctas_status.json" 2>/dev/null)
+      [ "$ctas_status" = running ] || break
       sleep 0.3
     done
-    if [ "$q_status" = failed ] && jq -e '(.error // "") | test("not found"; "i")' >/dev/null 2>&1 < "$tmpdir/qs.json"; then
-      ok "SELECT qua /api/v1/query đi hết đường — runner chạm Lakekeeper thật"
+    if [ "$ctas_status" != succeeded ]; then
+      bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" \
+          "CREATE TABLE ... AS SELECT trạng thái cuối: $(cat "$tmpdir/ctas_status.json")"
     else
-      bad "SELECT qua /api/v1/query đi hết đường" "trạng thái cuối: $(cat "$tmpdir/qs.json")"
+      sel_payload=$(printf '{"lakehouse_id":"%s","sql":"SELECT id FROM smoke_ns.ctas_result"}' "$smoke_lakehouse_id")
+      sel_code=$(curl -s -b "$JAR" -o "$tmpdir/sel.json" -w '%{http_code}' --max-time 15 \
+                 -X POST -H 'Content-Type: application/json' -d "$sel_payload" \
+                 "$BASE/api/v1/query")
+      if [ "$sel_code" != 202 ]; then
+        bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" \
+            "SELECT lại từ bảng vừa tạo trả $sel_code (mong 202)"
+      else
+        sel_query_id=$(jq -r '.query_id' < "$tmpdir/sel.json")
+        sel_status=""
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          curl -s -b "$JAR" --max-time 10 -o "$tmpdir/sel_status.json" "$BASE/api/v1/query/$sel_query_id"
+          sel_status=$(jq -r '.status' < "$tmpdir/sel_status.json" 2>/dev/null)
+          [ "$sel_status" = running ] || break
+          sleep 0.3
+        done
+        if [ "$sel_status" = succeeded ] && jq -e '.rows == [[1]]' >/dev/null 2>&1 < "$tmpdir/sel_status.json"; then
+          ok "CTAS qua /api/v1/query — bảng Iceberg tạo được qua SQL editor, đọc lại đúng dòng"
+        else
+          bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" \
+              "SELECT lại trạng thái cuối: $(cat "$tmpdir/sel_status.json")"
+        fi
+      fi
     fi
   fi
 fi

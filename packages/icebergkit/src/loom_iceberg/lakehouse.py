@@ -43,6 +43,19 @@ class Lakehouse:
     def create_namespace(self, namespace: str) -> None:
         self._catalog.create_namespace(namespace)
 
+    def create_namespace_if_not_exists(self, namespace: str) -> None:
+        """Như `create_namespace`, nhưng KHÔNG ném nếu `namespace` đã tồn tại.
+
+        Giai đoạn 2c (CTAS trong `loom-query`): đích của một `CREATE TABLE ...
+        AS SELECT` có thể nằm trong một namespace đã có (ghi thêm bảng thứ hai
+        vào `bronze`) hay chưa (bảng đầu tiên của một namespace mới) — chỗ gọi
+        không biết trước, và hỏi bằng `list_namespaces()` rồi mới `create_namespace`
+        có điều kiện là hai round trip cho một câu PyIceberg tự trả lời được
+        trong một (`create_namespace_if_not_exists` là API có sẵn của
+        `RestCatalog`, không phải một lớp bọc thử-bắt tự viết ở đây).
+        """
+        self._catalog.create_namespace_if_not_exists(namespace)
+
     def list_tables(self, namespace: str) -> list[TableInfo]:
         return [
             TableInfo(namespace=".".join(identifier[:-1]), name=identifier[-1])
@@ -57,7 +70,21 @@ class Lakehouse:
         # chú thích kiểu trả về trong mắt mypy — `bool(...)` phục hồi nó.
         return bool(self._catalog.table_exists(qualified))
 
-    def create_from(self, qualified: str, data: pa.Table) -> None:
+    def create_from(self, qualified: str, data: pa.Table, *, replace: bool = False) -> None:
+        """Tạo `qualified` từ đầu, nạp `data` làm data file đầu tiên.
+
+        `replace=False` (mặc định, hành vi CŨ — không đổi): `qualified` đã tồn
+        tại thì ném lỗi THẬT từ PyIceberg — không nuốt, không đoán ý người gọi.
+
+        `replace=True` (Giai đoạn 2c, `CREATE OR REPLACE TABLE ... AS SELECT`
+        trong `loom-query`): XOÁ bảng cũ (nếu có) rồi tạo lại — KHÔNG atomic
+        (hai lệnh riêng, không một transaction/staged commit), đủ cho phạm vi
+        Giai đoạn 2c: chưa có ai đọc đồng thời một bảng đang bị CTAS ghi đè.
+        Một bản atomic hơn (`create_table_transaction`/`commit_table`) là việc
+        của một task sau nếu spec đòi.
+        """
+        if replace and self.exists(qualified):
+            self._catalog.drop_table(qualified)
         table = self._catalog.create_table(qualified, schema=data.schema)
         table.append(data)
 
