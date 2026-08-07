@@ -3,6 +3,7 @@ import { type QueryKey, useMutation, useQueryClient } from '@tanstack/react-quer
 import { ConflictError, PreconditionRequiredError, apiDelete, apiPatch, apiPostJson } from './api'
 import type { TreeItem } from './folderTree'
 import { ProblemError } from './problem'
+import { type ItemDetail, itemKey, versionsKey } from './useItem'
 import type { ItemPage } from './useItems'
 
 export interface RenameArgs {
@@ -81,6 +82,48 @@ export function useCreateItem(workspaceId: string) {
     // KHÔNG ghi lạc quan khi tạo: server sinh `id`, `version` và `folder_path` đã chuẩn
     // hoá, nên một hàng giả trong cache sẽ mang id sai và mọi liên kết tới nó vỡ.
     onSuccess: () => {
+      void qc.invalidateQueries(itemKeys(workspaceId))
+    },
+  })
+}
+
+export interface SaveDefinitionArgs {
+  etag: string | undefined
+  definition: Record<string, unknown>
+  changeNote?: string
+}
+
+/**
+ * Lưu MỘT câu SQL (hay bất kỳ `definition` nào khác) thành version mới — Giai đoạn 2c
+ * Phần B: "một câu SQL LÀ một item `sql_script`; lưu là một version mới; KHÔNG có kho
+ * lưu SQL riêng." Dùng lại nguyên vẹn `PATCH /api/v1/items/{id}` + `If-Match` của Giai
+ * đoạn 1 — không có route riêng nào cho "lưu SQL".
+ *
+ * `canonical_hash` (server, `item_store.py`) đã lo việc lưu hai lần cùng nội dung
+ * không sinh version mới; mutation này chỉ cần gửi ĐÚNG `definition` hiện tại, không
+ * tự trộn thêm trường nào (một `saved_at` client tự bịa vào đây sẽ đổi hash và phá đúng
+ * bất biến đó — xem chứng minh đỏ 4 của Phần B, `SqlEditorPanel.test.tsx`).
+ *
+ * `onSuccess` ghi THẲNG vào cache `['item', itemId]` bằng `{data, etag}` server vừa trả
+ * — không đợi một `invalidateQueries` refetch: `apiPatch` đã trả ETag MỚI cùng lúc với
+ * dữ liệu mới trong CÙNG một response, và ghi thẳng cho lần lưu TIẾP THEO (nếu người
+ * dùng bấm Save liên tiếp) luôn thấy ETag đúng ngay, không có cửa sổ hẹp giữa hai lần
+ * lưu mà cache còn giữ ETag cũ.
+ */
+export function useUpdateItemDefinition(itemId: string, workspaceId: string) {
+  const qc = useQueryClient()
+  return useMutation<{ data: ItemDetail; etag: string | null }, Error, SaveDefinitionArgs>({
+    mutationFn: ({ etag, definition, changeNote }) =>
+      apiPatch<ItemDetail>(
+        `/api/v1/items/${itemId}`,
+        { definition, ...(changeNote ? { change_note: changeNote } : {}) },
+        etag,
+      ),
+    onSuccess: (result) => {
+      qc.setQueryData(itemKey(itemId), result)
+      // Lịch sử version VÀ cây Explorer: cùng ba nơi mà `useRestoreVersion` đã lo, vì
+      // lưu một version mới cũng làm cả hai thứ đó cũ đi y hệt restore.
+      void qc.invalidateQueries({ queryKey: versionsKey(itemId) })
       void qc.invalidateQueries(itemKeys(workspaceId))
     },
   })
