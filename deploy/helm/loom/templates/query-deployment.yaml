@@ -81,6 +81,11 @@ spec:
               value: "http://{{ include "loom.fullname" . }}-lakekeeper.{{ .Release.Namespace }}.svc.cluster.local:8181/catalog"
             - name: LOOM_QUERY_S3_ENDPOINT
               value: {{ .Values.storage.endpoint | quote }}
+            {{- /* Credential GỐC MinIO cho đường đọc file thô trong `Files/`:
+                   `MinioStsProvider` gọi AssumeRole rồi thu hẹp về đúng prefix
+                   của workspace. Đường Iceberg KHÔNG dùng tới — Lakekeeper tự
+                   cấp credential cho nó. */}}
+            {{- include "loom.storageRootEnv" (dict "root" $ "prefix" "LOOM_QUERY_") | nindent 12 }}
             - name: LOOM_QUERY_SHARED_SECRET
               valueFrom:
                 secretKeyRef:

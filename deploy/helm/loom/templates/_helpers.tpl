@@ -79,23 +79,43 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
    upgrade head`, không hề chạm Lakekeeper — nhét thêm một Secret nó không cần
    vào đó là một cách bó job db-migration vào một sự cố MinIO không liên quan
    gì tới nó. */}}
+{{/*
+Credential GỐC MinIO + bucket, cho service nào cần gọi STS AssumeRole.
+
+Nhận một dict `{root, prefix}` vì HAI service dùng cùng bộ giá trị này với HAI
+tiền tố biến môi trường khác nhau: `loom-api` đọc `LOOM_*` còn `loom-query` đọc
+`LOOM_QUERY_*` (xem `env_prefix` trong hai file `config.py`). Chép thành hai bản
+là cách chắc chắn để một bên được cập nhật còn bên kia thì không — và lệch ở đây
+nghĩa là một service lặng lẽ chạy bằng credential giữ chỗ.
+
+Đã xảy ra thật: `query-deployment.yaml` thiếu hẳn bốn biến này cho tới khi có
+người so hai bản render với nhau.
+*/}}
 {{- define "loom.storageRootEnv" -}}
-- name: LOOM_LAKEKEEPER_URL
+{{- $prefix := .prefix -}}
+{{- with .root -}}
+{{- if eq $prefix "LOOM_" }}
+{{- /* Chỉ `loom-api` đọc biến này (cấp phát warehouse). `loom-query` nói chuyện
+       với catalog qua `LOOM_QUERY_CATALOG_URI` và không có trường tương ứng —
+       tiêm vào đó chỉ tạo một biến không ai đọc. */}}
+- name: {{ $prefix }}LAKEKEEPER_URL
   value: "http://{{ include "loom.fullname" . }}-lakekeeper.{{ .Release.Namespace }}.svc.cluster.local:8181"
-- name: LOOM_STORAGE_ENDPOINT
+{{- end }}
+- name: {{ $prefix }}STORAGE_ENDPOINT
   value: {{ .Values.storage.endpoint | quote }}
-- name: LOOM_STORAGE_BUCKET
+- name: {{ $prefix }}STORAGE_BUCKET
   value: {{ .Values.storage.bucket | quote }}
-- name: LOOM_STORAGE_ROOT_ACCESS_KEY
+- name: {{ $prefix }}STORAGE_ROOT_ACCESS_KEY
   valueFrom:
     secretKeyRef:
       name: {{ .Values.storage.existingSecret }}
       key: {{ .Values.storage.accessKeyKey }}
-- name: LOOM_STORAGE_ROOT_SECRET_KEY
+- name: {{ $prefix }}STORAGE_ROOT_SECRET_KEY
   valueFrom:
     secretKeyRef:
       name: {{ .Values.storage.existingSecret }}
       key: {{ .Values.storage.secretKeyKey }}
+{{- end -}}
 {{- end -}}
 
 {{/* Volume chiếu key CA từ Secret loom-db-app — dùng chung cho api và migrate job */}}

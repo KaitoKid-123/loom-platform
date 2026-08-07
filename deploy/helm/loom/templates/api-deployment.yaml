@@ -65,7 +65,7 @@ spec:
             # cụm, không phải nguồn thật cho một pod triển khai.
             - name: LOOM_QUERY_BASE_URL
               value: "http://{{ include "loom.fullname" . }}-query.{{ .Release.Namespace }}.svc.cluster.local:8000/api/v1"
-            {{- include "loom.storageRootEnv" . | nindent 12 }}
+            {{- include "loom.storageRootEnv" (dict "root" . "prefix" "LOOM_") | nindent 12 }}
             - name: LOOM_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:

@@ -186,6 +186,23 @@ helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
 		echo "khoá database sai: dùng '$$keys', values.yaml khai '$$want'"; exit 1; }; \
 	echo "  cả hai dùng khoá $$keys"
 
+	@echo "→ chart: service nào cần credential gốc thì phải NHẬN được nó"
+	@# Lọt một lần thật: `query-deployment.yaml` thiếu hẳn bốn biến STORAGE_*
+	@# trong khi `api-deployment.yaml` có đủ. `helm lint` và `kubeconform` đều
+	@# xanh — manifest hợp lệ, chỉ là service chạy bằng credential giữ chỗ, và
+	@# điều đó chỉ lộ ra khi có người đọc `Files/` thật.
+	@set -eo pipefail; \
+	rendered=$$(helm template loom deploy/helm/loom -n $(NS) -f deploy/envs/values-local.yaml); \
+	for pair in "loom-api:LOOM_" "loom-query:LOOM_QUERY_"; do \
+		dep=$${pair%%:*}; pfx=$${pair##*:}; \
+		block=$$(echo "$$rendered" | awk "/name: $$dep\$$/,/^---/"); \
+		for suffix in STORAGE_ENDPOINT STORAGE_BUCKET STORAGE_ROOT_ACCESS_KEY STORAGE_ROOT_SECRET_KEY; do \
+			echo "$$block" | grep -q "name: $$pfx$$suffix" || { \
+				echo "$$dep thiếu $$pfx$$suffix"; exit 1; }; \
+		done; \
+	done; \
+	echo "  api và query đều nhận đủ bốn biến storage"
+
 	@echo "→ chart: mọi tài nguyên phải tự khai namespace"
 	@# `kubectl apply -f <ban render>` đặt tài nguyên KHÔNG khai namespace vào
 	@# namespace mặc định của context. Tilt và ArgoCD đều tự tiêm namespace nên
