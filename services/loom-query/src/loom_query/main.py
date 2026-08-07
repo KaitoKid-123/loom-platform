@@ -23,7 +23,7 @@ from fastapi import FastAPI
 from loom_query import VERSION
 from loom_query.authz import AuthzClient, AuthzPort, LakehouseResolver
 from loom_query.config import Settings, get_settings
-from loom_query.routers import health, query
+from loom_query.routers import health, lakehouses, query
 from loom_query.store import QueryStore
 from loom_storage import MinioStsProvider, StorageCredentials
 
@@ -94,4 +94,5 @@ def create_app(
     # `routers/health.py`.
     app.include_router(health.router)
     app.include_router(query.router, prefix="/api/v1")
+    app.include_router(lakehouses.router, prefix="/api/v1")
     return app

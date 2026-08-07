@@ -400,6 +400,11 @@ measure-scan:  ## Phép đo 1 mục 1 — thời gian lập kế hoạch quét b
 	uv run pytest -m benchmark -o addopts="" -s \
 		packages/icebergkit/tests/integration/test_scan_planning_benchmark.py
 
+.PHONY: measure-lakehouse-schema
+measure-lakehouse-schema:  ## Phép đo Task 2 (2c) — kích thước/độ trễ GET .../schema, 200 bảng x 30 cột
+	uv run pytest -m benchmark -o addopts="" -s \
+		services/loom-query/tests/integration/test_lakehouse_schema_size_benchmark.py
+
 .PHONY: ram
 ram: check-context  ## Tổng RAM cụm đang dùng, so với trần 1,8 GB
 	@# Cộng trên giấy ở spec Giai đoạn 2 mục 7.3 là ước lượng từ
