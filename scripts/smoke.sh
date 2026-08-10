@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mười một phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
+# Mười ba phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
 # kubectl, nên chạy được với bất kỳ môi trường nào:
 #
 #     make smoke                              # local
@@ -382,10 +382,20 @@ fi
 # lần chạy, nên không dọn thì hai mươi lần chạy để lại hai mươi workspace rác. Phép
 # 12 thêm một item lakehouse vào CÙNG workspace này — xoá mềm workspace kéo theo cả
 # hai (không cascade thật, nhưng cả hai đều thuộc một workspace đã biến mất, đúng
-# cách item sql_script của phép 10 đã luôn được xử lý). Không có bảng nào để dọn:
-# phép 13 không tạo bảng nào (xem giải thích ở phép đó).
+# cách item sql_script của phép 10 đã luôn được xử lý).
 # Xoá mềm nên lịch sử audit còn nguyên — và audit của một lần smoke là bằng chứng nó
 # đã chạy thật.
+#
+# CÁI KHÔNG ĐƯỢC DỌN, và hãy đọc kỹ trước khi tin rằng nó tự hết: phép 13 tạo bảng
+# Iceberg THẬT (`smoke_ns.ctas_result`) với file Parquet thật trong MinIO. Xoá mềm
+# workspace KHÔNG chạm tới chúng — nó chỉ đặt một cột `deleted_at` trong Postgres.
+# Warehouse Lakekeeper cũng ở lại (nợ đã ghi ở Giai đoạn 2b), và đo thật ở Giai đoạn
+# 2c cho thấy xoá warehouse qua API quản trị của Lakekeeper CŨNG KHÔNG xoá object
+# dưới S3 — muốn sạch phải purge S3 tường minh.
+#
+# Nên mỗi lần chạy smoke để lại một bảng một dòng nằm lại vĩnh viễn. Nhỏ, nhưng
+# không có giới hạn trên. Dọn nó cần một đường DROP TABLE mà API truy vấn chưa có
+# (sqlglot chỉ cho SELECT và CTAS), nên đây là nợ có ý thức chứ không phải sơ suất.
 if [ -n "$smoke_ws_id" ]; then
   curl -s -b "$JAR" -o /dev/null -X DELETE --max-time 10 \
     "$BASE/api/v1/workspaces/$smoke_ws_id" || true
