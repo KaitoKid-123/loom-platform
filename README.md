@@ -165,3 +165,71 @@ chỉ lộ ra khi có người mở nó.
   vi hiện tại, không phải một bất biến.
 - **`loom-query` không có `live_update` trong Tiltfile** — sửa mã nguồn build lại ảnh đầy
   đủ, khác `loom-api`.
+
+## Giai đoạn 2c — SQL editor, Lakehouse Explorer, và phép đo đóng giai đoạn
+
+Giao diện cho mặt phẳng dữ liệu, cộng cửa chặn cuối của Giai đoạn 2.
+
+- **Lakehouse Explorer** — cây namespace/bảng/cột, đọc qua `GET /api/v1/lakehouses/{id}/schema`.
+  Endpoint tách tham số `depth` vì hai mức chênh nhau **200 lần** (7ms so với 1552ms): danh
+  sách namespace rẻ, còn lấy cột của mọi bảng thì phải mở từng metadata Iceberg.
+- **SQL editor** — chạy, huỷ, lưới kết quả, lưu thành item `sql_script` có version và
+  `restore`, autocomplete tên bảng/cột theo lakehouse đang chọn.
+- **Monaco tải TRÌ HOÃN.** Bundle khởi đầu 380 KB; Monaco là một chunk riêng 2.654 KB chỉ
+  tải khi mở một `sql_script`. Canh bởi `web/scripts/check-bundle-splitting.mjs`.
+- **`make smoke` lên 13 phép**, hai phép mới đi hết đường qua HTTP thật.
+
+### Phép đo 2 — kết luận mà Giai đoạn 3 cần trước tiên
+
+> **GIỮ PyIceberg. Không cắm Trino.** 50 GB thô (167,7 triệu dòng, 23,1 GB Parquet nén)
+> ghi xong trong **00:34:04**, so với ngưỡng 60 phút đã chốt trước khi đo.
+
+Tách theo giai đoạn, và chỗ này mới là phần đáng đọc:
+
+| | |
+|---|---|
+| Sinh nguồn | 495s (24,2%) — chi phí của BÀI ĐO, không phải của nền tảng |
+| Ghi Iceberg | 213s (**10,4%**) |
+| Commit catalog | 1335s (**65,3%**) |
+
+Câu hỏi đặt ra là "PyIceberg ghi Parquet có đủ nhanh không". Trả lời: thừa sức — 23 GB nén
+trong 213 giây. Thứ tốn thời gian là **metadata**, và một engine tính toán khác không đụng
+gì tới nó. Cắm Trino vào đây sẽ là sửa nhầm chỗ.
+
+**Cần gạt thật cho Giai đoạn 3 là kích thước lô, không phải engine.** Chi phí commit gần
+như cố định ~6,7s mỗi lần: 200 lô × 250 MB tốn 1335s, cũng ngần ấy dữ liệu chia thành
+50 lô × 1 GB chỉ còn ~334s — cắt 17 phút khỏi tổng 34 phút mà không sửa một dòng mã.
+
+Chi phí commit **có** tăng theo số snapshot, nhưng dưới tuyến tính: +11,9% sau 200 lần
+commit. Đó đúng là rủi ro mà phép ngoại suy từ 10 lô không thể loại trừ, và giờ nó đã bị
+loại trừ bằng số. Báo cáo đầy đủ:
+`docs/measurements/2026-08-10-phase-2c-write-path-50gb.md`.
+
+### Phép đo tìm ra một lỗi thật: MinIO bị OOMKilled
+
+Lần chạy đầu chết ở lô 40/200. MinIO là Go, và **Go không đọc hạn mức cgroup** — bộ thu gom
+rác nhắm theo GOGC, tức theo tốc độ phình của heap, nên nó phình qua trần 320Mi mà không
+biết có trần. Sửa bằng `GOMEMLIMIT=352MiB` (giới hạn MỀM mà GC nhìn thấy) cộng limit cứng
+448Mi; nâng limit không thôi chỉ làm nó chết muộn hơn.
+
+Vì sao bốn phép đo RAM trước không thấy: tất cả đều đo lúc cụm **nghỉ**. MinIO nghỉ dùng
+223 Mi, MinIO đang ghi dùng 271 Mi heap. Và `memory.current` một mình cũng không đủ — nó
+gộp cả page cache, mà máy chủ lưu trữ thì luôn lấp đầy page cache một cách vô hại; phải
+tách `anon` khỏi `file` mới thấy.
+
+Ngân sách RAM mới, đo **trong lúc ghi**: **1500 / 1843 Mi**, còn dư 343 Mi.
+
+### Nợ đã biết sau Giai đoạn 2c
+
+- **Chưa tách được 6,7s mỗi lần commit thành ba phần**: chuyến đi tới Postgres của
+  Lakekeeper trên Aiven, đọc lại manifest từ S3, và chính Lakekeeper. Khuyến nghị "lô to
+  hơn" đúng bất kể tỷ lệ giữa chúng, nhưng muốn giảm chính con số đó thì phải tách trước.
+- **Mỗi lần chạy `make smoke` để lại một bảng Iceberg vĩnh viễn** (`smoke_ns.ctas_result`).
+  Xoá mềm workspace chỉ đặt một cột trong Postgres, và xoá warehouse qua Lakekeeper KHÔNG
+  xoá object dưới S3. Nhỏ, nhưng không có giới hạn trên. Dọn cần một đường `DROP TABLE` mà
+  API truy vấn chưa có.
+- **Chuyển MinIO ra VPS giờ đáng giá hơn hẳn** — nó trả lại ~450 Mi cho cụm chứ không phải
+  ~250 Mi như spec ước lượng trước khi đo.
+- **Một CTAS mất ~11s ở local**, và gần hết chỗ đó là chuyến đi tới Aiven. Chấp nhận được
+  cho một thao tác tạo bảng, nhưng nó đặt sàn cho mọi bài kiểm chạm đường ghi: `make smoke`
+  giờ chờ tới `QUERY_TIMEOUT_S` (mặc định 60s) thay vì một trần 3 giây không có căn cứ.
