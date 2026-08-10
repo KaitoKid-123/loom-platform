@@ -5,8 +5,9 @@
 # chuyển MinIO sang một VPS riêng (spec Giai đoạn 2 mục 2.0), lúc đó file này
 # không còn được apply và chart chỉ đổi `storage.endpoint`.
 #
-# Ngân sách RAM: cụm có trần 1,8 GB và đang dùng ~880 MiB. Limit 320Mi ở dưới là
-# ~250 MiB đo được cộng biên. KHÔNG nâng nó lên mà không đo lại tổng (Task 14).
+# Ngân sách RAM: cụm có trần 1,8 GB. Limit ở dưới là 448Mi, KHÔNG phải 320Mi như
+# Giai đoạn 2a đặt — xem khối giải thích ở `resources` bên dưới trước khi hạ nó.
+# Vẫn phải đo lại tổng cả node (`make ram`) sau mỗi lần đổi con số đó.
 ---
 apiVersion: v1
 kind: Secret
@@ -113,14 +114,49 @@ spec:
               valueFrom: { secretKeyRef: { name: minio-root, key: root-user } }
             - name: MINIO_ROOT_PASSWORD
               valueFrom: { secretKeyRef: { name: minio-root, key: root-password } }
+            # MinIO là Go (RELEASE.2025-04-22 dựng bằng go1.24.2), và Go KHÔNG tự
+            # đọc hạn mức cgroup. Không có biến này thì bộ thu gom rác nhắm theo
+            # GOGC — tức theo TỐC ĐỘ PHÌNH của heap — mà hoàn toàn không biết trên
+            # đầu nó có một cái trần. Nó phình qua trần, và hạt nhân giết tiến
+            # trình; GC không hề "gần đạt" rồi mới thua, nó không nhìn thấy trần.
+            #
+            # GOMEMLIMIT là giới hạn MỀM: chạm nó thì GC làm việc cật lực chứ
+            # không ai bị giết. Đặt nó ~78% của limit cứng để chừa chỗ cho phần
+            # KHÔNG do runtime Go quản (stack của thread hệ điều hành, vùng mmap,
+            # buffer của cgo) — GOMEMLIMIT chỉ tính phần bộ nhớ Go tự quản, không
+            # phải RSS.
+            - name: GOMEMLIMIT
+              value: "352MiB"
           ports:
             - { containerPort: 9000, name: s3 }
             - { containerPort: 9001, name: console }
           volumeMounts:
             - { name: data, mountPath: /data }
           resources:
-            requests: { cpu: 50m, memory: 256Mi }
-            limits: { memory: 320Mi }
+            # 320Mi (con số của Giai đoạn 2a) LÀM CHẾT MINIO dưới tải ghi thật.
+            # Đây là số đo, không phải phỏng đoán — phép đo 50 GB của Giai đoạn 2c
+            # đi được 40/200 lô (10 GB) trong 395s rồi dừng:
+            #
+            #     RESTARTS 1, lastState.terminated.reason: OOMKilled
+            #     OSError ... curlCode 7, Could not connect to server
+            #
+            # Lấy mẫu cgroup 20s/lần trong lúc ghi cho thấy vì sao 320Mi không đủ:
+            #
+            #     anon    271 Mi   <- heap thật, KHÔNG thu hồi được
+            #     file     39 Mi   <- page cache, thu hồi vô hại
+            #     max   25,117     <- số lần chạm trần rồi phải thu hồi
+            #
+            # Điểm mấu chốt là phần `anon`. Một máy chủ lưu trữ lấp đầy page cache
+            # tới trần là chuyện bình thường và vô hại, nên `memory.current` ~318Mi
+            # tự nó KHÔNG chứng minh điều gì — đó là lý do phải tách hai cột. 271Mi
+            # heap trên trần 320Mi thì chỉ còn ~49Mi cho mọi đợt tăng đột biến, và
+            # một đợt upload multipart là đủ.
+            #
+            # 448Mi = 271Mi đo được, cộng chỗ cho GOMEMLIMIT 352MiB làm việc, cộng
+            # biên. Cả node sau khi đổi vẫn phải dưới 1843Mi — `make ram` là trọng
+            # tài, đừng suy ra trên giấy.
+            requests: { cpu: 50m, memory: 320Mi }
+            limits: { memory: 448Mi }
           securityContext:
             # Đã kiểm với đúng image pin: MinIO khởi động sạch dưới uid 1000 với
             # rootfs read-only. `/data` là PVC nên vẫn ghi được, và MinIO không
