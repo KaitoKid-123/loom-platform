@@ -3,6 +3,14 @@ import { Link, useParams } from 'react-router'
 
 import { ItemTypeIcon, typeLabel } from '../components/ItemTypeIcon'
 import { PageHeader } from '../components/PageHeader'
+// Monaco (qua `SqlEditor`) sống sau MỘT `React.lazy` — nhưng biên giới đó nằm TRONG
+// `SqlEditorPanel.tsx` bây giờ (chỗ thật sự cần Monaco: chạy/huỷ/lưới kết quả/lưu/
+// autocomplete, Giai đoạn 2c), không còn ở đây. `SqlEditorPanel` bản thân nó nhẹ (không
+// import `monaco-editor`), nên `import` TĨNH nó ở đây không kéo Monaco vào chunk khởi
+// đầu — phép canh bundle (`scripts/check-bundle-splitting.mjs`) khớp theo ĐƯỜNG DẪN
+// NGUỒN `src/components/Editor/SqlEditor.tsx` trong manifest, không theo file nào gọi
+// `import()`, nên di chuyển biên giới lazy vào trong không đổi module đích của phép canh.
+import { SqlEditorPanel } from '../components/Editor/SqlEditorPanel'
 
 import { describeError } from '../lib/useItemMutations'
 import { useItem, useItemVersions, useRestoreVersion, useVersion } from '../lib/useItem'
@@ -90,11 +98,18 @@ export function ItemPage() {
 
       <section>
         <h2 className="mb-2 text-[12px] font-semibold uppercase tracking-wider text-dim">Definition</h2>
-        {/* Chỉ đọc, và cố ý: trình soạn thảo thuộc Giai đoạn 2. Một ô sửa được mà không
-            lưu được thì tệ hơn một ô chỉ đọc. */}
-        <pre className="overflow-auto rounded-md border border-line bg-surface p-3 font-mono text-[12px] leading-relaxed">
-          {JSON.stringify(item.definition, null, 2)}
-        </pre>
+        {item.type === 'sql_script' ? (
+          // `sql_script` mở bằng Monaco chứ không JSON thô, VÀ dùng được: chạy, huỷ,
+          // lưới kết quả, lưu thành version, autocomplete — `SqlEditorPanel` (Giai đoạn
+          // 2c) xây trên đúng ranh giới lazy-load Monaco mà task trước đã dựng.
+          <SqlEditorPanel item={item} etag={data.etag} workspaceId={workspaceId} />
+        ) : (
+          // Chỉ đọc, và cố ý cho MỌI loại khác: trình soạn thảo cho chúng thuộc giai đoạn
+          // sau. Một ô sửa được mà không lưu được thì tệ hơn một ô chỉ đọc.
+          <pre className="overflow-auto rounded-md border border-line bg-surface p-3 font-mono text-[12px] leading-relaxed">
+            {JSON.stringify(item.definition, null, 2)}
+          </pre>
+        )}
       </section>
 
       <section>

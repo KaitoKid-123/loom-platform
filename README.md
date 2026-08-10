@@ -99,60 +99,6 @@ phục **cả hai** database về cùng một mốc — xem `docs/runbook/restor
 
 ## Giai đoạn 2b — dịch vụ truy vấn
 
-`loom-query` (Task 6–9) chạy SQL trên bảng Iceberg sau cổng quyền của Giai đoạn 1, với
-năm giới hạn tài nguyên và huỷ query. Task 10/11 nối nó vào hệ thống thật:
-
-- `loom-api` chuyển tiếp `/api/v1/query*` sang `loom-query` — trình duyệt chỉ nói chuyện
-  với `loom-api`, đúng lời hứa MỘT mặt xác thực của Giai đoạn 1. `workspace_id` do
-  `loom-api` tự tra từ `lakehouse_id` (nó có database); giá trị client gửi kèm LUÔN bị
-  bỏ qua.
-- `loom-query` triển khai như một Deployment/Service ClusterIP riêng, KHÔNG qua ingress.
-- Một bí mật chia sẻ qua header (`X-Loom-Query-Secret`) giữa hai service, thay cho việc
-  `loom-query` tin thẳng principal trong thân request của bất kỳ pod nào gọi tới nó.
-
-**Vòng đời warehouse (khoảng trống Giai đoạn 2a phát hiện).** Tạo một item `type=lakehouse`
-trước đây chỉ chèn một hàng Postgres — không warehouse Lakekeeper nào được tạo, nên
-`GET /catalog/v1/config` trả 400 và `loom-query` hỏng ngay khi có ai mở nó. Giờ `loom-api`
-tạo warehouse (`packages/icebergkit/src/loom_iceberg/warehouse.py`, đã chạy thật ở 2a)
-**TRƯỚC** khi commit hàng item — hai kho không chia sẻ transaction, và giữa "một item sống
-trỏ vào lakehouse rỗng" (im lặng, lộ ra lúc dùng) với "một warehouse mồ côi" (ồn ào, tốn
-chỗ), vế sau đúng hướng hơn. Warehouse đặt tên theo `str(item.id)` — KHÔNG theo tên hiển
-thị, khớp quy ước mà `loom_query.runner` đã giả định từ Giai đoạn 2b. Xoá mềm một lakehouse
-KHÔNG xoá warehouse của nó.
-
-### Nợ đã biết sau Giai đoạn 2b
-
-- **Bí mật chia sẻ qua header KHÔNG chống được một pod đọc được chính Secret Kubernetes
-  đó.** Nó chỉ chứng minh request tới từ một nguồn CÓ bí mật — không phân biệt được
-  `loom-api` thật với một pod khác trong namespace vô tình (hay cố ý) đọc được cùng
-  Secret (ví dụ qua một lỗ RBAC cho phép `get`/`list` Secret). Chống điều đó cần ký lên
-  chính principal (chữ ký, không phải một bí mật tĩnh dùng lại cho mọi request) hoặc
-  mTLS giữa hai service — để dành cho Giai đoạn 6.
-- `GET`/`DELETE /api/v1/query/{id}` không kiểm "principal nào tạo ra query nào", chỉ dựa
-  vào `query_id` là UUID không đoán được (xem docstring `loom_query.routers.query`) — đủ
-  cho phạm vi hiện tại nhưng không phải bất biến vĩnh viễn.
-- `loom-query` không có `devReload`/`live_update` trong Tiltfile — sửa mã nguồn build lại
-  ảnh đầy đủ, khác `loom-api`.
-- **Warehouse mồ côi.** Nếu warehouse tạo xong nhưng item không tạo được (trùng tên, mất
-  quyền giữa chừng...), warehouse đó ở lại trong Lakekeeper không ai dùng. Dọn nó vẫn là
-  việc tay tới khi có task riêng — chấp nhận được vì nó ồn ào (thấy được trong danh sách
-  warehouse), khác lỗi mà nó thay thế.
-- **`loom-api` giờ cầm credential GỐC của MinIO** (`Settings.storage_root_access_key`/
-  `storage_root_secret_key`) để tự cấp phát warehouse — phá đúng nguyên tắc Giai đoạn 1 đặt
-  ra ("control plane không đọc secret nào", xem `SECRET_REF_RE`). Chấp nhận được với điều
-  kiện: phạm vi đọc credential đó CHỈ nằm trong `loom_api.warehouse_provisioning`, canh bởi
-  `services/api/tests/test_root_credential_guard.py` (một phép canh AST, không phải một
-  đoạn văn). Xoay credential đó vẫn là việc tay tới Giai đoạn 6, cùng nợ đã ghi ở Giai đoạn
-  2a cho `MinioStsProvider`.
-- Xoá mềm không xoá warehouse — cố ý, vì Lakekeeper từ chối xoá một warehouse còn bảng
-  (`409 WarehouseNotEmpty`, `force=true` không vượt qua được, đã kiểm ở 2a) và vì lịch sử
-  version vẫn cần warehouse sống. Giai đoạn 1b CHƯA có thao tác "bỏ-xoá" (un-delete) một
-  item — chỉ có `restore_version` (phục hồi NỘI DUNG trên một item đang sống). Một lakehouse
-  bị xoá mềm hôm nay không có đường quay lại qua API; nợ đó nằm ở Giai đoạn 1, không phải
-  của warehouse.
-
-## Giai đoạn 2b — dịch vụ truy vấn
-
 Chạy được `SELECT` trên bảng Iceberg qua HTTP, với cổng quyền của Giai đoạn 1 và năm giới
 hạn tài nguyên. Chưa có giao diện — đó là 2c.
 
@@ -163,6 +109,8 @@ DELETE /api/v1/query/{id}                     → huỷ, và nó dừng công vi
 ```
 
 Trình duyệt chỉ nói chuyện với `loom-api`; `loom-query` là ClusterIP, không lộ ra ingress.
+`loom-api` **tự tra** `workspace_id` từ `lakehouse_id` khi chuyển tiếp — giá trị client gửi
+kèm LUÔN bị bỏ qua, nếu không thì cổng quyền chỉ canh một con số do chính kẻ gọi khai.
 
 ### Thành phần mới
 
@@ -210,4 +158,78 @@ chỉ lộ ra khi có người mở nó.
 - **Warehouse mồ côi.** Nếu tạo warehouse xong mà tạo item hỏng, warehouse ở lại. Tốn chỗ,
   không gây hiểu nhầm — đổi một lỗi im lặng lấy một lỗi rác là có chủ đích.
 - **Xoá mềm không xoá warehouse**, vì `restore` cần nó và Lakekeeper từ chối xoá warehouse
-  còn bảng (`409`, `force=true` không vượt được).
+  còn bảng (`409`, `force=true` không vượt được). Và Giai đoạn 1b CHƯA có thao tác "bỏ-xoá"
+  một item — một lakehouse bị xoá mềm hôm nay không có đường quay lại qua API.
+- **`GET`/`DELETE /api/v1/query/{id}` không kiểm ai tạo ra query nào**, chỉ dựa vào việc
+  `query_id` là UUID không đoán được (xem docstring `loom_query.routers.query`). Đủ cho phạm
+  vi hiện tại, không phải một bất biến.
+- **`loom-query` không có `live_update` trong Tiltfile** — sửa mã nguồn build lại ảnh đầy
+  đủ, khác `loom-api`.
+
+## Giai đoạn 2c — SQL editor, Lakehouse Explorer, và phép đo đóng giai đoạn
+
+Giao diện cho mặt phẳng dữ liệu, cộng cửa chặn cuối của Giai đoạn 2.
+
+- **Lakehouse Explorer** — cây namespace/bảng/cột, đọc qua `GET /api/v1/lakehouses/{id}/schema`.
+  Endpoint tách tham số `depth` vì hai mức chênh nhau **200 lần** (7ms so với 1552ms): danh
+  sách namespace rẻ, còn lấy cột của mọi bảng thì phải mở từng metadata Iceberg.
+- **SQL editor** — chạy, huỷ, lưới kết quả, lưu thành item `sql_script` có version và
+  `restore`, autocomplete tên bảng/cột theo lakehouse đang chọn.
+- **Monaco tải TRÌ HOÃN.** Bundle khởi đầu 380 KB; Monaco là một chunk riêng 2.654 KB chỉ
+  tải khi mở một `sql_script`. Canh bởi `web/scripts/check-bundle-splitting.mjs`.
+- **`make smoke` lên 13 phép**, hai phép mới đi hết đường qua HTTP thật.
+
+### Phép đo 2 — kết luận mà Giai đoạn 3 cần trước tiên
+
+> **GIỮ PyIceberg. Không cắm Trino.** 50 GB thô (167,7 triệu dòng, 23,1 GB Parquet nén)
+> ghi xong trong **00:34:04**, so với ngưỡng 60 phút đã chốt trước khi đo.
+
+Tách theo giai đoạn, và chỗ này mới là phần đáng đọc:
+
+| | |
+|---|---|
+| Sinh nguồn | 495s (24,2%) — chi phí của BÀI ĐO, không phải của nền tảng |
+| Ghi Iceberg | 213s (**10,4%**) |
+| Commit catalog | 1335s (**65,3%**) |
+
+Câu hỏi đặt ra là "PyIceberg ghi Parquet có đủ nhanh không". Trả lời: thừa sức — 23 GB nén
+trong 213 giây. Thứ tốn thời gian là **metadata**, và một engine tính toán khác không đụng
+gì tới nó. Cắm Trino vào đây sẽ là sửa nhầm chỗ.
+
+**Cần gạt thật cho Giai đoạn 3 là kích thước lô, không phải engine.** Chi phí commit gần
+như cố định ~6,7s mỗi lần: 200 lô × 250 MB tốn 1335s, cũng ngần ấy dữ liệu chia thành
+50 lô × 1 GB chỉ còn ~334s — cắt 17 phút khỏi tổng 34 phút mà không sửa một dòng mã.
+
+Chi phí commit **có** tăng theo số snapshot, nhưng dưới tuyến tính: +11,9% sau 200 lần
+commit. Đó đúng là rủi ro mà phép ngoại suy từ 10 lô không thể loại trừ, và giờ nó đã bị
+loại trừ bằng số. Báo cáo đầy đủ:
+`docs/measurements/2026-08-10-phase-2c-write-path-50gb.md`.
+
+### Phép đo tìm ra một lỗi thật: MinIO bị OOMKilled
+
+Lần chạy đầu chết ở lô 40/200. MinIO là Go, và **Go không đọc hạn mức cgroup** — bộ thu gom
+rác nhắm theo GOGC, tức theo tốc độ phình của heap, nên nó phình qua trần 320Mi mà không
+biết có trần. Sửa bằng `GOMEMLIMIT=352MiB` (giới hạn MỀM mà GC nhìn thấy) cộng limit cứng
+448Mi; nâng limit không thôi chỉ làm nó chết muộn hơn.
+
+Vì sao bốn phép đo RAM trước không thấy: tất cả đều đo lúc cụm **nghỉ**. MinIO nghỉ dùng
+223 Mi, MinIO đang ghi dùng 271 Mi heap. Và `memory.current` một mình cũng không đủ — nó
+gộp cả page cache, mà máy chủ lưu trữ thì luôn lấp đầy page cache một cách vô hại; phải
+tách `anon` khỏi `file` mới thấy.
+
+Ngân sách RAM mới, đo **trong lúc ghi**: **1500 / 1843 Mi**, còn dư 343 Mi.
+
+### Nợ đã biết sau Giai đoạn 2c
+
+- **Chưa tách được 6,7s mỗi lần commit thành ba phần**: chuyến đi tới Postgres của
+  Lakekeeper trên Aiven, đọc lại manifest từ S3, và chính Lakekeeper. Khuyến nghị "lô to
+  hơn" đúng bất kể tỷ lệ giữa chúng, nhưng muốn giảm chính con số đó thì phải tách trước.
+- **Mỗi lần chạy `make smoke` để lại một bảng Iceberg vĩnh viễn** (`smoke_ns.ctas_result`).
+  Xoá mềm workspace chỉ đặt một cột trong Postgres, và xoá warehouse qua Lakekeeper KHÔNG
+  xoá object dưới S3. Nhỏ, nhưng không có giới hạn trên. Dọn cần một đường `DROP TABLE` mà
+  API truy vấn chưa có.
+- **Chuyển MinIO ra VPS giờ đáng giá hơn hẳn** — nó trả lại ~450 Mi cho cụm chứ không phải
+  ~250 Mi như spec ước lượng trước khi đo.
+- **Một CTAS mất ~11s ở local**, và gần hết chỗ đó là chuyến đi tới Aiven. Chấp nhận được
+  cho một thao tác tạo bảng, nhưng nó đặt sàn cho mọi bài kiểm chạm đường ghi: `make smoke`
+  giờ chờ tới `QUERY_TIMEOUT_S` (mặc định 60s) thay vì một trần 3 giây không có căn cứ.

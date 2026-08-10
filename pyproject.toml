@@ -16,6 +16,12 @@ dev = [
     "boto3-stubs[s3,sts]>=1.35",
     "duckdb>=1.1",
     "testcontainers[minio]>=4.9",
+    # Đọc manifest trong deploy/infra/ để khẳng định tính chất của chúng
+    # (test_minio_memory_ceiling.py). Nó VỐN ĐÃ có sẵn trong venv như phụ thuộc
+    # bắc cầu của `uvicorn[standard]` — nên phép canh chạy được mà không cần
+    # dòng này, và đó chính là vấn đề: nó sẽ hỏng vào ngày uvicorn đổi extra,
+    # với một thông báo lỗi chẳng liên quan gì tới MinIO.
+    "pyyaml>=6.0",
 ]
 
 [tool.ruff]

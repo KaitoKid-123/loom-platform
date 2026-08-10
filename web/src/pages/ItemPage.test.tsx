@@ -6,18 +6,31 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ItemPage } from './ItemPage'
 
+// `sql_script` mở bằng Monaco thật (Giai đoạn 2c) — giả lập nó ở ĐÂY để các bài kiểm
+// chung của trang (metadata, lịch sử version, phục hồi…) không phải tải Monaco thật
+// trong jsdom (canvas/ResizeObserver không có ở đó). Wiring lazy-load riêng của Monaco
+// có bài kiểm CHUYÊN BIỆT ở describe cuối file, và bản thân component thật có
+// `SqlEditor.test.tsx` riêng.
+vi.mock('../components/Editor/SqlEditor', () => ({
+  SqlEditor: (props: { value: string }) => <div data-testid="mock-sql-editor">{props.value}</div>,
+}))
+
 const WS = '11111111-1111-1111-1111-111111111111'
 const ID = 'c0ffee00-0000-0000-0000-000000000001'
 
+// Loại `pipeline` chứ không `sql_script` cho khuôn CHUNG: những bài kiểm dưới đây (metadata,
+// lịch sử version, phục hồi, 404…) không liên quan gì tới việc `sql_script` mở bằng Monaco
+// — dùng một loại khác giữ chúng độc lập với thay đổi đó. Hành vi riêng của `sql_script`
+// có describe riêng ở cuối file.
 const ITEM = {
   id: ID,
   workspace_id: WS,
-  type: 'sql_script',
+  type: 'pipeline',
   name: 'bao-cao',
   display_name: 'Báo cáo',
   folder_path: '/staging/',
   description: null,
-  definition: { schema_version: 1, sql: 'SELECT 1' },
+  definition: { schema_version: 1, steps: ['extract', 'load'] },
   version: 3,
   updated_at: '2026-08-05T00:00:00Z',
 }
@@ -92,16 +105,17 @@ describe('ItemPage', () => {
     // `aria-label` riêng cho nhãn version: "v3" một mình bị screen reader đọc là
     // "vê ba" mà không nói đó là gì.
     expect(screen.getByLabelText('version 3')).toBeInTheDocument()
-    // Nhãn NGƯỜI ĐỌC ĐƯỢC, không phải slug: `typeLabel` đổi `sql_script` thành
-    // "SQL script". Slug kỹ thuật chỉ nên xuất hiện ở chỗ nó là dữ liệu.
-    expect(screen.getByText('SQL script')).toBeInTheDocument()
+    // Nhãn NGƯỜI ĐỌC ĐƯỢC, không phải slug: `typeLabel` đổi `pipeline` thành "Pipeline".
+    // Slug kỹ thuật chỉ nên xuất hiện ở chỗ nó là dữ liệu.
+    expect(screen.getByText('Pipeline')).toBeInTheDocument()
   })
 
-  it('hiện definition dưới dạng chỉ đọc, không phải ô nhập', async () => {
-    // Một ô sửa được mà không lưu được tệ hơn một ô chỉ đọc — trình soạn thảo là Giai đoạn 2.
+  it('hiện definition dưới dạng chỉ đọc, không phải ô nhập (loại KHÔNG PHẢI sql_script)', async () => {
+    // Một ô sửa được mà không lưu được tệ hơn một ô chỉ đọc — trình soạn thảo thật (Monaco)
+    // chỉ tồn tại cho `sql_script` từ Giai đoạn 2c, xem describe riêng cuối file.
     renderPage()
     await screen.findByRole('heading', { name: 'Báo cáo' })
-    expect(screen.getByText(/SELECT 1/)).toBeInTheDocument()
+    expect(screen.getByText(/extract/)).toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
   })
 
@@ -204,5 +218,73 @@ describe('ItemPage — đọc nội dung một version', () => {
     )
     await screen.findByText('v2')
     expect(mock.mock.calls.some((c) => /\/versions\/\d+$/.test(String(c[0])))).toBe(false)
+  })
+})
+
+describe('ItemPage — sql_script mở bằng Monaco (React.lazy)', () => {
+  const SQL_ID = 'c0ffee00-0000-0000-0000-000000000002'
+  const SQL_ITEM = {
+    ...ITEM,
+    id: SQL_ID,
+    type: 'sql_script',
+    display_name: 'Truy vấn doanh thu',
+    definition: { schema_version: 1, sql: 'select 1' },
+  }
+
+  function renderSqlPage() {
+    const mock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input)
+      if (url.includes('/versions')) {
+        return new Response(JSON.stringify({ items: [], next_cursor: null }), { status: 200 })
+      }
+      return new Response(JSON.stringify(SQL_ITEM), { status: 200, headers: { etag: 'W/"3"' } })
+    })
+    vi.stubGlobal('fetch', mock)
+    const router = createMemoryRouter(
+      [{ path: '/workspaces/:workspaceId/items/:itemId', element: <ItemPage /> }],
+      { initialEntries: [`/workspaces/${WS}/items/${SQL_ID}`] },
+    )
+    const qc = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } })
+    return render(
+      <QueryClientProvider client={qc}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+  }
+
+  it('mở Monaco với nội dung sql của definition, không phải JSON thô', async () => {
+    renderSqlPage()
+    await screen.findByRole('heading', { name: 'Truy vấn doanh thu' })
+    expect(await screen.findByTestId('mock-sql-editor')).toHaveTextContent('select 1')
+    // Loại khác dùng `<pre>` JSON thô — `sql_script` thì KHÔNG, đây chính là khác biệt
+    // mà Giai đoạn 2c thêm vào.
+    expect(screen.queryByText(/"schema_version"/)).not.toBeInTheDocument()
+  })
+
+  it('KHÔNG ném khi definition thiếu trường sql', async () => {
+    // Phòng vệ giống mọi chỗ khác trong trang này: một item hỏng dữ liệu không được phép
+    // làm nổ cả trang.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(async (input) =>
+        String(input).includes('/versions')
+          ? new Response(JSON.stringify({ items: [], next_cursor: null }), { status: 200 })
+          : new Response(JSON.stringify({ ...SQL_ITEM, definition: { schema_version: 1 } }), {
+              status: 200,
+              headers: { etag: 'W/"3"' },
+            }),
+      ),
+    )
+    const router = createMemoryRouter(
+      [{ path: '/workspaces/:workspaceId/items/:itemId', element: <ItemPage /> }],
+      { initialEntries: [`/workspaces/${WS}/items/${SQL_ID}`] },
+    )
+    const qc = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByTestId('mock-sql-editor')).toHaveTextContent('')
   })
 })

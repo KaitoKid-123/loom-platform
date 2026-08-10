@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mười một phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
+# Mười ba phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
 # kubectl, nên chạy được với bất kỳ môi trường nào:
 #
 #     make smoke                              # local
@@ -9,9 +9,9 @@
 # Đây là bài kiểm chạy với một môi trường ĐANG SỐNG — chạy sau `make dev` ở local,
 # và sau mỗi lần ArgoCD đồng bộ ở dev/prod. Giai đoạn 6 sẽ nối nó vào e2e tự động.
 #
-# Mỗi phép kiểm phải THẬT SỰ đỏ khi thứ nó canh hỏng. Dự án này đã sáu lần gặp
-# "một phép kiểm xanh mà không kiểm gì cả", nên đừng thêm phép kiểm nào vào đây
-# mà chưa tự tay phá thứ nó canh để xem nó có đỏ không.
+# Mỗi phép kiểm phải THẬT SỰ đỏ khi thứ nó canh hỏng. Dự án này đã mười bốn lần
+# gặp "một phép kiểm xanh mà không kiểm gì cả", nên đừng thêm phép kiểm nào vào
+# đây mà chưa tự tay phá thứ nó canh để xem nó có đỏ không.
 set -uo pipefail
 
 BASE="${BASE:-http://loom.localhost}"
@@ -23,13 +23,55 @@ trap 'rm -rf "$(dirname "$JAR")"' EXIT
 
 # Số phép kiểm MONG ĐỢI, khẳng định ở cuối file. Không có nó, xoá một phép kiểm
 # vẫn cho "7/7 đạt" và bản báo cáo trông y như trước.
-EXPECTED=11
+EXPECTED=13
 
 pass=0; fail=0; skipped=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mHỎNG\033[0m %s\n     %s\n' "$1" "$2"; fail=$((fail+1)); }
 
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1"; }
+
+# Trần thời gian chờ một query chạy xong.
+#
+# Bản đầu không có hằng số này — nó lặp 10 vòng với `sleep 0.3`, tức chưa tới 3
+# giây, và con số 3 không đến từ đâu cả. Nó xanh ở Task 8 rồi đỏ ở Task 10 mà
+# KHÔNG có dòng mã nào đổi giữa hai lần.
+#
+# Đo thật lúc đó: CTAS mất **11,3s**, câu SELECT đọc lại mất **7,2s**. Phép đo
+# 50 GB ở cùng ngày giải thích vì sao — một lần commit catalog trung bình 6,7s,
+# p95 11,2s, max 15,7s, vì Lakekeeper nói chuyện với Postgres trên Aiven qua
+# internet. Một CTAS còn phải tạo namespace và ghi Parquet trước khi commit.
+#
+# Nên 3 giây chưa bao giờ đúng; nó chỉ tình cờ đủ vào một ngày mạng nhanh. Trần
+# ở đây là ~4 lần cái đuôi dày nhất đo được, và nó chỉ là TRẦN — vòng lặp thoát
+# ngay khi query xong, nên đặt rộng không làm bài kiểm chậm đi khi mọi thứ ổn.
+QUERY_TIMEOUT_S="${QUERY_TIMEOUT_S:-60}"
+
+# Chờ một query tới trạng thái CUỐI. In ra "<trạng thái> <số giây đã chờ>".
+#
+# In cả hai thứ qua stdout, KHÔNG đặt biến toàn cục: chỗ gọi dùng `$(...)`, mà
+# lệnh trong `$(...)` chạy ở subshell nên mọi phép gán bên trong biến mất khi nó
+# thoát. Bản đầu của hàm này đặt một biến `WAITED_S` rồi thông báo lỗi in ra
+# `sau 0s` mãi mãi — đúng cái mà nó tự nhận là đã sửa.
+#
+# Danh sách trạng thái cuối là ALLOWLIST (`loom_query.store.QueryStatus`), không
+# phải "khác running thì thôi". Khác nhau ở chỗ hỏng: khi curl trượt hoặc Traefik
+# trả một trang HTML 502, `jq` cho chuỗi RỖNG — mà rỗng cũng "khác running", nên
+# bản đầu thoát ngay vòng đầu tiên và vứt cả ngân sách 60 giây. Một cú nghẽn
+# mạng trong 11 giây chờ CTAS đủ để làm đỏ cả bài kiểm. Rỗng nghĩa là CHƯA BIẾT,
+# và chưa biết thì phải hỏi lại.
+wait_for_query() {   # $1 = query_id, $2 = file hứng phản hồi
+  local id="$1" out="$2" started="$SECONDS" status=""
+  while [ $((SECONDS - started)) -lt "$QUERY_TIMEOUT_S" ]; do
+    curl -s -b "$JAR" --max-time 10 -o "$out" "$BASE/api/v1/query/$id"
+    status=$(jq -r '.status // empty' < "$out" 2>/dev/null)
+    case "$status" in
+      succeeded|failed|cancelled) break ;;
+    esac
+    sleep 0.5
+  done
+  printf '%s %s' "${status:-không-đọc-được}" "$((SECONDS - started))"
+}
 
 echo "Smoke test: $BASE"
 
@@ -255,10 +297,135 @@ else
   fi
 fi
 
+# 12 — tạo lakehouse qua API rồi hỏi schema của nó: canh đúng đường Giai đoạn 2b
+#      Task 12 dựng — `loom-api` phải gọi Lakekeeper cấp một warehouse THẬT TRƯỚC khi
+#      commit hàng item (xem docstring `loom_api.warehouse_provisioning`). Nếu bước
+#      cấp phát đó bị bỏ qua hay hỏng âm thầm, item vẫn tạo được — hàng Postgres
+#      không biết gì về Lakekeeper — nhưng lakehouse RỖNG, và lỗi đó chỉ lộ ra lúc có
+#      người MỞ nó, không lộ lúc tạo.
+#
+#      Không hỏi Lakekeeper trực tiếp được: nó là ClusterIP, không qua ingress, và
+#      smoke không dùng kubectl. Hỏi GIÁN TIẾP qua route Task 2 Giai đoạn 2c dựng —
+#      `GET /lakehouses/{id}/schema` chuyển tiếp VÔ ĐIỀU KIỆN sang `loom-query` (xem
+#      docstring `routers/query.py`), và `loom-query` mở một catalog Iceberg THẬT của
+#      ĐÚNG warehouse này để liệt kê namespace. Warehouse không tồn tại thì bước mở
+#      catalog đó hỏng — đã kiểm bằng thực nghiệm trên cụm thật: xoá bước cấp phát rồi
+#      gọi route này cho ra một trạng thái KHÁC 200, không phải một cây rỗng.
+#
+#      Dùng CHUNG workspace với phép 10, không tạo workspace thứ hai chỉ cho phép
+#      này. KHÔNG dọn riêng lakehouse: xoá mềm workspace ở cuối file kéo theo cả hàng
+#      item này, đúng cách phép 10 đã để lại hàng item sql_script của nó. KHÔNG dọn
+#      được warehouse Lakekeeper — hệ thống hôm nay không có API xoá warehouse nào
+#      (xem docstring `loom_api.warehouse_provisioning`: "không có hàm xoá nào", một
+#      nợ đã ghi nhận ở đó, không phải việc của smoke). Mỗi lần chạy vì vậy để lại
+#      đúng MỘT warehouse rỗng — không bảng, không dữ liệu, không lớn dần theo cách
+#      đáng lo.
+smoke_lakehouse_id=""
+if [ -z "$smoke_ws_id" ]; then
+  bad "tạo lakehouse qua API — warehouse xuất hiện" "bỏ qua được — phép 10 không có workspace để dùng"
+else
+  lh_payload=$(printf '{"type":"lakehouse","name":"smoke-lakehouse-%s","display_name":"Smoke lakehouse","definition":{"schema_version":1}}' "$$")
+  lh_code=$(curl -s -b "$JAR" -o "$tmpdir/lh.json" -w '%{http_code}' --max-time 15 \
+            -X POST -H 'Content-Type: application/json' -d "$lh_payload" \
+            "$BASE/api/v1/workspaces/$smoke_ws_id/items")
+  if [ "$lh_code" != 201 ]; then
+    bad "tạo lakehouse qua API — warehouse xuất hiện" "tạo item type=lakehouse trả $lh_code"
+  else
+    smoke_lakehouse_id=$(jq -r '.id' < "$tmpdir/lh.json")
+    schema_code=$(curl -s -b "$JAR" -o "$tmpdir/schema.json" -w '%{http_code}' --max-time 15 \
+                  "$BASE/api/v1/lakehouses/$smoke_lakehouse_id/schema")
+    if [ "$schema_code" != 200 ]; then
+      bad "tạo lakehouse qua API — warehouse xuất hiện" \
+          "GET .../schema trả $schema_code (mong 200) — warehouse có được cấp phát không?"
+    elif ! jq -e '.namespaces == []' >/dev/null 2>&1 < "$tmpdir/schema.json"; then
+      bad "tạo lakehouse qua API — warehouse xuất hiện" "schema trả: $(cat "$tmpdir/schema.json")"
+    else
+      ok "tạo lakehouse qua API — warehouse xuất hiện (schema rỗng, đúng lakehouse mới)"
+    fi
+  fi
+fi
+
+# 13 — CTAS đi hết đường: trình duyệt -> loom-api -> bí mật chia sẻ -> cổng quyền
+#      -> runner -> Lakekeeper THẬT, và ngược lại — rồi SELECT lại đúng dòng vừa
+#      tạo. Đây CHÍNH XÁC là tiêu chí nghiệm thu của Giai đoạn 2 quyết định #4:
+#      "Tạo được bảng Iceberg bằng CTAS trong SQL editor, thấy nó trong Lakehouse
+#      Explorer".
+#
+#      TRƯỚC bản sửa CTAS (`loom_sql.deps.dependencies` tách đọc/ghi,
+#      `loom_query.runner` tự COMMIT kết quả SELECT ra Iceberg qua
+#      `Lakehouse.create_from`), phép này CHỈ kiểm được bằng một SELECT nhắm vào
+#      bảng không tồn tại — CTAS luôn hỏng với "table not found" TRƯỚC KHI câu
+#      CREATE kịp chạy (`dependencies()` cũ coi đích CTAS là một bảng cần ĐỌC, y
+#      hệt bảng nguồn). Giờ CTAS chạy được, phép này mạnh lên đúng như spec đòi:
+#      KHẲNG ĐỊNH thật, không chỉ TỪ CHỐI.
+#
+#      `SELECT 1 AS id` (không `FROM` gì): lakehouse vừa cấp phát ở phép 12 RỖNG
+#      (`namespaces == []`), nên CTAS ở đây không cần một bảng nguồn có sẵn nào —
+#      tự đủ để chứng minh đường "SELECT -> Arrow -> Lakehouse.create_from()".
+#      Namespace đích (`smoke_ns`) chưa tồn tại — `runner` phải tự tạo nó
+#      (`create_namespace_if_not_exists`) trước khi commit, không phải việc của
+#      smoke.
+#
+#      Tài khoản smoke là admin cấp TENANT (xem phép 10) — thừa hưởng
+#      `contributor` trở lên trên MỌI lakehouse trong tenant qua chuỗi tổ tiên
+#      RBAC (`loom_api.permissions`), nên CTAS ở đây chạy được mà không cần cấp
+#      quyền riêng cho lakehouse vừa tạo.
+if [ -z "$smoke_lakehouse_id" ]; then
+  bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" "không có lakehouse từ phép 12 để kiểm"
+else
+  ctas_payload=$(printf '{"lakehouse_id":"%s","sql":"CREATE TABLE smoke_ns.ctas_result AS SELECT 1 AS id"}' "$smoke_lakehouse_id")
+  ctas_code=$(curl -s -b "$JAR" -o "$tmpdir/ctas.json" -w '%{http_code}' --max-time 15 \
+              -X POST -H 'Content-Type: application/json' -d "$ctas_payload" \
+              "$BASE/api/v1/query")
+  if [ "$ctas_code" != 202 ]; then
+    bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" \
+        "nộp CTAS trả $ctas_code (mong 202) — proxy hoặc bí mật chia sẻ hỏng?"
+  else
+    ctas_query_id=$(jq -r '.query_id' < "$tmpdir/ctas.json")
+    read -r ctas_status ctas_waited_s < <(wait_for_query "$ctas_query_id" "$tmpdir/ctas_status.json")
+    if [ "$ctas_status" != succeeded ]; then
+      bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" \
+          "sau ${ctas_waited_s}s (trần ${QUERY_TIMEOUT_S}s) trạng thái cuối: $(cat "$tmpdir/ctas_status.json")"
+    else
+      sel_payload=$(printf '{"lakehouse_id":"%s","sql":"SELECT id FROM smoke_ns.ctas_result"}' "$smoke_lakehouse_id")
+      sel_code=$(curl -s -b "$JAR" -o "$tmpdir/sel.json" -w '%{http_code}' --max-time 15 \
+                 -X POST -H 'Content-Type: application/json' -d "$sel_payload" \
+                 "$BASE/api/v1/query")
+      if [ "$sel_code" != 202 ]; then
+        bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" \
+            "SELECT lại từ bảng vừa tạo trả $sel_code (mong 202)"
+      else
+        sel_query_id=$(jq -r '.query_id' < "$tmpdir/sel.json")
+        read -r sel_status sel_waited_s < <(wait_for_query "$sel_query_id" "$tmpdir/sel_status.json")
+        if [ "$sel_status" = succeeded ] && jq -e '.rows == [[1]]' >/dev/null 2>&1 < "$tmpdir/sel_status.json"; then
+          ok "CTAS qua /api/v1/query — bảng Iceberg tạo được qua SQL editor, đọc lại đúng dòng"
+        else
+          bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" \
+              "SELECT lại sau ${sel_waited_s}s (trần ${QUERY_TIMEOUT_S}s): $(cat "$tmpdir/sel_status.json")"
+        fi
+      fi
+    fi
+  fi
+fi
+
 # Dọn: xoá mềm workspace do smoke tạo. Phép 10 tạo một workspace THẬT trên Aiven mỗi
-# lần chạy, nên không dọn thì hai mươi lần chạy để lại hai mươi workspace rác.
+# lần chạy, nên không dọn thì hai mươi lần chạy để lại hai mươi workspace rác. Phép
+# 12 thêm một item lakehouse vào CÙNG workspace này — xoá mềm workspace kéo theo cả
+# hai (không cascade thật, nhưng cả hai đều thuộc một workspace đã biến mất, đúng
+# cách item sql_script của phép 10 đã luôn được xử lý).
 # Xoá mềm nên lịch sử audit còn nguyên — và audit của một lần smoke là bằng chứng nó
 # đã chạy thật.
+#
+# CÁI KHÔNG ĐƯỢC DỌN, và hãy đọc kỹ trước khi tin rằng nó tự hết: phép 13 tạo bảng
+# Iceberg THẬT (`smoke_ns.ctas_result`) với file Parquet thật trong MinIO. Xoá mềm
+# workspace KHÔNG chạm tới chúng — nó chỉ đặt một cột `deleted_at` trong Postgres.
+# Warehouse Lakekeeper cũng ở lại (nợ đã ghi ở Giai đoạn 2b), và đo thật ở Giai đoạn
+# 2c cho thấy xoá warehouse qua API quản trị của Lakekeeper CŨNG KHÔNG xoá object
+# dưới S3 — muốn sạch phải purge S3 tường minh.
+#
+# Nên mỗi lần chạy smoke để lại một bảng một dòng nằm lại vĩnh viễn. Nhỏ, nhưng
+# không có giới hạn trên. Dọn nó cần một đường DROP TABLE mà API truy vấn chưa có
+# (sqlglot chỉ cho SELECT và CTAS), nên đây là nợ có ý thức chứ không phải sơ suất.
 if [ -n "$smoke_ws_id" ]; then
   curl -s -b "$JAR" -o /dev/null -X DELETE --max-time 10 \
     "$BASE/api/v1/workspaces/$smoke_ws_id" || true

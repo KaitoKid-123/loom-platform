@@ -45,11 +45,28 @@ sang `loom-query` cho một thứ chắc chắn thất bại.
 minh nó tới TỪ `loom-api` — nơi duy nhất biết bí mật — chứ không phải từ một
 pod bất kỳ trong namespace tự xưng principal bất kỳ (xem docstring
 `loom_core.internal_auth` cho khoảng hở mà nó đóng, và nợ nó KHÔNG đóng).
+
+**`GET /lakehouses/{lakehouse_id}/schema` (Task 2, Giai đoạn 2c) CỐ Ý KHÔNG
+tra `_lakehouse_workspace_id` trước khi chuyển tiếp — khác BA route ở trên.**
+Route đó cần `workspace_id` THẬT để phân giải tên bảng ba phần, và 404 sớm ở
+đó là một đánh đổi đã ghi nhận (rò rỉ sự tồn tại của `lakehouse_id`, chấp nhận
+được vì SQL người dùng gõ vào đã cần biết id đó tồn tại). Route schema thì
+KHÁC: spec bắt buộc "lakehouse không tồn tại" và "không có quyền" phải cho ra
+CÙNG một 403, không phân biệt được — nên route này CHUYỂN TIẾP VÔ ĐIỀU KIỆN,
+không tra database gì cả, và để `loom-query` (`run_schema_gate`, hỏi
+`/internal/authz/items` với CHÍNH `lakehouse_id`) quyết định. `loom-api` không
+tự biết `lakehouse_id` có tồn tại hay không tại route này — và đó là ĐIỂM
+MẤU CHỐT, không phải một chỗ sót: thêm một bước tra cứu ở đây (dù chỉ để 404
+sớm cho một round trip) là mở lại đúng lỗ rò rỉ sự tồn tại mà route POST/GET/
+DELETE ở trên đã CHẤP NHẬN đánh đổi, còn route NÀY thì không được phép — xem
+`services/api/tests/integration/test_lakehouse_schema_proxy.py` cho phép kiểm
+canh đúng lỗi này.
 """
 
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
@@ -87,12 +104,14 @@ async def _forward(
     method: str,
     path: str,
     json_body: dict[str, object] | None = None,
+    params: dict[str, str] | None = None,
 ) -> Response:
     settings: Settings = request.app.state.settings
     client: httpx.AsyncClient = request.app.state.query_http
     upstream = await client.request(
         method,
         f"{settings.query_base_url}{path}",
+        params=params,
         json=json_body,
         headers={QUERY_SHARED_SECRET_HEADER: settings.query_shared_secret},
     )
@@ -145,3 +164,28 @@ async def cancel_query(
     principal: Principal = PrincipalDep,
 ) -> Response:
     return await _forward(request, method="DELETE", path=f"/query/{query_id}")
+
+
+@router.get("/lakehouses/{lakehouse_id}/schema")
+async def lakehouse_schema(
+    lakehouse_id: uuid.UUID,
+    request: Request,
+    principal: Principal = PrincipalDep,
+    depth: Literal["tables", "columns"] = "tables",
+) -> Response:
+    """Chuyển tiếp sang `loom-query`'s `GET /api/v1/lakehouses/{lakehouse_id}/
+    schema` — xem module docstring cho lý do route này KHÔNG tra
+    `_lakehouse_workspace_id` như ba route trên.
+
+    `principal` đi trong THÂN request (GET vẫn mang body — xem docstring
+    `loom_query.schemas.SchemaRequest`), đúng cách `POST /query` chuyển tiếp
+    principal của người dùng cuối, chỉ khác Ở CHỖ route này không có `sql`
+    hay `workspace_id` nào để gửi kèm — không có SQL nào để phân giải tên
+    bảng ba phần, nên không cần `workspace_id`."""
+    return await _forward(
+        request,
+        method="GET",
+        path=f"/lakehouses/{lakehouse_id}/schema",
+        params={"depth": depth},
+        json_body={"principal": principal.model_dump(mode="json")},
+    )

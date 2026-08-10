@@ -45,6 +45,7 @@ from typing import Protocol
 import httpx
 from fastapi import HTTPException, status
 
+from loom_core.roles import Action, Role, allows
 from loom_core.schemas import Principal
 from loom_query.files import UnsafeFilesPath, validate_files_paths
 from loom_sql import SqlError, TableRef, validate
@@ -102,7 +103,7 @@ class ExternalSourceRejected(HTTPException):
     này thay vì xoá hẳn: mọi thứ khác trong `external` — path trần
     (`FROM 's3://…'`), `range`/`generate_series` (không đọc dữ liệu từ đâu cả,
     quyết định KHÔNG mở khoá — xem báo cáo hoàn tất Task 13), bốn hàm còn lại
-    của `_KNOWN_READERS` bên `loom_sql.deps` (`read_csv_auto`, `read_json`,
+    bên `loom_sql.deps` (`read_csv_auto`, `read_json`,
     `read_json_auto`, `parquet_scan`) — vẫn bị chặn NGUYÊN VẸN như trước, và
     một `read_parquet('s3://workspace-khac/…')` (path KHÔNG an toàn) cũng vậy
     (dù giờ raise qua `InvalidFilesPath`, không phải class này — xem đó).
@@ -274,22 +275,36 @@ class ResolvedTable:
     `namespace`/`name` NHƯ CÂU SQL VIẾT (kể cả tiền tố alias ba phần) — đó là
     thứ `runner.py` cần để tạo lại đúng tên bảng trong DuckDB, phân biệt với
     tên THẬT trên catalog Iceberg (`strip_lakehouse_alias`).
+
+    **`is_read`/`is_write` (Giai đoạn 2c, CTAS).** Trực tiếp từ
+    `loom_sql.deps.Dependencies.reads`/`.writes` — `runner._run_sync` cần biết
+    vế này để quyết định có `Lakehouse.scan()` bảng hay không (chỉ ĐỌC mới
+    quét — một đích CTAS chưa tồn tại thì KHÔNG có gì để quét) và có tính vào
+    trần byte quét hay không (cùng lý do). Một bảng vừa đọc vừa ghi (`INSERT
+    INTO t SELECT * FROM t`) mang CẢ HAI cờ `True`. Mặc định `is_read=True,
+    is_write=False` — đúng hành vi DUY NHẤT tồn tại trước Giai đoạn 2c (mọi
+    bảng đều được quét), nên ba bài test gọi thẳng `runner.execute` bằng
+    `ResolvedTable(ref=..., lakehouse_id=...)` không cần sửa.
     """
 
     ref: TableRef
     lakehouse_id: uuid.UUID
+    is_read: bool = True
+    is_write: bool = False
 
 
 async def _resolve_tables(
     refs: tuple[TableRef, ...],
     *,
+    reads: frozenset[TableRef],
+    writes: frozenset[TableRef],
     lakehouse_id: uuid.UUID,
     workspace_id: uuid.UUID,
     resolver: LakehouseResolver,
 ) -> tuple[ResolvedTable, ...]:
     """Mọi `TableRef` trong `refs` -> `ResolvedTable` (bảng + id lakehouse sở
-    hữu nó) — quy ước đặt tên bảng đã chốt (xem module docstring và spec Giai
-    đoạn 2b Task 6/7):
+    hữu nó + cờ đọc/ghi) — quy ước đặt tên bảng đã chốt (xem module docstring
+    và spec Giai đoạn 2b Task 6/7):
 
     - `namespace.table` (HAI phần): trỏ THẲNG về `lakehouse_id` của request —
       không có gì để hỏi, mọi bảng hai phần hợp lệ trỏ về CÙNG một id.
@@ -341,13 +356,21 @@ async def _resolve_tables(
     resolved_tables: list[ResolvedTable] = []
     for ref, ns in checked:
         alias = lakehouse_alias_of(ns)
+        is_read = ref in reads
+        is_write = ref in writes
         if alias is None:
-            resolved_tables.append(ResolvedTable(ref=ref, lakehouse_id=lakehouse_id))
+            resolved_tables.append(
+                ResolvedTable(
+                    ref=ref, lakehouse_id=lakehouse_id, is_read=is_read, is_write=is_write
+                )
+            )
             continue
         other_id = resolved.get(alias)
         if other_id is None:
             raise QueryForbidden
-        resolved_tables.append(ResolvedTable(ref=ref, lakehouse_id=other_id))
+        resolved_tables.append(
+            ResolvedTable(ref=ref, lakehouse_id=other_id, is_read=is_read, is_write=is_write)
+        )
     return tuple(resolved_tables)
 
 
@@ -420,13 +443,20 @@ async def run_gate(
         _check_files_access(sql, deps.external)
 
     refs = tuple(deps.tables)
+    reads = frozenset(deps.reads)
+    writes = frozenset(deps.writes)
 
     # `_resolve_tables` tự khử trùng lặp NHƯNG kiểm quyền trên TOÀN BỘ id thu
     # được — không rút gọn xuống "bảng đầu tiên" ở đây hay bên trong nó. Một
     # `JOIN` hai lakehouse phải hỏi quyền trên CẢ HAI id, xem
     # `tests/test_query_authz_gate.py` cho phép kiểm canh đúng lỗi này.
     resolved_tables = await _resolve_tables(
-        refs, lakehouse_id=lakehouse_id, workspace_id=workspace_id, resolver=resolver
+        refs,
+        reads=reads,
+        writes=writes,
+        lakehouse_id=lakehouse_id,
+        workspace_id=workspace_id,
+        resolver=resolver,
     )
 
     # BẤT BIẾN BẮT BUỘC, đã từng bị vi phạm: **catalog mà `runner` mở PHẢI nằm
@@ -447,13 +477,36 @@ async def run_gate(
 
     roles = await authz.roles_for_items(principal, item_ids)
 
-    # "Thiếu viewer" ĐÚNG BẰNG "role trả về là None": `loom_core.roles.
-    # ACTION_MATRIX` xếp `item.read` vào tập quyền THẤP NHẤT (viewer) và mọi
-    # vai trò cao hơn là SUPERSET của nó, nên "có bất kỳ vai trò nào" và "có ít
-    # nhất viewer" là một mệnh đề — không cần so sánh với `Role.viewer` ở đây,
-    # và làm vậy sẽ là tính lại một phần luật mà `loom_api.permissions` đã có.
-    missing = [item_id for item_id in item_ids if roles.get(str(item_id)) is None]
-    if missing:
+    # Lakehouse nào có ÍT NHẤT một đích ghi (CTAS/`INSERT ... SELECT`) đòi
+    # `item.update` (contributor trở lên) trên CHÍNH lakehouse đó — không phải
+    # `item.read` (viewer) như đọc. Một lakehouse có thể vừa xuất hiện ở đây
+    # vừa KHÔNG (một `JOIN` ghi vào lakehouse A trong khi chỉ đọc lakehouse B):
+    # yêu cầu quyền tính RIÊNG cho từng lakehouse, không phải một mức chung cho
+    # cả câu SQL.
+    write_lakehouse_ids = {table.lakehouse_id for table in resolved_tables if table.is_write}
+
+    # "Thiếu viewer" KHÔNG còn đúng bằng "role trả về là None" kể từ khi GHI
+    # tồn tại — mệnh đề cũ (đã ghi ở đây trước Giai đoạn 2c) chỉ đúng cho ĐỌC:
+    # `loom_core.roles.ACTION_MATRIX` xếp `item.read` vào tập quyền THẤP NHẤT
+    # (viewer) và mọi vai trò cao hơn là SUPERSET của nó, nên với đọc, "có bất
+    # kỳ vai trò nào" và "có ít nhất viewer" vẫn là một mệnh đề. Nhưng
+    # `item.update` (GHI) chỉ nằm trong `contributor` trở lên — một `viewer`
+    # CÓ vai trò (`roles.get(...)` khác `None`) nhưng KHÔNG đủ quyền ghi, nên
+    # phải gọi thẳng `allows()` cho từng lakehouse thay vì chỉ kiểm `is None`.
+    # Dùng `allows()` (từ `loom_core.roles`, nguồn quy tắc DUY NHẤT — xem module
+    # docstring) chứ không tự so `role >= contributor` bằng tay: một phép so
+    # viết tay ở đây là đường tính luật RBAC thứ ba, đúng thứ mà việc gom luật
+    # vào `loom_core.roles` ở Giai đoạn 1 tồn tại để chặn.
+    insufficient = []
+    for item_id in item_ids:
+        role_name = roles.get(str(item_id))
+        if role_name is None:
+            insufficient.append(item_id)
+            continue
+        required = Action.item_update if item_id in write_lakehouse_ids else Action.item_read
+        if not allows(Role[role_name], required):
+            insufficient.append(item_id)
+    if insufficient:
         raise QueryForbidden
 
     return resolved_tables

@@ -115,8 +115,13 @@ web-install:  ## Cài dependency web
 	cd web && npm ci
 
 .PHONY: web-test
-web-test:  ## Test frontend
+web-test: bundle-check  ## Test frontend (kèm phép canh Monaco tải trì hoãn)
 	cd web && npm run test -- --run && npm run typecheck
+
+.PHONY: bundle-check
+bundle-check:  ## Canh: chunk khởi đầu KHÔNG chứa Monaco (Giai đoạn 2c, xem web/scripts/check-bundle-splitting.mjs)
+	cd web && npm run build
+	cd web && node scripts/check-bundle-splitting.mjs
 
 .PHONY: build-web
 build-web:  ## Build image loom-web
@@ -399,6 +404,24 @@ measure-scan:  ## Phép đo 1 mục 1 — thời gian lập kế hoạch quét b
 	@# một môi trường khác cho ra một con số nói về hệ thống không ai chạy.
 	uv run pytest -m benchmark -o addopts="" -s \
 		packages/icebergkit/tests/integration/test_scan_planning_benchmark.py
+
+.PHONY: measure-lakehouse-schema
+measure-lakehouse-schema:  ## Phép đo Task 2 (2c) — kích thước/độ trễ GET .../schema, 200 bảng x 30 cột
+	uv run pytest -m benchmark -o addopts="" -s \
+		services/loom-query/tests/integration/test_lakehouse_schema_size_benchmark.py
+
+.PHONY: measure-write
+measure-write: check-context  ## Rủi ro #4 (CỬA CHẶN GĐ2) — đường ghi PyIceberg trên cụm k3d thật, 50 GB mặc định
+	@# Mặc định --target-raw-gb 50 (ngưỡng đã chốt với chủ dự án — xem docstring
+	@# của scripts/measure_write_path.py). Kiểm ở quy mô nhỏ:
+	@#   make measure-write ARGS="--target-raw-gb 1 --batch-raw-mb 100"
+	@# Chạy 50 GB thật SẼ MẤT NHIỀU GIỜ — chạy nền:
+	@#   nohup make measure-write > /tmp/measure-write-50gb.out 2>&1 &
+	uv run python scripts/measure_write_path.py $(ARGS)
+
+.PHONY: measure-write-cleanup
+measure-write-cleanup: check-context  ## Dọn bảng/namespace/warehouse/S3 của lần measure-write đã lưu
+	uv run python scripts/measure_write_path.py --cleanup $(ARGS)
 
 .PHONY: ram
 ram: check-context  ## Tổng RAM cụm đang dùng, so với trần 1,8 GB

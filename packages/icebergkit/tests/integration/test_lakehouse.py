@@ -94,6 +94,50 @@ def test_scan_returns_a_streaming_reader_not_a_materialised_table(
     assert isinstance(reader, pa.RecordBatchReader)
 
 
+def test_create_namespace_if_not_exists_is_a_noop_the_second_time(
+    lakehouse: Lakehouse, ns: str
+) -> None:
+    """`ns` (fixture) đã tạo namespace một lần qua `create_namespace` — gọi lại
+    qua bản KHÔNG-ném-lỗi này không được ném gì, khác `create_namespace` thô
+    (đã ném `NamespaceAlreadyExistsError` nếu gọi lại — hành vi CŨ, không đổi).
+
+    Runner (Giai đoạn 2c, CTAS) cần bản này: nó không biết trước một namespace
+    đích đã tồn tại hay chưa, và hỏi trước bằng `list_namespaces()` rồi mới gọi
+    `create_namespace` là hai round trip cho đúng một câu hỏi mà PyIceberg trả
+    lời được trong một."""
+    lakehouse.create_namespace_if_not_exists(ns)  # không ném, dù `ns` đã tồn tại
+    assert ns in lakehouse.list_namespaces()
+
+
+def test_create_from_with_replace_overwrites_an_existing_table(
+    lakehouse: Lakehouse, ns: str
+) -> None:
+    """`CREATE OR REPLACE TABLE ... AS SELECT` (Giai đoạn 2c): đích ĐÃ tồn
+    tại, và dữ liệu CŨ phải biến mất — không phải `append`, cũng không phải
+    một lỗi "đã tồn tại"."""
+    qualified = f"{ns}.t8"
+    lakehouse.create_from(qualified, pa.table({"i": pa.array([1, 2, 3], type=pa.int64())}))
+
+    lakehouse.create_from(qualified, pa.table({"i": pa.array([9], type=pa.int64())}), replace=True)
+
+    result = lakehouse.scan(qualified).read_all()
+    assert result.column("i").to_pylist() == [9]
+
+
+def test_create_from_without_replace_still_rejects_an_existing_table(
+    lakehouse: Lakehouse, ns: str
+) -> None:
+    """Vế KHẲNG ĐỊNH của bài trên: hành vi MẶC ĐỊNH (`replace=False`, hành vi
+    CŨ) vẫn phải từ chối ghi đè một bảng đã tồn tại — không có bài này, một
+    cài đặt lỡ để `replace=True` làm mặc định cũng làm bài trên xanh mà không
+    chứng minh được gì về tham số `replace`."""
+    qualified = f"{ns}.t9"
+    lakehouse.create_from(qualified, pa.table({"i": pa.array([1], type=pa.int64())}))
+
+    with pytest.raises(Exception):  # noqa: B017 — lỗi thật từ PyIceberg, không đoán loại
+        lakehouse.create_from(qualified, pa.table({"i": pa.array([2], type=pa.int64())}))
+
+
 def test_scan_size_bytes_matches_pyiceberg_manifest_stats_and_two_files_sum(
     lakehouse: Lakehouse,
     ns: str,

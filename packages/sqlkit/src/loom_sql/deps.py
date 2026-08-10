@@ -47,19 +47,29 @@ class Dependencies:
 
     `external` rỗng là điều kiện cần để một query an toàn ở Giai đoạn 2b — đường
     đọc file thô trong `Files/` chưa được xây, nên chưa có gì phân quyền cho nó.
+
+    **`reads`/`writes` (Giai đoạn 2c, CTAS)**: `tables` là HỢP của cả hai —
+    giữ nguyên hình dạng cũ, nên `table_deps()` (dùng cho lineage Giai đoạn 4)
+    không cần đổi gì. `reads` là bảng câu SQL THẬT SỰ đọc (kể cả một bảng vừa
+    đọc vừa ghi, ví dụ `INSERT INTO t SELECT * FROM t` — `t` nằm ở CẢ HAI danh
+    sách); `writes` là ĐÍCH của `CREATE [OR REPLACE] TABLE ... AS SELECT` hay
+    `INSERT INTO ... SELECT`.
+
+    Trước Giai đoạn 2c, `dependencies()` coi đích CTAS là một bảng cần ĐỌC —
+    y hệt một bảng nguồn. Hai hậu quả: (1) `runner._run_sync` quét `Lakehouse.
+    scan()` cho một bảng CHƯA TỒN TẠI (đích CTAS luôn là bảng mới) trước khi
+    câu `CREATE` kịp chạy, nên CTAS luôn hỏng với "table not found"; (2)
+    `run_gate` chỉ đòi `item.read` (viewer) cho GHI, trong khi
+    `loom_core.roles.ACTION_MATRIX` xếp `item.update` vào `contributor` — một
+    viewer tạo được bảng trong lakehouse là một lỗ RBAC, không chỉ thiếu tính
+    năng. `reads`/`writes` tách ra ở đây để `authz.run_gate` đòi đúng quyền cho
+    từng vế, và `runner` chỉ quét vế `reads`.
     """
 
     tables: list[TableRef]
     external: list[str]
-
-
-# Hàm bảng đọc được dữ liệu ngoài catalog. KHÔNG phải danh sách đầy đủ, và không
-# cần đầy đủ: mọi `exp.Table` không có tên định danh đều rơi vào `external`, nên
-# một hàm mới của DuckDB cũng bị bắt. Danh sách này chỉ để THÔNG BÁO nói được
-# tên thứ đã bị chặn.
-_KNOWN_READERS = frozenset(
-    {"read_parquet", "read_csv", "read_csv_auto", "read_json", "read_json_auto", "parquet_scan"}
-)
+    reads: list[TableRef]
+    writes: list[TableRef]
 
 
 def _looks_like_a_path(name: str) -> bool:
@@ -71,23 +81,87 @@ def _looks_like_a_path(name: str) -> bool:
     return "://" in name or name.startswith(("/", "./", "../")) or "*" in name
 
 
-def dependencies(sql: str, dialect: str) -> Dependencies:
-    """Tách phụ thuộc thành bảng catalog và nguồn đọc ngoài catalog.
+def _destination_table(node: exp.Expression) -> exp.Table | None:
+    """Đích ghi của `node` (một `exp.Create` hay `exp.Insert`), `None` nếu
+    không đúng hình dạng mong đợi.
 
-    `tables` đã khử trùng lặp, thứ tự ỔN ĐỊNH (sắp theo namespace rồi tên) —
-    KHÔNG phải thứ tự xuất hiện. Chỗ gọi so sánh danh sách này; một thứ tự đổi
-    theo cách sqlglot duyệt AST giữa các bản sẽ làm test đỏ ở nơi không liên quan.
+    Thăm dò thực nghiệm (sqlglot 30.15.0) trên cả ba dạng ghi — CTAS, `CREATE
+    OR REPLACE TABLE ... AS SELECT`, `INSERT INTO ... SELECT`: sqlglot đặt đích
+    ở `node.this`, TRỰC TIẾP là `exp.Table` khi câu lệnh KHÔNG kèm danh sách
+    cột (`CREATE TABLE t AS SELECT ...`), nhưng BỌC trong `exp.Schema` khi có
+    danh sách cột tường minh (`CREATE TABLE t (a, b) AS SELECT ...`, `INSERT
+    INTO t (a, b) SELECT ...` — đã kiểm cả hai class `exp.Create`/`exp.Insert`
+    cho hình dạng bọc này).
+    """
+    target = node.this
+    if isinstance(target, exp.Schema):
+        target = target.this
+    return target if isinstance(target, exp.Table) else None
+
+
+def _create_table_info(tree: exp.Expression) -> tuple[exp.Table, bool] | None:
+    """`(bảng đích, có phải REPLACE hay không)` nếu `tree` là `CREATE [OR
+    REPLACE] TABLE ...` (CÓ hay KHÔNG `AS SELECT` — `write_target()` bên dưới
+    mới là chỗ đòi phải có `AS SELECT` để CHẠY được); `None` cho `CREATE VIEW`/
+    `CREATE SCHEMA`/... (`kind` khác `"TABLE"`, đã kiểm bằng thực nghiệm sqlglot
+    trả `kind` là chuỗi thường, ví dụ `"TABLE"`/`"VIEW"`/`"SCHEMA"`) hay không
+    tìm thấy đích đúng hình dạng.
+    """
+    if not (isinstance(tree, exp.Create) and tree.args.get("kind") == "TABLE"):
+        return None
+    target = _destination_table(tree)
+    if target is None:
+        return None
+    return target, bool(tree.args.get("replace"))
+
+
+def _write_destination(tree: exp.Expression) -> exp.Table | None:
+    """Bảng ĐÍCH ghi của `tree` nếu nó là một trong ba dạng ghi (CTAS, `CREATE
+    OR REPLACE TABLE ... AS SELECT`, `INSERT INTO ... SELECT`) — `None` cho
+    mọi dạng khác, KỂ CẢ `CREATE TABLE` không có `AS SELECT` (DDL thuần vẫn
+    được coi là GHI ở đây — nó tạo một bảng, nên vẫn cần `contributor` — dù
+    `runner` chưa biết CHẠY nó, xem `write_target`/báo cáo hoàn tất task).
+
+    So khớp bằng ĐỐI TƯỢNG Python (`is`) khi gọi ở `dependencies()` bên dưới,
+    KHÔNG theo tên: `INSERT INTO t SELECT * FROM t` cho ra HAI node `exp.Table`
+    khác nhau cùng tên `t` (một đích, một nguồn) — so tên sẽ không phân biệt
+    được cái nào là gì.
+    """
+    create_info = _create_table_info(tree)
+    if create_info is not None:
+        return create_info[0]
+    if isinstance(tree, exp.Insert):
+        return _destination_table(tree)
+    return None
+
+
+def dependencies(sql: str, dialect: str) -> Dependencies:
+    """Tách phụ thuộc thành bảng catalog (ĐỌC/GHI) và nguồn đọc ngoài catalog.
+
+    `tables`/`reads`/`writes` đã khử trùng lặp, thứ tự ỔN ĐỊNH (sắp theo
+    namespace rồi tên) — KHÔNG phải thứ tự xuất hiện. Chỗ gọi so sánh danh
+    sách này; một thứ tự đổi theo cách sqlglot duyệt AST giữa các bản sẽ làm
+    test đỏ ở nơi không liên quan.
 
     CTE không phải bảng thật: thăm dò trên sqlglot 30.15.0 xác nhận
     `find_all(exp.Table)` trả về CẢ bí danh CTE lẫn bảng thật nó bọc quanh, nên
     phải loại tên trùng bí danh CTE. Lọc theo TÊN, không theo scope: nếu một CTE
     và một bảng thật trùng tên thì CTE che bảng thật trong phạm vi câu lệnh đó —
-    đúng ngữ nghĩa SQL chuẩn.
+    đúng ngữ nghĩa SQL chuẩn. Đích ghi (`destination` bên dưới) được kiểm TRƯỚC
+    kiểm CTE — một đích ghi không bao giờ là bí danh CTE (CTE không thể là đích
+    của `CREATE`/`INSERT`), nên thứ tự này không bỏ sót gì.
     """
-    tree = sqlglot.parse_one(sql, read=dialect)
+    # `parse_one` khai kiểu trả về là `exp.Expr` (lớp CHA của `exp.Expression`
+    # trong stub sqlglot 30.15.0, không phải bí danh của nó) — `cast` ở đây
+    # trung thực với thực tế (mọi kết quả `parse_one` LÀ một `exp.Expression`),
+    # không phải một cách né mypy: `_write_destination`/`isinstance` bên dưới
+    # đều cần API của `exp.Expression`.
+    tree = cast(exp.Expression, sqlglot.parse_one(sql, read=dialect))
     cte_names = {cte.alias_or_name for cte in tree.find_all(exp.CTE)}
+    destination = _write_destination(tree)
 
-    tables: set[TableRef] = set()
+    reads: set[TableRef] = set()
+    writes: set[TableRef] = set()
     external: set[str] = set()
 
     for table in tree.find_all(exp.Table):
@@ -95,9 +169,19 @@ def dependencies(sql: str, dialect: str) -> Dependencies:
 
         # Không có tên định danh: hàm bảng như `range(10)` hay
         # `read_parquet('…')`. sqlglot đặt lời gọi hàm vào `table.this`.
+        #
+        # Dùng `_reader_name` chứ KHÔNG gọi thẳng `call.sql_name()`: sqlglot
+        # 30.15.0 chỉ có class riêng cho một phần các hàm này, còn lại trả về
+        # `"ANONYMOUS"` — nên `read_json`, `read_csv_auto` và `parquet_scan`
+        # đều hiện ra dưới cùng một cái nhãn vô nghĩa đó, và thông báo 400 mà
+        # người dùng nhận được là "chưa hỗ trợ ở giai đoạn này: ANONYMOUS".
+        # `_reader_name` đã biết đọc tên thật từ `exp.Anonymous`; chỗ này chỉ
+        # quên dùng nó. Việc CHẶN thì vẫn đúng trước và sau (`_check_files_access`
+        # từ chối mọi nhãn ngoài allowlist) — cái sai là nó không nói được cái gì
+        # bị chặn.
         if not name:
             call = table.this
-            label = call.sql_name() if isinstance(call, exp.Func) else str(call)
+            label = _reader_name(call) if isinstance(call, exp.Func) else str(call)
             external.add(label)
             continue
 
@@ -105,15 +189,23 @@ def dependencies(sql: str, dialect: str) -> Dependencies:
             external.add(name)
             continue
 
+        parts = [p for p in (table.catalog, table.db) if p]
+        ref = TableRef(namespace=".".join(parts) if parts else None, name=name)
+
+        if table is destination:
+            writes.add(ref)
+            continue
+
         if name in cte_names:
             continue
 
-        parts = [p for p in (table.catalog, table.db) if p]
-        tables.add(TableRef(namespace=".".join(parts) if parts else None, name=name))
+        reads.add(ref)
 
     return Dependencies(
-        tables=sorted(tables, key=lambda r: (r.namespace or "", r.name)),
+        tables=sorted(reads | writes, key=lambda r: (r.namespace or "", r.name)),
         external=sorted(external),
+        reads=sorted(reads, key=lambda r: (r.namespace or "", r.name)),
+        writes=sorted(writes, key=lambda r: (r.namespace or "", r.name)),
     )
 
 
@@ -125,6 +217,63 @@ def table_deps(sql: str, dialect: str) -> list[TableRef]:
     `external` là bỏ qua đúng những đường đọc dữ liệu không đi qua catalog.
     """
     return dependencies(sql, dialect).tables
+
+
+# --- Giai đoạn 2c: đường CTAS thật (runner cần biết CHẠY gì, không chỉ AI ------
+#     được phép đọc/ghi bảng nào) -----------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class WriteTarget:
+    """Đích ghi CÓ THỂ CHẠY được của một câu SQL, cùng câu `SELECT` nhúng bên
+    trong nó — cái mà `runner` cần để tự chạy phần đọc trên DuckDB rồi COMMIT
+    kết quả ra Iceberg qua `Lakehouse.create_from()` (xem
+    `loom_query.runner`), THAY VÌ đưa cả câu `CREATE ... AS SELECT` cho DuckDB
+    chạy thẳng — `CREATE TABLE` của DuckDB tạo bảng trong catalog `:memory:`
+    riêng của chính connection đó, không phải trong Iceberg, và bảng đó biến
+    mất khi connection đóng.
+
+    `select_sql` đã tái sinh qua chính dialect gốc (`sql.dialect=dialect`),
+    giữ NGUYÊN tên bảng/alias người dùng đã viết — runner chạy nó trên CÙNG
+    connection đã đăng ký view cho các bảng ĐỌC (`Dependencies.reads`), nên
+    tên phải khớp nguyên vẹn.
+    """
+
+    ref: TableRef
+    replace: bool
+    select_sql: str
+
+
+def write_target(sql: str, dialect: str) -> WriteTarget | None:
+    """`sql` có phải CTAS CHẠY ĐƯỢC — `CREATE [OR REPLACE] TABLE ... AS
+    SELECT ...` — hay không; `None` cho MỌI dạng khác, kể cả hai dạng ghi còn
+    lại mà `dependencies()` ở trên VẪN xếp vào `writes` (nên VẪN đòi
+    `contributor`) nhưng `runner` CHƯA có đường commit thật:
+
+    - `INSERT INTO ... SELECT` — đích thường đã tồn tại, ghi thêm dòng
+      (`Lakehouse.append`) là một task khác, chưa tới lượt ở đây.
+    - `CREATE TABLE ...` KHÔNG `AS SELECT` (DDL thuần, không `expression`) —
+      không có dữ liệu nào để chạy, không có gì để commit.
+
+    Một PHÉP DUYỆT RIÊNG, KHÔNG tái dùng cây của `dependencies()` — cùng lý do
+    đã ghi ở `file_read_calls`: hai hàm trả lời hai câu hỏi khác nhau ("bảng
+    nào bị kiểm quyền" so với "có gì để runner CHẠY"), và `runner` gọi hàm này
+    trên `sql` ĐÃ qua `resolve_files_query` (path `Files/` đã được viết lại),
+    khác với `sql` gốc mà `run_gate` đưa cho `dependencies()` — dùng chung một
+    cây đã phân tích của bản SQL sai (gốc so với đã viết lại) sẽ chạy nhầm
+    path.
+    """
+    tree = cast(exp.Expression, sqlglot.parse_one(sql, read=dialect))  # xem `dependencies()`
+    create_info = _create_table_info(tree)
+    if create_info is None:
+        return None
+    target, replace = create_info
+    select = tree.args.get("expression")
+    if select is None:
+        return None
+    parts = [p for p in (target.catalog, target.db) if p]
+    ref = TableRef(namespace=".".join(parts) if parts else None, name=target.name)
+    return WriteTarget(ref=ref, replace=replace, select_sql=select.sql(dialect=dialect))
 
 
 # --- Task 13 (Giai đoạn 2b): đọc file thô trong `Files/` ---------------------
@@ -139,10 +288,9 @@ def table_deps(sql: str, dialect: str) -> list[TableRef]:
 # cần biết `read_parquet` là gì.
 #
 # HAI HÀM DUY NHẤT được phục vụ — `read_csv_auto`, `read_json`, `read_json_auto`,
-# `parquet_scan` (bốn cái còn lại trong `_KNOWN_READERS`) vẫn chỉ lộ ra ở
-# `external` như trước, KHÔNG có mặt ở đây. Nới rộng hơn hai hàm này là quyết
-# định của một task khác — xem báo cáo hoàn tất Task 13 cho lý do dừng ở đúng
-# hai hàm mà spec liệt kê.
+# `parquet_scan` vẫn chỉ lộ ra ở `external` như trước, KHÔNG có mặt ở đây. Nới
+# rộng hơn hai hàm này là quyết định của một task khác — xem báo cáo hoàn tất
+# Task 13 cho lý do dừng ở đúng hai hàm mà spec liệt kê.
 FILE_READ_FUNCTIONS = frozenset({"read_parquet", "read_csv"})
 
 
@@ -165,8 +313,8 @@ def _reader_name(call: exp.Func) -> str:
     """Tên hàm THẬT của `call`, chữ thường.
 
     `call.sql_name()` trả `"ANONYMOUS"` cho các hàm sqlglot không có class
-    riêng (bốn cái trong `_KNOWN_READERS` không nằm trong `FILE_READ_FUNCTIONS`
-    — đã kiểm bằng thực nghiệm sqlglot 30.15.0); tên thật của chúng nằm ở
+    riêng (`read_csv_auto`, `read_json`, `read_json_auto`, `parquet_scan` — đã
+    kiểm bằng thực nghiệm sqlglot 30.15.0); tên thật của chúng nằm ở
     `call.this`, một CHUỖI (không phải `exp.Expression`) khi `call` là
     `exp.Anonymous`. `read_parquet`/`read_csv` THÌ có class riêng
     (`exp.ReadParquet`/`exp.ReadCSV`) nên `sql_name()` đã đúng, không cần rẽ

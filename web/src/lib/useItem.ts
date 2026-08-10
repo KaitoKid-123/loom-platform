@@ -25,11 +25,15 @@ export interface VersionRow {
   created_by: string
 }
 
-function itemKey(itemId: string) {
+// Xuất ra (không còn `function` riêng-file): `useUpdateItemDefinition`
+// (`useItemMutations.ts`, Giai đoạn 2c Phần B) cần ghi ĐÚNG hai khoá này sau khi lưu
+// một câu SQL — dùng lại nguyên vẹn thay vì chép tay mảng khoá ở nơi khác, đúng lý do
+// `itemKeys` bên `useItemMutations.ts` đã tồn tại cho khoá danh sách `['items', ...]`.
+export function itemKey(itemId: string) {
   return ['item', itemId] as const
 }
 
-function versionsKey(itemId: string) {
+export function versionsKey(itemId: string) {
   return ['item-versions', itemId] as const
 }
 
