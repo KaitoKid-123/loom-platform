@@ -19,10 +19,42 @@ def validate(sql: str, dialect: str) -> list[SqlError]:
     kiểm dòng-3 trong `test_validate.py` sẽ đỏ và bắt được ngay.
     """
     try:
-        sqlglot.parse(sql, read=dialect)
+        statements = sqlglot.parse(sql, read=dialect)
     except ParseError as e:
         return [
             SqlError(message=err["description"], line=err["line"], column=err["col"])
             for err in e.errors
+        ]
+
+    # MỘT câu lệnh mỗi lần, và đây là một hàng rào QUYỀN chứ không phải một quy
+    # ước phong cách.
+    #
+    # `dependencies()` gọi `parse_one`, và với nhiều câu lệnh sqlglot 30.15.0 trả
+    # về một `exp.Block`. `_write_destination(Block)` không khớp `exp.Create` lẫn
+    # `exp.Insert` nên trả `None` — thế là đích GHI bị xếp nhầm thành một bảng
+    # ĐỌC. Hậu quả đo được:
+    #
+    #     dependencies("SELECT 1; CREATE TABLE ns.t AS SELECT 1")
+    #        -> writes=[]  reads=[ns.t]
+    #
+    # `run_gate` khi đó chỉ đòi `item_read` (viewer) cho một câu lệnh GHI, trong
+    # khi `ACTION_MATRIX` đặt `item.update` ở `contributor`. Và DuckDB thì CÓ
+    # chạy cả chuỗi câu lệnh khi nhận một chuỗi như vậy.
+    #
+    # Hôm nay chưa khai thác được tới một lần ghi Iceberg thật — runner đăng ký
+    # bảng nguồn dưới dạng view nên các biến thể ghi đều chết trong DuckDB —
+    # nhưng đó là một tai nạn về triển khai, không phải một hàng rào. Chặn ở đây
+    # thì fail-closed: `run_gate` chạy `validate()` TRƯỚC `dependencies()`, nên
+    # không có quyết định phân quyền nào được đưa ra dựa trên một cây bị đọc sai.
+    if len(statements) > 1:
+        return [
+            SqlError(
+                message=(
+                    "Chỉ chạy được MỘT câu lệnh mỗi lần; "
+                    f"nhận được {len(statements)}. Bỏ dấu chấm phẩy ở giữa."
+                ),
+                line=1,
+                column=1,
+            )
         ]
     return []

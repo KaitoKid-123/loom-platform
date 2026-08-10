@@ -172,6 +172,40 @@ async def test_invalid_sql_is_rejected_before_authz_is_ever_called(
     assert fake_authz.calls == []
 
 
+async def test_a_multi_statement_write_never_reaches_the_permission_check(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Nhiều câu lệnh phải chết ở `validate`, TRƯỚC khi ai đó hỏi quyền.
+
+    Không có phép chặn đó thì đây là một lỗ leo thang quyền, không phải một
+    chuyện phong cách. `dependencies()` gọi `parse_one`, mà nhiều câu lệnh cho
+    ra một `exp.Block`; `_write_destination` không nhận ra `Block` nên trả
+    `None`, và đích GHI bị xếp thành bảng ĐỌC:
+
+        dependencies("SELECT 1; CREATE TABLE ns.t AS SELECT 1")
+           -> writes=[]  reads=[ns.t]
+
+    Một `reads` thì `run_gate` chỉ đòi `item_read` — tức VIEWER được phép nộp
+    một câu lệnh GHI, trong khi `ACTION_MATRIX` đặt `item.update` ở
+    `contributor`. Và DuckDB thì có chạy cả chuỗi câu lệnh.
+
+    Khẳng định `fake_authz.calls == []` mới là phần quan trọng: nó nói câu SQL
+    này không hề tới được chỗ quyết định quyền. Chỉ khẳng định "có ném lỗi" thì
+    vẫn xanh kể cả khi cây bị đọc sai rồi mới bị từ chối vì một lý do khác.
+    """
+    with pytest.raises(SqlSyntaxError):
+        await run_gate(
+            sql="SELECT 1; CREATE TABLE ns.t AS SELECT 1",
+            lakehouse_id=uuid.uuid4(),
+            workspace_id=uuid.uuid4(),
+            principal=principal,
+            authz=fake_authz,
+            resolver=fake_authz,
+        )
+
+    assert fake_authz.calls == []
+
+
 async def test_a_query_reading_outside_the_catalog_is_rejected(
     fake_authz: FakeAuthz, principal: Principal
 ) -> None:
@@ -839,7 +873,7 @@ async def test_write_in_a_cross_lakehouse_query_requires_contributor_on_that_lak
 async def test_read_json_is_still_rejected_only_two_readers_were_widened(
     fake_authz: FakeAuthz, principal: Principal
 ) -> None:
-    """`read_json` là một trong bốn hàm của `_KNOWN_READERS` (`loom_sql.deps`)
+    """`read_json` là một hàm đọc file mà `FILE_READ_FUNCTIONS` KHÔNG nhận
     KHÔNG được Task 13 phục vụ — vẫn `ExternalSourceRejected` NGUYÊN VẸN, kể
     cả với một path nằm trong `Files/` (path an toàn không cứu được một hàm
     không được phục vụ).

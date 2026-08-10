@@ -28,6 +28,7 @@ File này khoá cả sáu:
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from typing import Any
 
@@ -76,13 +77,26 @@ async def _run_and_wait(
         assert create_response.status_code == 202, create_response.text
         query_id = create_response.json()["query_id"]
 
+        # Trần 60s, KHÔNG phải 10s như bản đầu (200 vòng, mỗi vòng 0,05s).
+        #
+        # Cùng lý do đã ghi ở `scripts/smoke.sh`: một CTAS đo được 11,3s trên cụm
+        # local, vì một lần commit catalog trung bình 6,7s (p95 11,2s, max 15,7s)
+        # — Lakekeeper nói chuyện với Postgres trên Aiven qua internet. Trần 10s
+        # nằm NGAY DƯỚI con số thật, nên bài kiểm này hỏng theo tốc độ mạng chứ
+        # không theo mã nguồn, và thông báo lỗi lại nói "status != succeeded"
+        # như thể CTAS sai.
+        #
+        # Đây chỉ là TRẦN — vòng lặp thoát ngay khi query xong.
+        deadline = time.monotonic() + 60.0
         body: dict[str, Any] = {}
-        for _ in range(200):
+        while time.monotonic() < deadline:
             status_response = await client.get(f"/api/v1/query/{query_id}")
             body = status_response.json()
             if body["status"] != "running":
                 break
             await asyncio.sleep(0.05)
+        else:  # pragma: no cover — chỉ chạy khi hết giờ
+            raise AssertionError(f"query {query_id} vẫn 'running' sau 60s; trạng thái cuối: {body}")
     return body
 
 

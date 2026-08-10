@@ -47,20 +47,30 @@ code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1"; }
 # ngay khi query xong, nên đặt rộng không làm bài kiểm chậm đi khi mọi thứ ổn.
 QUERY_TIMEOUT_S="${QUERY_TIMEOUT_S:-60}"
 
-# Chờ một query tới trạng thái cuối. In trạng thái ra stdout, và đặt
-# `WAITED_S` để chỗ gọi báo được thời gian thật khi hỏng — không có nó, người
-# đọc thông báo lỗi lại phải tự đi đo lại từ đầu như lần này.
-WAITED_S=0
+# Chờ một query tới trạng thái CUỐI. In ra "<trạng thái> <số giây đã chờ>".
+#
+# In cả hai thứ qua stdout, KHÔNG đặt biến toàn cục: chỗ gọi dùng `$(...)`, mà
+# lệnh trong `$(...)` chạy ở subshell nên mọi phép gán bên trong biến mất khi nó
+# thoát. Bản đầu của hàm này đặt một biến `WAITED_S` rồi thông báo lỗi in ra
+# `sau 0s` mãi mãi — đúng cái mà nó tự nhận là đã sửa.
+#
+# Danh sách trạng thái cuối là ALLOWLIST (`loom_query.store.QueryStatus`), không
+# phải "khác running thì thôi". Khác nhau ở chỗ hỏng: khi curl trượt hoặc Traefik
+# trả một trang HTML 502, `jq` cho chuỗi RỖNG — mà rỗng cũng "khác running", nên
+# bản đầu thoát ngay vòng đầu tiên và vứt cả ngân sách 60 giây. Một cú nghẽn
+# mạng trong 11 giây chờ CTAS đủ để làm đỏ cả bài kiểm. Rỗng nghĩa là CHƯA BIẾT,
+# và chưa biết thì phải hỏi lại.
 wait_for_query() {   # $1 = query_id, $2 = file hứng phản hồi
   local id="$1" out="$2" started="$SECONDS" status=""
   while [ $((SECONDS - started)) -lt "$QUERY_TIMEOUT_S" ]; do
     curl -s -b "$JAR" --max-time 10 -o "$out" "$BASE/api/v1/query/$id"
     status=$(jq -r '.status // empty' < "$out" 2>/dev/null)
-    [ "$status" = running ] || break
+    case "$status" in
+      succeeded|failed|cancelled) break ;;
+    esac
     sleep 0.5
   done
-  WAITED_S=$((SECONDS - started))
-  printf '%s' "$status"
+  printf '%s %s' "${status:-không-đọc-được}" "$((SECONDS - started))"
 }
 
 echo "Smoke test: $BASE"
@@ -372,10 +382,10 @@ else
         "nộp CTAS trả $ctas_code (mong 202) — proxy hoặc bí mật chia sẻ hỏng?"
   else
     ctas_query_id=$(jq -r '.query_id' < "$tmpdir/ctas.json")
-    ctas_status=$(wait_for_query "$ctas_query_id" "$tmpdir/ctas_status.json")
+    read -r ctas_status ctas_waited_s < <(wait_for_query "$ctas_query_id" "$tmpdir/ctas_status.json")
     if [ "$ctas_status" != succeeded ]; then
       bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" \
-          "sau ${WAITED_S}s (trần ${QUERY_TIMEOUT_S}s) trạng thái cuối: $(cat "$tmpdir/ctas_status.json")"
+          "sau ${ctas_waited_s}s (trần ${QUERY_TIMEOUT_S}s) trạng thái cuối: $(cat "$tmpdir/ctas_status.json")"
     else
       sel_payload=$(printf '{"lakehouse_id":"%s","sql":"SELECT id FROM smoke_ns.ctas_result"}' "$smoke_lakehouse_id")
       sel_code=$(curl -s -b "$JAR" -o "$tmpdir/sel.json" -w '%{http_code}' --max-time 15 \
@@ -386,12 +396,12 @@ else
             "SELECT lại từ bảng vừa tạo trả $sel_code (mong 202)"
       else
         sel_query_id=$(jq -r '.query_id' < "$tmpdir/sel.json")
-        sel_status=$(wait_for_query "$sel_query_id" "$tmpdir/sel_status.json")
+        read -r sel_status sel_waited_s < <(wait_for_query "$sel_query_id" "$tmpdir/sel_status.json")
         if [ "$sel_status" = succeeded ] && jq -e '.rows == [[1]]' >/dev/null 2>&1 < "$tmpdir/sel_status.json"; then
           ok "CTAS qua /api/v1/query — bảng Iceberg tạo được qua SQL editor, đọc lại đúng dòng"
         else
           bad "CTAS qua /api/v1/query — tạo bảng rồi đọc lại" \
-              "SELECT lại sau ${WAITED_S}s (trần ${QUERY_TIMEOUT_S}s): $(cat "$tmpdir/sel_status.json")"
+              "SELECT lại sau ${sel_waited_s}s (trần ${QUERY_TIMEOUT_S}s): $(cat "$tmpdir/sel_status.json")"
         fi
       fi
     fi

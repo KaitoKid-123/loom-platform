@@ -103,7 +103,7 @@ class ExternalSourceRejected(HTTPException):
     này thay vì xoá hẳn: mọi thứ khác trong `external` — path trần
     (`FROM 's3://…'`), `range`/`generate_series` (không đọc dữ liệu từ đâu cả,
     quyết định KHÔNG mở khoá — xem báo cáo hoàn tất Task 13), bốn hàm còn lại
-    của `_KNOWN_READERS` bên `loom_sql.deps` (`read_csv_auto`, `read_json`,
+    bên `loom_sql.deps` (`read_csv_auto`, `read_json`,
     `read_json_auto`, `parquet_scan`) — vẫn bị chặn NGUYÊN VẸN như trước, và
     một `read_parquet('s3://workspace-khac/…')` (path KHÔNG an toàn) cũng vậy
     (dù giờ raise qua `InvalidFilesPath`, không phải class này — xem đó).

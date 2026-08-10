@@ -72,15 +72,6 @@ class Dependencies:
     writes: list[TableRef]
 
 
-# Hàm bảng đọc được dữ liệu ngoài catalog. KHÔNG phải danh sách đầy đủ, và không
-# cần đầy đủ: mọi `exp.Table` không có tên định danh đều rơi vào `external`, nên
-# một hàm mới của DuckDB cũng bị bắt. Danh sách này chỉ để THÔNG BÁO nói được
-# tên thứ đã bị chặn.
-_KNOWN_READERS = frozenset(
-    {"read_parquet", "read_csv", "read_csv_auto", "read_json", "read_json_auto", "parquet_scan"}
-)
-
-
 def _looks_like_a_path(name: str) -> bool:
     """DuckDB cho `SELECT * FROM 's3://…/*.parquet'` — một đường dẫn ở vị trí bảng.
 
@@ -178,9 +169,19 @@ def dependencies(sql: str, dialect: str) -> Dependencies:
 
         # Không có tên định danh: hàm bảng như `range(10)` hay
         # `read_parquet('…')`. sqlglot đặt lời gọi hàm vào `table.this`.
+        #
+        # Dùng `_reader_name` chứ KHÔNG gọi thẳng `call.sql_name()`: sqlglot
+        # 30.15.0 chỉ có class riêng cho một phần các hàm này, còn lại trả về
+        # `"ANONYMOUS"` — nên `read_json`, `read_csv_auto` và `parquet_scan`
+        # đều hiện ra dưới cùng một cái nhãn vô nghĩa đó, và thông báo 400 mà
+        # người dùng nhận được là "chưa hỗ trợ ở giai đoạn này: ANONYMOUS".
+        # `_reader_name` đã biết đọc tên thật từ `exp.Anonymous`; chỗ này chỉ
+        # quên dùng nó. Việc CHẶN thì vẫn đúng trước và sau (`_check_files_access`
+        # từ chối mọi nhãn ngoài allowlist) — cái sai là nó không nói được cái gì
+        # bị chặn.
         if not name:
             call = table.this
-            label = call.sql_name() if isinstance(call, exp.Func) else str(call)
+            label = _reader_name(call) if isinstance(call, exp.Func) else str(call)
             external.add(label)
             continue
 
@@ -287,10 +288,9 @@ def write_target(sql: str, dialect: str) -> WriteTarget | None:
 # cần biết `read_parquet` là gì.
 #
 # HAI HÀM DUY NHẤT được phục vụ — `read_csv_auto`, `read_json`, `read_json_auto`,
-# `parquet_scan` (bốn cái còn lại trong `_KNOWN_READERS`) vẫn chỉ lộ ra ở
-# `external` như trước, KHÔNG có mặt ở đây. Nới rộng hơn hai hàm này là quyết
-# định của một task khác — xem báo cáo hoàn tất Task 13 cho lý do dừng ở đúng
-# hai hàm mà spec liệt kê.
+# `parquet_scan` vẫn chỉ lộ ra ở `external` như trước, KHÔNG có mặt ở đây. Nới
+# rộng hơn hai hàm này là quyết định của một task khác — xem báo cáo hoàn tất
+# Task 13 cho lý do dừng ở đúng hai hàm mà spec liệt kê.
 FILE_READ_FUNCTIONS = frozenset({"read_parquet", "read_csv"})
 
 
@@ -313,8 +313,8 @@ def _reader_name(call: exp.Func) -> str:
     """Tên hàm THẬT của `call`, chữ thường.
 
     `call.sql_name()` trả `"ANONYMOUS"` cho các hàm sqlglot không có class
-    riêng (bốn cái trong `_KNOWN_READERS` không nằm trong `FILE_READ_FUNCTIONS`
-    — đã kiểm bằng thực nghiệm sqlglot 30.15.0); tên thật của chúng nằm ở
+    riêng (`read_csv_auto`, `read_json`, `read_json_auto`, `parquet_scan` — đã
+    kiểm bằng thực nghiệm sqlglot 30.15.0); tên thật của chúng nằm ở
     `call.this`, một CHUỖI (không phải `exp.Expression`) khi `call` là
     `exp.Anonymous`. `read_parquet`/`read_csv` THÌ có class riêng
     (`exp.ReadParquet`/`exp.ReadCSV`) nên `sql_name()` đã đúng, không cần rẽ

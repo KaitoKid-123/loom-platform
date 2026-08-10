@@ -131,6 +131,17 @@ def test_hard_limit_clears_the_measured_working_set(
         f"trong lúc ghi 50 GB."
     )
 
+    # Và giới hạn MỀM cũng phải trên sàn đó. Thiếu khẳng định này thì hạ CẢ HAI
+    # con số cùng lúc sẽ lọt: GOMEMLIMIT=256MiB với limit=320Mi giữ đúng quan hệ
+    # mềm-dưới-cứng mà ba phép kiểm kia đòi, nhưng nó CHÍNH LÀ trần 320Mi đã đo
+    # được là chết ở lô 40/200. Một giới hạn mềm dưới heap sống là một mục tiêu
+    # GC không bao giờ với tới — nó chỉ làm bộ thu gom quay cuồng rồi vẫn chết.
+    soft = _quantity_to_mib(_env(minio_container, "GOMEMLIMIT") or "")
+    assert soft > MEASURED_ANON_MIB, (
+        f"GOMEMLIMIT {soft} MiB nằm DƯỚI heap {MEASURED_ANON_MIB} MiB đo được — "
+        f"GC không thể giải phóng thứ đang được dùng."
+    )
+
 
 def test_requests_do_not_exceed_limits(minio_container: dict[str, Any]) -> None:
     """Kubelet từ chối pod có request lớn hơn limit. Dễ gây ra khi sửa một trong

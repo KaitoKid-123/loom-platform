@@ -174,8 +174,14 @@ export async function cancelQuery(queryId: string): Promise<void> {
 // Một lỗi runtime BÌNH THƯỜNG của DuckDB (cột không tồn tại, sai kiểu, chia cho 0...)
 // không chứa hai cụm này — khớp chuỗi là đủ để tách "quá lớn" khỏi "lỗi khác" mà không
 // cần một mã lỗi cấu trúc riêng ở API (chưa có: mọi lỗi thực thi chỉ là một `error:
-// string`, xem `runner.execute`/`store.set_failed`). Nếu hai chuỗi nguồn đổi, bài kiểm
-// `queryApi.test.ts` khớp với văn bản hiện tại sẽ ĐỎ và bắt được ngay.
+// string`, xem `runner.execute`/`store.set_failed`).
+//
+// NỢ ĐÃ BIẾT, và đừng tin ngược lại: KHÔNG có gì canh hợp đồng chuỗi này qua hai
+// ngôn ngữ. `queryApi.test.ts` chép cứng cùng văn bản đó bằng TypeScript và không
+// hề đọc Python, nên đổi tên `byte cap` bên `loom_query.limits` sẽ để `make test`,
+// `make web-test` và `mypy` xanh nguyên trong khi giao diện lặng lẽ hiện "Query
+// failed" thay cho "Query too large" mãi mãi. Cách chữa thật là một mã lỗi có cấu
+// trúc trong phản hồi API — không phải một phép kiểm chuỗi khéo hơn.
 const OVER_LIMIT_PATTERNS = [/byte cap/i, /time limit/i]
 
 /** `status: "failed"` có phải vì query VƯỢT GIỚI HẠN (byte quét, thời gian) hay không —

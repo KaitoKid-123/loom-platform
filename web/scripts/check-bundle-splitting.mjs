@@ -4,8 +4,9 @@
  * người dùng bấm gì) không được kéo theo Monaco.
  *
  * Monaco nặng 2-5MB — gấp mười tới hai mươi lần toàn bộ phần còn lại của bundle (~380KB,
- * xem commit message cho số đo thật). `React.lazy` ở `ItemPage.tsx` giữ nó ngoài chunk
- * khởi đầu HÔM NAY, nhưng lazy-loading chỉ đúng cho tới lần refactor đầu tiên vô tình đổi
+ * xem commit message cho số đo thật). `React.lazy` ở `SqlEditorPanel.tsx` giữ nó ngoài
+ * chunk khởi đầu HÔM NAY — `ItemPage.tsx` import `SqlEditorPanel` TĨNH, ranh giới lazy nằm
+ * một tầng sâu hơn — nhưng lazy-loading chỉ đúng tới lần refactor đầu tiên vô tình đổi
  * `React.lazy(() => import(...))` thành `import { SqlEditor } from '...'` ở đầu file —
  * TypeScript/ESLint không tự cấm việc đó, chỉ có phép canh này.
  *
@@ -44,9 +45,9 @@ const MANIFEST_PATH = join(DIST_DIR, '.vite', 'manifest.json')
 // Chuỗi Monaco tự dùng cho `self.MonacoEnvironment` — xem lớp 2 ở docstring trên.
 const MONACO_MARKER = 'MonacoEnvironment'
 
-// Module lazy DUY NHẤT hiện tại. Cập nhật đường dẫn này nếu `ItemPage.tsx` đổi chỗ import
-// Monaco — phép canh khớp theo ĐƯỜNG DẪN NGUỒN trong manifest, không theo tên chunk đã
-// băm hash (hash đổi mỗi build).
+// Module lazy DUY NHẤT hiện tại. Cập nhật đường dẫn này nếu `SqlEditorPanel.tsx` đổi chỗ
+// import Monaco — phép canh khớp theo ĐƯỜNG DẪN NGUỒN trong manifest, không theo tên chunk
+// đã băm hash (hash đổi mỗi build).
 const EXPECTED_LAZY_MODULE = 'src/components/Editor/SqlEditor.tsx'
 
 // Entry thật hôm nay ~380KB (xem commit message cho số đo). 700KB cho ứng dụng lớn thêm

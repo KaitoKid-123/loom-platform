@@ -83,6 +83,29 @@ def test_a_table_function_is_external_not_a_table() -> None:
     assert d.external, "hàm bảng phải lộ ra ở `external`, không được biến mất"
 
 
+def test_the_external_label_names_the_real_function() -> None:
+    """Cái nhãn này đi thẳng vào thông báo 400 mà người dùng đọc.
+
+    sqlglot 30.15.0 chỉ có class riêng cho một phần các hàm đọc file; số còn
+    lại `sql_name()` trả về `"ANONYMOUS"`. Trước khi sửa, ba hàm khác nhau cùng
+    hiện ra là "chưa hỗ trợ ở giai đoạn này: ANONYMOUS" — đúng về mặt CHẶN,
+    nhưng không nói được cái gì bị chặn, nên người dùng không biết sửa câu SQL
+    thế nào.
+
+    Khẳng định theo TỪNG hàm, không phải `"PARQUET" in e.upper()`: một phép
+    kiểm khớp lỏng như thế vẫn xanh với nhãn `ANONYMOUS` cho `read_json`.
+    """
+    cases = {
+        "read_json('Files/a.json')": "read_json",
+        "read_csv_auto('Files/a.csv')": "read_csv_auto",
+        "parquet_scan('Files/a.parquet')": "parquet_scan",
+        "read_parquet('Files/a.parquet')": "read_parquet",
+    }
+    for call, expected in cases.items():
+        sql = f"SELECT * FROM {call}"  # noqa: S608 — SQL thử nghiệm, không có input ngoài
+        assert dependencies(sql, "duckdb").external == [expected]
+
+
 def test_reading_a_file_directly_is_external() -> None:
     """`read_parquet('s3://…')` đọc dữ liệu KHÔNG qua catalog. Đây là đường đi
     vòng qua RBAC nếu cổng quyền không nhìn thấy nó."""
