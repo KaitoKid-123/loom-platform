@@ -56,6 +56,21 @@ class Lakehouse:
         """
         self._catalog.create_namespace_if_not_exists(namespace)
 
+    def drop_table(self, qualified: str) -> None:
+        """Bỏ đăng ký `qualified` khỏi catalog.
+
+        KHÔNG xoá data file trên S3 — đã kiểm bằng thực nghiệm trên Lakekeeper
+        v0.9.2 thật (`scripts/measure_write_path.py`, dọn dẹp sau phép đo):
+        `drop_table` + `drop_namespace` + xoá cả warehouse xong, `list_objects_v2`
+        vẫn thấy nguyên data/metadata file dưới prefix của warehouse đó. Người
+        gọi cần dọn ĐĨA THẬT (không chỉ catalog) phải tự xoá qua S3 sau bước này
+        — xem `_purge_s3_prefix` trong `measure_write_path.py`.
+        """
+        self._catalog.drop_table(qualified)
+
+    def drop_namespace(self, namespace: str) -> None:
+        self._catalog.drop_namespace(namespace)
+
     def list_tables(self, namespace: str) -> list[TableInfo]:
         return [
             TableInfo(namespace=".".join(identifier[:-1]), name=identifier[-1])

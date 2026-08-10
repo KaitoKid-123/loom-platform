@@ -28,3 +28,8 @@ deploy/local/aiven-ca.pem
 
 # Cấu hình cục bộ của công cụ, có thể chứa đường dẫn/khoá riêng của máy
 .claude/
+
+# Tiến trình + log của scripts/measure_write_path.py — trạng thái một lần
+# chạy cục bộ (progress.json để nối lại, run.log để tail -f), không phải mã
+# nguồn hay tài liệu.
+.bench-state/

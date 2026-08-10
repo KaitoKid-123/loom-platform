@@ -410,6 +410,19 @@ measure-lakehouse-schema:  ## Phép đo Task 2 (2c) — kích thước/độ tr�
 	uv run pytest -m benchmark -o addopts="" -s \
 		services/loom-query/tests/integration/test_lakehouse_schema_size_benchmark.py
 
+.PHONY: measure-write
+measure-write: check-context  ## Rủi ro #4 (CỬA CHẶN GĐ2) — đường ghi PyIceberg trên cụm k3d thật, 50 GB mặc định
+	@# Mặc định --target-raw-gb 50 (ngưỡng đã chốt với chủ dự án — xem docstring
+	@# của scripts/measure_write_path.py). Kiểm ở quy mô nhỏ:
+	@#   make measure-write ARGS="--target-raw-gb 1 --batch-raw-mb 100"
+	@# Chạy 50 GB thật SẼ MẤT NHIỀU GIỜ — chạy nền:
+	@#   nohup make measure-write > /tmp/measure-write-50gb.out 2>&1 &
+	uv run python scripts/measure_write_path.py $(ARGS)
+
+.PHONY: measure-write-cleanup
+measure-write-cleanup: check-context  ## Dọn bảng/namespace/warehouse/S3 của lần measure-write đã lưu
+	uv run python scripts/measure_write_path.py --cleanup $(ARGS)
+
 .PHONY: ram
 ram: check-context  ## Tổng RAM cụm đang dùng, so với trần 1,8 GB
 	@# Cộng trên giấy ở spec Giai đoạn 2 mục 7.3 là ước lượng từ
