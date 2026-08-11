@@ -517,7 +517,28 @@ measure-ingest-pod: check-context  ## Đo 1 GĐ3a (CỬA CHẶN) — RAM ghi Ice
 	kubectl -n $(NS) delete configmap measure-ingest-script --ignore-not-found
 
 .PHONY: ram
-ram: check-context  ## Tổng RAM cụm đang dùng, so với trần 1,8 GB
+ram: check-context  ## Tổng RAM cụm đang dùng, so với NGÂN SÁCH tự đặt 4 GiB
+	@# ĐỌC KỸ CON SỐ NÀY TRƯỚC KHI DỰA VÀO NÓ.
+	@#
+	@# 4096 Mi là NGÂN SÁCH TỰ ĐẶT, KHÔNG phải một giới hạn được thi hành. Không
+	@# có cgroup nào, không có `--memory` nào chặn cụm ở con số đó — vượt qua nó
+	@# thì target này đỏ, còn cụm vẫn chạy bình thường.
+	@#
+	@# Nói rõ vì suốt Giai đoạn 0 tới 2 con số cũ (1843 Mi, "trần 1,8 GB") đã bị
+	@# đối xử như định luật vật lý: nó định hình limit 448Mi của MinIO, 384Mi của
+	@# loom-query, và suýt biến Giai đoạn 3a thành BLOCKED. Kiểm thật 2026-08-11:
+	@#
+	@#   docker inspect k3d-loom-server-0 --format '{{ .HostConfig.Memory }}'  -> 0
+	@#   grep -i memory deploy/k3d/cluster.yaml                                -> không có
+	@#   docker stats k3d-loom-server-0                     -> 1.218GiB / 15.34GiB
+	@#
+	@# Mẫu số là RAM MÁY (16 GB), không phải 1843 Mi. Con số cũ chỉ tồn tại trong
+	@# đúng cái printf ở cuối target này.
+	@#
+	@# Vậy vì sao vẫn giữ một ngân sách? Vì máy này có sức ép thật: lúc đo, 9,9 GB
+	@# đã dùng và swap đã ăn 2/4 GB — không phải do cụm (cụm 1,2 GB), nhưng một cụm
+	@# phình không ai để ý sẽ đẩy swap lên và làm chậm mọi thứ. Ngân sách để BẮT
+	@# TĂNG TRƯỞNG BẤT THƯỜNG, không phải để mô tả một bức tường.
 	@# Cộng trên giấy ở spec Giai đoạn 2 mục 7.3 là ước lượng từ
 	@# `resources.requests`, KHÔNG phải mức dùng thật. Đây là số thật, đọc từ
 	@# cgroup của node — KHÔNG qua `kubectl exec`.
@@ -554,8 +575,9 @@ ram: check-context  ## Tổng RAM cụm đang dùng, so với trần 1,8 GB
 	node_mib=$$(docker stats --no-stream --format '{{ .MemUsage }}' $$node \
 	  | awk '{v=$$1; sub(/GiB/,"",v); if ($$1 ~ /GiB/) print int(v*1024); \
 	          else {sub(/MiB/,"",v); print int(v)}}'); \
-	printf '  CẢ NODE:         %d Mi   trần 1843 Mi\n' "$$node_mib"; \
-	printf '  còn dư %d Mi — Giai đoạn 2b thêm loom-query, đỉnh đo được 348 Mi\n' \
-	  $$(( 1843 - node_mib )); \
-	if [ "$$node_mib" -gt 1843 ]; then \
-	  echo "  VƯỢT TRẦN — xem spec Giai đoạn 2 mục 7.3, ba lối ra"; exit 1; fi
+	printf '  CẢ NODE:         %d Mi   ngân sách 4096 Mi (tự đặt, KHÔNG thi hành)\n' "$$node_mib"; \
+	printf '  còn dư %d Mi — RAM máy thật là 15,34 GiB, xem giải thích đầu target\n' \
+	  $$(( 4096 - node_mib )); \
+	if [ "$$node_mib" -gt 4096 ]; then \
+	  echo "  VƯỢT NGÂN SÁCH — cụm vẫn chạy, nhưng đây là tăng trưởng cần giải thích."; \
+	  echo "  Đừng nâng con số này cho hết đỏ mà chưa biết cái gì đang ăn thêm."; exit 1; fi

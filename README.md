@@ -65,7 +65,7 @@ nhất trong hệ thống biết Iceberg tồn tại — mọi thứ khác nói 
 |---|---|
 | `make minio-console` | Console MinIO ở http://localhost:9001 |
 | `make minio-s3` | Port-forward cổng S3 ra localhost:9000 |
-| `make ram` | RAM từng pod và CẢ NODE, so với trần 1,8 GB |
+| `make ram` | RAM từng pod và CẢ NODE, so với **ngân sách tự đặt** 4 GiB |
 | `make measure-scan` | Phép đo 1 — thời gian lập kế hoạch quét bảng Iceberg |
 | `make measure-spill` | Phép đo 1 — DuckDB trong cgroup 384Mi thật |
 
@@ -84,7 +84,9 @@ phục **cả hai** database về cùng một mốc — xem `docs/runbook/restor
   bộ nhớ co giãn theo số luồng: cùng query, cùng hạn mức, `threads=2` chạy xong còn
   `threads=4` thì OOM. Con số đã kiểm: `memory_limit=256MB`, `threads=2`, container
   384Mi, RSS đỉnh 348 Mi.
-- **RAM cả node 1318 / 1843 Mi.** Còn dư 525 Mi; `loom-query` chiếm ~348 Mi khi tải nặng.
+- **RAM cả node 1318 Mi.** `loom-query` chiếm ~348 Mi khi tải nặng. (Con số 1843 Mi mà
+  Giai đoạn 0–2 gọi là "trần" hoá ra là một ngân sách tự đặt, không phải giới hạn được
+  thi hành — xem mục Giai đoạn 3a.)
 
 ### Nợ đã biết sau Giai đoạn 2a
 
@@ -217,7 +219,8 @@ Vì sao bốn phép đo RAM trước không thấy: tất cả đều đo lúc c
 gộp cả page cache, mà máy chủ lưu trữ thì luôn lấp đầy page cache một cách vô hại; phải
 tách `anon` khỏi `file` mới thấy.
 
-Ngân sách RAM mới, đo **trong lúc ghi**: **1500 / 1843 Mi**, còn dư 343 Mi.
+Ngân sách RAM đo **trong lúc ghi**: **1500 Mi**. (Lúc đó đối chiếu với "trần" 1843 Mi;
+xem mục Giai đoạn 3a về việc con số đó không phải giới hạn thật.)
 
 ### Nợ đã biết sau Giai đoạn 2c
 

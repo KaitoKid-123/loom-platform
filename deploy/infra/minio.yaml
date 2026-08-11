@@ -5,7 +5,8 @@
 # chuyển MinIO sang một VPS riêng (spec Giai đoạn 2 mục 2.0), lúc đó file này
 # không còn được apply và chart chỉ đổi `storage.endpoint`.
 #
-# Ngân sách RAM: cụm có trần 1,8 GB. Limit ở dưới là 448Mi, KHÔNG phải 320Mi như
+# Ngân sách RAM: cụm có NGÂN SÁCH TỰ ĐẶT 4 GiB (không phải giới hạn được thi hành —
+# xem đầu target `ram` trong Makefile). Limit ở dưới là 448Mi, KHÔNG phải 320Mi như
 # Giai đoạn 2a đặt — xem khối giải thích ở `resources` bên dưới trước khi hạ nó.
 # Vẫn phải đo lại tổng cả node (`make ram`) sau mỗi lần đổi con số đó.
 ---
@@ -153,7 +154,7 @@ spec:
             # một đợt upload multipart là đủ.
             #
             # 448Mi = 271Mi đo được, cộng chỗ cho GOMEMLIMIT 352MiB làm việc, cộng
-            # biên. Cả node sau khi đổi vẫn phải dưới 1843Mi — `make ram` là trọng
+            # biên. Cả node sau khi đổi vẫn phải trong ngân sách — `make ram` là trọng
             # tài, đừng suy ra trên giấy.
             requests: { cpu: 50m, memory: 320Mi }
             limits: { memory: 448Mi }
