@@ -447,32 +447,58 @@ measure-ingest-pod: check-context  ## Đo 1 GĐ3a (CỬA CHẶN) — RAM ghi Ice
 	@# thêm volume/volumeMount, rồi pipe thẳng vào `kubectl apply -f -` — toàn bộ
 	@# nằm trên MỘT lệnh pipe nối bằng `\`, không có JSON/YAML nào tách dòng.
 	@#
-	@# ĐÃ ĐO — cấu hình CHẠY THẬT: --rows-per-batch 200000 (đúng mặc định của
-	@# script) nhưng --batches 300 (KHÁC mặc định 20 — cố tình kéo dài để bắt
-	@# kịp `make ram` chạy song song), tổng 60 triệu dòng: rss_peak_mib=235,
-	@# PHẲNG từ lô đầu tới lô cuối — không rò rỉ theo số lô.
+	@# `set -eo pipefail`: BẮT BUỘC theo đúng lý do đã ghi ở `helm-validate` (mục
+	@# "set -e là BẮT BUỘC" phía trên trong file này). Không có nó, `img=$$(...)`
+	@# rỗng khi `kubectl get deploy` lỗi vẫn cho recipe chạy tiếp với
+	@# `--image=""`, và `kubectl create job ... | jq ... | kubectl apply` chỉ báo
+	@# exit status của lệnh CUỐI trong pipe — một `jq` hỏng biến mất, lộ ra sau
+	@# 600s chờ `kubectl wait` timeout bằng một thông báo chung chung thay vì lỗi
+	@# tức thời và cụ thể.
 	@#
-	@# `make ram` (mục Bước 3 của task) chạy TRONG LÚC Job này còn sống, đọc
-	@# CẢ NODE: 1531 Mi / trần 1843 Mi — còn dư 312 Mi. Đây là con số trả lời
-	@# đúng câu hỏi CỬA CHẶN: có vừa cụm hay không — CÓ.
+	@# `jq` còn tiêm `env`: script SỬA SAU REVIEW ghi Iceberg THẬT (xem docstring
+	@# của measure_ingest_pod.py) nên cần credential GỐC của MinIO để Lakekeeper
+	@# tự AssumeRole hộ lúc tạo warehouse. Lấy qua `secretKeyRef` từ Secret
+	@# `minio-root` (khoá `root-user`/`root-password`) — KHÔNG `kubectl get
+	@# secret` rồi truyền qua biến môi trường của `kubectl create job` như
+	@# `scripts/measure_write_path.py` làm trên host: pod đọc thẳng Secret của
+	@# chính cụm nó đang chạy trong, không cần lôi giá trị ra ngoài rồi nhét lại.
 	@#
-	@# Riêng pod measure-ingest lúc đó: cgroup `memory.current` đọc được 169 Mi,
-	@# THẤP HƠN rss_peak_mib 235 MiB, vì PyArrow trả bộ nhớ về hệ điều hành giữa
-	@# các lô. Hai con số KHÔNG mâu thuẫn: `memory.current` là mức đang giữ NGAY
-	@# LÚC ĐO, còn rss_peak_mib (từ `resource.getrusage().ru_maxrss` bên trong
-	@# pod) là đỉnh cao nhất tiến trình từng chạm — và giới hạn RAM
-	@# (`limits.memory`) phải chặn được ĐỈNH đó, không phải mức ổn định. Đặt
-	@# limit theo số của `make ram` sẽ đặt nó THẤP HƠN mức tiến trình đã chứng
-	@# minh là chạm tới, và pod sẽ bị OOMKill ở đúng lô gây ra đỉnh đó dù
-	@# `make ram` lúc đo trông rất an toàn.
+	@# `jq` còn ép `backoffLimit=0`: mặc định Job của Kubernetes là 6 — một lần
+	@# chạy thật ĐÃ DÍNH đúng bẫy này. Script lần đầu ghi Iceberg thật ném
+	@# `AttributeError` ở bước dọn (xem SỬA SAU REVIEW trong measure_ingest_pod.py),
+	@# và vì không có `backoffLimit: 0`, Kubernetes tự tạo pod MỚI thử lại — pod
+	@# thứ hai ghi 20 lô Iceberg khác, thất bại THEO ĐÚNG CÁCH CŨ, và để lại HAI
+	@# warehouse rác trên Lakekeeper thay vì một. Dọn tay xong mới thêm dòng này.
 	@#
-	@# NGƯỠNG: 235 MiB nằm trong dải "< 250 Mi — vừa thoải mái". Đề xuất
-	@# limits.memory: 235 × 1.4 = 329 (đúng phép nhân, không làm tròn) — làm
-	@# tròn lên 330Mi cho số đẹp. Con số này CHỈ đúng ở đúng hình dạng lô đã đo
-	@# (200k dòng/lô, hai cột id+pad ~300 byte/dòng) — batch lớn hơn hoặc dòng
-	@# rộng hơn (nhiều cột, payload to hơn) CẦN đo lại, không được tái dùng
-	@# 330Mi cho một cấu hình khác rồi ngạc nhiên khi thấy OOMKill.
-	@img=$$(kubectl -n $(NS) get deploy loom-query -o jsonpath='{.spec.template.spec.containers[0].image}'); \
+	@# ĐÃ ĐO (ghi Iceberg THẬT: bootstrap + warehouse + namespace + bảng +
+	@# create_from/append + commit + dọn — --rows-per-batch 200000 mặc định,
+	@# --batches 20 mặc định, 4 triệu dòng): rss_peak_mib=406, và KHÔNG PHẲNG —
+	@# leo ĐỀU qua từng lô (284 → 326 → 343 → 355 → 365 → 374 → 381 → 388 → 399
+	@# → 406 MiB, không có lô nào tụt xuống). Đây là NGƯỢC LẠI với bản đo đầu
+	@# (chỉ sinh Arrow batch, không chạm Iceberg): bản đó phẳng ở 235 MiB vì
+	@# không có gì tích luỹ qua các lô. Bản ghi thật này CÓ — nghi nhất là
+	@# `RestCatalog`/`Table` giữ lại sổ sách snapshot/manifest ngày càng dài
+	@# qua mỗi `load_table()`+commit, hoặc buffer của client S3 không được giải
+	@# phóng giữa các lần ghi. CHƯA xác định được chỗ rò cụ thể — nằm ngoài
+	@# phạm vi Đo 1 (chỉ đo, không sửa PyIceberg/PyArrow).
+	@#
+	@# `make ram` chạy TRONG LÚC Job còn sống (lô ~18-19): CẢ NODE 1501 Mi /
+	@# trần 1843 Mi (còn dư 342 Mi ở THỜI ĐIỂM ĐÓ — nhưng RSS của pod vẫn đang
+	@# leo, xem đoạn trên, nên con số này sẽ còn giảm nếu Job chạy lâu hơn).
+	@# cgroup `memory.current` của riêng pod lúc đó: 290 Mi, thấp hơn đỉnh cuối
+	@# cùng 406 MiB vì đọc TRƯỚC khi lô cuối chạy xong — không mâu thuẫn với
+	@# lý do `ru_maxrss` mới là con số phải tin (xem docstring measure_ingest_pod.py).
+	@#
+	@# NGƯỠNG: 406 MiB > 340 Mi. **BLOCKED.** Đường ghi Iceberg từ trong pod
+	@# KHÔNG vừa ngân sách RAM đã chốt trước khi đo. KHÔNG tự ý hạ
+	@# --rows-per-batch để "qua" ngưỡng — đó là việc của quyết định thiết kế
+	@# tiếp theo (spec Giai đoạn 3a mục 8 đã liệt sẵn ba lối ra, theo thứ tự
+	@# nên dùng: hạ số dòng/lô, chuyển MinIO ra VPS, nâng trần k3d), không phải
+	@# việc của phép đo này. Vì RSS còn đang LEO chứ chưa ổn định ở lô 20, một
+	@# lần chạy dài hơn (nhiều lô hơn) rất có thể còn cao hơn 406 MiB nữa — số
+	@# đo được ở đây là CẬN DƯỚI của chi phí thật, không phải đỉnh tuyệt đối.
+	@set -eo pipefail; \
+	img=$$(kubectl -n $(NS) get deploy loom-query -o jsonpath='{.spec.template.spec.containers[0].image}'); \
 	echo "image: $$img"; \
 	kubectl -n $(NS) delete job measure-ingest --ignore-not-found; \
 	kubectl -n $(NS) delete configmap measure-ingest-script --ignore-not-found; \
@@ -481,14 +507,14 @@ measure-ingest-pod: check-context  ## Đo 1 GĐ3a (CỬA CHẶN) — RAM ghi Ice
 	  --dry-run=client -o yaml | kubectl -n $(NS) apply -f -; \
 	kubectl -n $(NS) create job measure-ingest --image="$$img" --dry-run=client -o json \
 	  -- python /scripts/measure_ingest_pod.py $(ARGS) \
-	| jq '.spec.template.spec.containers[0].volumeMounts = [{"name":"script","mountPath":"/scripts"}] | .spec.template.spec.volumes = [{"name":"script","configMap":{"name":"measure-ingest-script"}}]' \
+	| jq '.spec.backoffLimit = 0 | .spec.template.spec.containers[0].volumeMounts = [{"name":"script","mountPath":"/scripts"}] | .spec.template.spec.volumes = [{"name":"script","configMap":{"name":"measure-ingest-script"}}] | .spec.template.spec.containers[0].env = [{"name":"MINIO_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-user"}}},{"name":"MINIO_SECRET_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-password"}}}]' \
 	| kubectl -n $(NS) apply -f -; \
 	kubectl -n $(NS) wait --for=condition=complete job/measure-ingest --timeout=600s \
 	  || { echo "Job KHÔNG hoàn tất — xem trạng thái dưới:"; \
 	       kubectl -n $(NS) describe job measure-ingest | tail -20; exit 1; }; \
-	kubectl -n $(NS) logs job/measure-ingest | tail -5; \
-	kubectl -n $(NS) delete job measure-ingest; \
-	kubectl -n $(NS) delete configmap measure-ingest-script
+	kubectl -n $(NS) logs job/measure-ingest | tail -10; \
+	kubectl -n $(NS) delete job measure-ingest --ignore-not-found; \
+	kubectl -n $(NS) delete configmap measure-ingest-script --ignore-not-found
 
 .PHONY: ram
 ram: check-context  ## Tổng RAM cụm đang dùng, so với trần 1,8 GB
