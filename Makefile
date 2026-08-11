@@ -423,6 +423,47 @@ measure-write: check-context  ## Rủi ro #4 (CỬA CHẶN GĐ2) — đường g
 measure-write-cleanup: check-context  ## Dọn bảng/namespace/warehouse/S3 của lần measure-write đã lưu
 	uv run python scripts/measure_write_path.py --cleanup $(ARGS)
 
+.PHONY: measure-ingest-pod
+measure-ingest-pod: check-context  ## Đo 1 GĐ3a (CỬA CHẶN) — RAM ghi Iceberg từ TRONG cụm
+	@# Dùng image loom-query đang chạy: nó đã có pyiceberg/pyarrow/icebergkit. Dựng
+	@# một image riêng để đo cái có thể làm ta bỏ cả hướng đi là làm ngược thứ tự.
+	@#
+	@# Nạp script qua ConfigMap, KHÔNG qua `python -c "$$(cat ...)"`: docstring của
+	@# measure_ingest_pod.py dùng dấu backtick (`) để đánh dấu tên biến/lệnh — bên
+	@# trong double-quote của shell, backtick kích hoạt command substitution, nên
+	@# `"$$(cat scripts/measure_ingest_pod.py)"` khiến bash cố CHẠY "sys.getsizeof"
+	@# như một lệnh thay vì giữ nó là văn bản. Đã thử thật trên máy này: vỡ đúng
+	@# như dự đoán ("sys.getsizeof: command not found"). ConfigMap chép nguyên byte
+	@# của file, không qua diễn giải shell nào.
+	@#
+	@# Cũng KHÔNG dùng heredoc (`kubectl apply -f - <<EOF ... EOF`) để dựng Job từ
+	@# YAML nhiều dòng: đã thử thật trên máy này — mỗi dòng vật lý trong recipe
+	@# của Make chạy ở MỘT shell invocation RIÊNG trừ khi dòng đó kết thúc bằng
+	@# `\`, nên nội dung heredoc (không có `\` cuối dòng, vì đó là YAML thật) bị
+	@# tách khỏi lệnh `cat <<EOF` sinh ra nó và chạy như các LỆNH SHELL độc lập —
+	@# "line one" bị in nhầm, rồi "make: line: No such file or directory". Thay
+	@# vào đó: `kubectl create job --dry-run=client -o json` sinh Job JSON hợp lệ,
+	@# `jq` (đã là dependency của target `cluster-up`/`infra-local-secret`) chèn
+	@# thêm volume/volumeMount, rồi pipe thẳng vào `kubectl apply -f -` — toàn bộ
+	@# nằm trên MỘT lệnh pipe nối bằng `\`, không có JSON/YAML nào tách dòng.
+	@img=$$(kubectl -n $(NS) get deploy loom-query -o jsonpath='{.spec.template.spec.containers[0].image}'); \
+	echo "image: $$img"; \
+	kubectl -n $(NS) delete job measure-ingest --ignore-not-found; \
+	kubectl -n $(NS) delete configmap measure-ingest-script --ignore-not-found; \
+	kubectl -n $(NS) create configmap measure-ingest-script \
+	  --from-file=measure_ingest_pod.py=scripts/measure_ingest_pod.py \
+	  --dry-run=client -o yaml | kubectl -n $(NS) apply -f -; \
+	kubectl -n $(NS) create job measure-ingest --image="$$img" --dry-run=client -o json \
+	  -- python /scripts/measure_ingest_pod.py $(ARGS) \
+	| jq '.spec.template.spec.containers[0].volumeMounts = [{"name":"script","mountPath":"/scripts"}] | .spec.template.spec.volumes = [{"name":"script","configMap":{"name":"measure-ingest-script"}}]' \
+	| kubectl -n $(NS) apply -f -; \
+	kubectl -n $(NS) wait --for=condition=complete job/measure-ingest --timeout=600s \
+	  || { echo "Job KHÔNG hoàn tất — xem trạng thái dưới:"; \
+	       kubectl -n $(NS) describe job measure-ingest | tail -20; exit 1; }; \
+	kubectl -n $(NS) logs job/measure-ingest | tail -5; \
+	kubectl -n $(NS) delete job measure-ingest; \
+	kubectl -n $(NS) delete configmap measure-ingest-script
+
 .PHONY: ram
 ram: check-context  ## Tổng RAM cụm đang dùng, so với trần 1,8 GB
 	@# Cộng trên giấy ở spec Giai đoạn 2 mục 7.3 là ước lượng từ
