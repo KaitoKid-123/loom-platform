@@ -446,6 +446,19 @@ measure-ingest-pod: check-context  ## Đo 1 GĐ3a (CỬA CHẶN) — RAM ghi Ice
 	@# `jq` (đã là dependency của target `cluster-up`/`infra-local-secret`) chèn
 	@# thêm volume/volumeMount, rồi pipe thẳng vào `kubectl apply -f -` — toàn bộ
 	@# nằm trên MỘT lệnh pipe nối bằng `\`, không có JSON/YAML nào tách dòng.
+	@#
+	@# ĐÃ ĐO (300 lô x 200k dòng/lô = 60 triệu dòng, cùng cấu hình mặc định của
+	@# script): rss_peak_mib=235, PHẲNG từ lô đầu tới lô cuối — không rò rỉ theo
+	@# số lô. Chạy `make ram` (mục Bước 3 của task) TRONG LÚC Job này còn sống
+	@# đọc cgroup `memory.current` — một ảnh chụp tại MỘT THỜI ĐIỂM — và cho một
+	@# con số THẤP HƠN rss_peak_mib (đã đo: 169 Mi so với đỉnh 235 MiB), vì
+	@# PyArrow trả bộ nhớ về hệ điều hành giữa các lô. Hai con số KHÔNG mâu
+	@# thuẫn: `memory.current` là mức đang giữ NGAY LÚC ĐO, còn rss_peak_mib
+	@# (từ `resource.getrusage().ru_maxrss` bên trong pod) là đỉnh cao nhất
+	@# tiến trình từng chạm — và giới hạn RAM (`limits.memory`) phải chặn được
+	@# ĐỈNH đó, không phải mức ổn định. Đặt limit theo số của `make ram` sẽ đặt
+	@# nó THẤP HƠN mức tiến trình đã chứng minh là chạm tới, và pod sẽ bị OOMKill
+	@# ở đúng lô gây ra đỉnh đó dù `make ram` lúc đo trông rất an toàn.
 	@img=$$(kubectl -n $(NS) get deploy loom-query -o jsonpath='{.spec.template.spec.containers[0].image}'); \
 	echo "image: $$img"; \
 	kubectl -n $(NS) delete job measure-ingest --ignore-not-found; \
