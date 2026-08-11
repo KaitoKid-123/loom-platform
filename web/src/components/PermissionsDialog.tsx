@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 
 import { describeError } from '../lib/useItemMutations'
+import { useModalFocus } from '../lib/useModalFocus'
 import {
   type RoleRow,
   type ScopeType,
@@ -23,6 +24,7 @@ interface Props {
 }
 
 export function PermissionsDialog({ scopeType, scopeId, onClose }: Props) {
+  const dialogRef = useModalFocus<HTMLDivElement>(onClose)
   const { data, isPending, error } = useRoles(scopeType, scopeId)
   const grant = useGrantRole(scopeType, scopeId)
   const revoke = useRevokeRole(scopeType, scopeId)
@@ -35,13 +37,9 @@ export function PermissionsDialog({ scopeType, scopeId, onClose }: Props) {
   const adminCount = countAdmins(rows)
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-ink/30"
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') onClose()
-      }}
-    >
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-ink/30">
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Permissions"

@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { ProblemError } from '../lib/problem'
 import { useDomains } from '../lib/useDomains'
 import { useCreateWorkspace } from '../lib/useWorkspaces'
+import { useModalFocus } from '../lib/useModalFocus'
 
 /**
  * Tạo workspace.
@@ -11,6 +12,7 @@ import { useCreateWorkspace } from '../lib/useWorkspaces'
  * người không tạo được là mời họ điền xong một form rồi mới biết mình không có quyền.
  */
 export function NewWorkspaceDialog({ onClose }: { onClose: () => void }) {
+  const dialogRef = useModalFocus<HTMLFormElement>(onClose)
   const [name, setName] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [description, setDescription] = useState('')
@@ -24,13 +26,9 @@ export function NewWorkspaceDialog({ onClose }: { onClose: () => void }) {
     create.error && Object.keys(fieldErrors).length === 0 ? create.error.message : null
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-8"
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') onClose()
-      }}
-    >
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-8">
       <form
+        ref={dialogRef}
         onSubmit={(e) => {
           e.preventDefault()
           create.mutate(

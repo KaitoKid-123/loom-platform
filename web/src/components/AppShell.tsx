@@ -61,6 +61,20 @@ function initials(name: string | undefined): string {
 export function AppShell({ user, onLogout, sidebar, children }: AppShellProps) {
   return (
     <div className="flex h-full flex-col bg-canvas text-ink">
+      {/* Nhảy thẳng tới nội dung. Shell này có BỐN tầng điều hướng trước khi tới
+          <main>: header, ô lệnh, nav rail, và workspace pane — mà pane là một cây
+          item dài tuỳ workspace. Không có link này, người dùng bàn phím phải Tab
+          qua toàn bộ cây đó MỖI lần đổi trang.
+
+          `sr-only focus:not-sr-only`: ẩn cho tới khi được Tab tới. Đặt nó hiện
+          thường trực sẽ đổi bố cục header — mà bố cục là thứ không được đụng. */}
+      <a
+        href="#main"
+        className="sr-only rounded bg-surface px-3 py-2 text-[13px] font-medium text-ink focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50"
+      >
+        Skip to main content
+      </a>
+
       {/* Dải header màu đậm: nó cho ứng dụng một bản sắc, và nó tách phần điều hướng
           toàn cục khỏi vùng nội dung rõ hơn bất kỳ đường kẻ nào. */}
       <header className="flex h-12 shrink-0 items-center gap-3 bg-[#10312f] px-3 text-white">
@@ -161,7 +175,9 @@ export function AppShell({ user, onLogout, sidebar, children }: AppShellProps) {
             `null` khi không có gì để hiện — đó là chỗ duy nhất biết được điều đó. */}
         {sidebar}
 
-        <main className="min-w-0 flex-1 overflow-auto">{children}</main>
+        <main id="main" tabIndex={-1} className="min-w-0 flex-1 overflow-auto">
+          {children}
+        </main>
       </div>
     </div>
   )

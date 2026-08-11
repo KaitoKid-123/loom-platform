@@ -2,6 +2,7 @@ import { useState } from 'react'
 
 import { ProblemError } from '../../lib/problem'
 import { useCreateItem } from '../../lib/useItemMutations'
+import { useModalFocus } from '../../lib/useModalFocus'
 
 const TYPES = ['sql_script', 'pipeline', 'lakehouse', 'connection'] as const
 type ItemType = (typeof TYPES)[number]
@@ -36,6 +37,7 @@ interface Props {
 }
 
 export function NewItemDialog({ workspaceId, folderPath: initialFolder = '/', onClose }: Props) {
+  const dialogRef = useModalFocus<HTMLDivElement>(onClose)
   const [type, setType] = useState<ItemType>('sql_script')
   const [name, setName] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -82,15 +84,11 @@ export function NewItemDialog({ workspaceId, folderPath: initialFolder = '/', on
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="new-item-title"
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-8"
-      // Escape đóng: một hộp thoại không đóng được bằng bàn phím là một cái bẫy cho
-      // người dùng không dùng chuột.
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') onClose()
-      }}
     >
       <form
         onSubmit={(e) => {
