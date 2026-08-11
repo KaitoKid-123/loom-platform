@@ -447,18 +447,31 @@ measure-ingest-pod: check-context  ## Đo 1 GĐ3a (CỬA CHẶN) — RAM ghi Ice
 	@# thêm volume/volumeMount, rồi pipe thẳng vào `kubectl apply -f -` — toàn bộ
 	@# nằm trên MỘT lệnh pipe nối bằng `\`, không có JSON/YAML nào tách dòng.
 	@#
-	@# ĐÃ ĐO (300 lô x 200k dòng/lô = 60 triệu dòng, cùng cấu hình mặc định của
-	@# script): rss_peak_mib=235, PHẲNG từ lô đầu tới lô cuối — không rò rỉ theo
-	@# số lô. Chạy `make ram` (mục Bước 3 của task) TRONG LÚC Job này còn sống
-	@# đọc cgroup `memory.current` — một ảnh chụp tại MỘT THỜI ĐIỂM — và cho một
-	@# con số THẤP HƠN rss_peak_mib (đã đo: 169 Mi so với đỉnh 235 MiB), vì
-	@# PyArrow trả bộ nhớ về hệ điều hành giữa các lô. Hai con số KHÔNG mâu
-	@# thuẫn: `memory.current` là mức đang giữ NGAY LÚC ĐO, còn rss_peak_mib
-	@# (từ `resource.getrusage().ru_maxrss` bên trong pod) là đỉnh cao nhất
-	@# tiến trình từng chạm — và giới hạn RAM (`limits.memory`) phải chặn được
-	@# ĐỈNH đó, không phải mức ổn định. Đặt limit theo số của `make ram` sẽ đặt
-	@# nó THẤP HƠN mức tiến trình đã chứng minh là chạm tới, và pod sẽ bị OOMKill
-	@# ở đúng lô gây ra đỉnh đó dù `make ram` lúc đo trông rất an toàn.
+	@# ĐÃ ĐO — cấu hình CHẠY THẬT: --rows-per-batch 200000 (đúng mặc định của
+	@# script) nhưng --batches 300 (KHÁC mặc định 20 — cố tình kéo dài để bắt
+	@# kịp `make ram` chạy song song), tổng 60 triệu dòng: rss_peak_mib=235,
+	@# PHẲNG từ lô đầu tới lô cuối — không rò rỉ theo số lô.
+	@#
+	@# `make ram` (mục Bước 3 của task) chạy TRONG LÚC Job này còn sống, đọc
+	@# CẢ NODE: 1531 Mi / trần 1843 Mi — còn dư 312 Mi. Đây là con số trả lời
+	@# đúng câu hỏi CỬA CHẶN: có vừa cụm hay không — CÓ.
+	@#
+	@# Riêng pod measure-ingest lúc đó: cgroup `memory.current` đọc được 169 Mi,
+	@# THẤP HƠN rss_peak_mib 235 MiB, vì PyArrow trả bộ nhớ về hệ điều hành giữa
+	@# các lô. Hai con số KHÔNG mâu thuẫn: `memory.current` là mức đang giữ NGAY
+	@# LÚC ĐO, còn rss_peak_mib (từ `resource.getrusage().ru_maxrss` bên trong
+	@# pod) là đỉnh cao nhất tiến trình từng chạm — và giới hạn RAM
+	@# (`limits.memory`) phải chặn được ĐỈNH đó, không phải mức ổn định. Đặt
+	@# limit theo số của `make ram` sẽ đặt nó THẤP HƠN mức tiến trình đã chứng
+	@# minh là chạm tới, và pod sẽ bị OOMKill ở đúng lô gây ra đỉnh đó dù
+	@# `make ram` lúc đo trông rất an toàn.
+	@#
+	@# NGƯỠNG: 235 MiB nằm trong dải "< 250 Mi — vừa thoải mái". Đề xuất
+	@# limits.memory: 235 × 1.4 = 329 (đúng phép nhân, không làm tròn) — làm
+	@# tròn lên 330Mi cho số đẹp. Con số này CHỈ đúng ở đúng hình dạng lô đã đo
+	@# (200k dòng/lô, hai cột id+pad ~300 byte/dòng) — batch lớn hơn hoặc dòng
+	@# rộng hơn (nhiều cột, payload to hơn) CẦN đo lại, không được tái dùng
+	@# 330Mi cho một cấu hình khác rồi ngạc nhiên khi thấy OOMKill.
 	@img=$$(kubectl -n $(NS) get deploy loom-query -o jsonpath='{.spec.template.spec.containers[0].image}'); \
 	echo "image: $$img"; \
 	kubectl -n $(NS) delete job measure-ingest --ignore-not-found; \
