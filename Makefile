@@ -516,6 +516,86 @@ measure-ingest-pod: check-context  ## Đo 1 GĐ3a (CỬA CHẶN) — RAM ghi Ice
 	kubectl -n $(NS) delete job measure-ingest --ignore-not-found; \
 	kubectl -n $(NS) delete configmap measure-ingest-script --ignore-not-found
 
+.PHONY: probe-single-commit
+probe-single-commit: check-context  ## Đo 2 GĐ3a (CỬA CHẶN) — PyIceberg commit một lần được không
+	@# Cùng lý do và cùng cách dựng Job như measure-ingest-pod ngay trên: dùng
+	@# image loom-query đang chạy (đã có pyiceberg/pyarrow), nạp script qua
+	@# ConfigMap (KHÔNG heredoc/`python -c`, xem chú thích dài ở measure-ingest-pod
+	@# cho lý do cả hai cách đó đều vỡ thật), tiêm credential MinIO GỐC qua
+	@# secretKeyRef, và `backoffLimit=0` — thiếu cờ này Kubernetes tự thử lại
+	@# job hỏng và để lại NHIỀU warehouse rác trên Lakekeeper, đúng bẫy đã ăn ở
+	@# Đo 1.
+	@#
+	@# `set -eo pipefail`: BẮT BUỘC theo đúng lý do đã ghi ở `helm-validate` và
+	@# `measure-ingest-pod` phía trên — không có nó, một `jq` hỏng giữa pipe
+	@# biến mất và chỉ lộ ra sau khi chờ hết vòng lặp bên dưới bằng một lỗi
+	@# chung chung thay vì tức thời.
+	@#
+	@# KHÔNG dùng `kubectl wait --for=condition=complete` như measure-ingest-pod:
+	@# script này CHỦ ĐỘNG thoát mã khác 0 khi verdict là KHÔNG ĐẠT (yêu cầu Đo
+	@# 2 GĐ3a — một phép đo chỉ báo hỏng qua chữ, không qua mã thoát, sớm muộn
+	@# sẽ bị một thứ chỉ đọc mã thoát chạy nhầm). Với `backoffLimit=0`, pod
+	@# thoát khác 0 đưa Job sang điều kiện Failed — KHÔNG BAO GIỜ đạt Complete,
+	@# dù phép đo đã chạy xong và in đủ kết quả. Chờ đúng "complete" ở đây là
+	@# chờ một điều kiện có thể không bao giờ tới. Vòng lặp dưới chờ TRẠNG THÁI
+	@# CUỐI CÙNG bất kể là Complete hay Failed, rồi mới đọc log/dọn Job — và
+	@# đúng đã ĐO thật (KHÔNG ĐẠT, xem chú thích cuối target): thiếu vòng lặp
+	@# này thì target luôn timeout 600s một cách vô ích dù Job đã xong từ lâu.
+	@set -eo pipefail; \
+	img=$$(kubectl -n $(NS) get deploy loom-query -o jsonpath='{.spec.template.spec.containers[0].image}'); \
+	echo "image: $$img"; \
+	kubectl -n $(NS) delete job probe-single-commit --ignore-not-found; \
+	kubectl -n $(NS) delete configmap probe-single-commit-script --ignore-not-found; \
+	kubectl -n $(NS) create configmap probe-single-commit-script \
+	  --from-file=probe_iceberg_single_commit.py=scripts/probe_iceberg_single_commit.py \
+	  --dry-run=client -o yaml | kubectl -n $(NS) apply -f -; \
+	kubectl -n $(NS) create job probe-single-commit --image="$$img" --dry-run=client -o json \
+	  -- python /scripts/probe_iceberg_single_commit.py $(ARGS) \
+	| jq '.spec.backoffLimit = 0 | .spec.template.spec.containers[0].volumeMounts = [{"name":"script","mountPath":"/scripts"}] | .spec.template.spec.volumes = [{"name":"script","configMap":{"name":"probe-single-commit-script"}}] | .spec.template.spec.containers[0].env = [{"name":"MINIO_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-user"}}},{"name":"MINIO_SECRET_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-password"}}}]' \
+	| kubectl -n $(NS) apply -f -; \
+	elapsed=0; phase=""; \
+	while [ "$$phase" != "Complete" ] && [ "$$phase" != "Failed" ]; do \
+	  if [ "$$elapsed" -ge 600 ]; then \
+	    echo "Job không kết thúc (Complete/Failed) sau 600s — xem trạng thái dưới:"; \
+	    kubectl -n $(NS) describe job probe-single-commit | tail -20; \
+	    kubectl -n $(NS) delete job probe-single-commit --ignore-not-found; \
+	    kubectl -n $(NS) delete configmap probe-single-commit-script --ignore-not-found; \
+	    exit 1; \
+	  fi; \
+	  sleep 5; elapsed=$$((elapsed + 5)); \
+	  phase=$$(kubectl -n $(NS) get job probe-single-commit \
+	    -o jsonpath='{.status.conditions[?(@.status=="True")].type}' 2>/dev/null || true); \
+	done; \
+	kubectl -n $(NS) logs job/probe-single-commit; \
+	kubectl -n $(NS) delete job probe-single-commit --ignore-not-found; \
+	kubectl -n $(NS) delete configmap probe-single-commit-script --ignore-not-found; \
+	test "$$phase" = "Complete"
+	@#
+	@# ĐÃ ĐO thật (2026-08-11, cụm k3d-loom, --snapshot-probe-rows/--rows-per-batch/
+	@# --batches-c mặc định — 1 000 dòng cho A/B, 200 000 dòng x 20 lô cho C):
+	@#
+	@#   A: hai append trong một transaction       -> 2 snapshot
+	@#   B: overwrite+append trong một transaction -> 3 snapshot
+	@#   C: RSS đỉnh với 20 lô trong một transaction: 496 MiB   (bò lên đều,
+	@#      324 -> 496 MiB, không có lô nào tụt — cùng hình dạng leo-không-phẳng
+	@#      đã thấy ở Đo 1, KHÔNG tệ hơn hẳn dù giữ transaction mở suốt 20 lô)
+	@#
+	@# KHÔNG ĐẠT. Đọc mã nguồn `pyiceberg/table/update/snapshot.py` giải thích
+	@# đúng con số đo được: mỗi `tx.append`/`tx.overwrite` dựng một
+	@# `_SnapshotProducer` riêng, và `__exit__` của nó gọi `commit()` xếp một
+	@# `AddSnapshotUpdate` (một `Snapshot` với `snapshot_id` MỚI) vào
+	@# `Transaction._updates` NGAY LẬP TỨC — trước khi có request mạng nào. Hai
+	@# `tx.append` => 2 `AddSnapshotUpdate` (khớp con số đo A). `tx.overwrite`
+	@# tự nó đã là delete (bảng B có dữ liệu cũ nên `files_affected=True`, sinh
+	@# 1 snapshot DELETE) + append dữ liệu mới (1 snapshot nữa) = 2, cộng
+	@# `tx.append` thứ hai = 3 (khớp con số đo B). `commit_transaction()` chỉ
+	@# gửi MỘT request PUT mang TOÀN BỘ các `AddSnapshotUpdate` đã xếp — "một
+	@# transaction" ở PyIceberg 0.11.1 đảm bảo MỘT request PUT/MỘT điều kiện
+	@# tranh chấp lạc quan (đủ để bảng CŨ đứng nguyên nếu crash trước commit),
+	@# NHƯNG KHÔNG đảm bảo MỘT snapshot Iceberg — đúng giả định mà Task 12 cần
+	@# kiểm và không giữ được. `mode: full` phải đổi sang bảng tạm rồi tráo
+	@# tên, KHÔNG giữ thiết kế "N lô ghi trong một transaction -> 1 snapshot".
+
 .PHONY: ram
 ram: check-context  ## Tổng RAM cụm đang dùng, so với NGÂN SÁCH tự đặt 4 GiB
 	@# ĐỌC KỸ CON SỐ NÀY TRƯỚC KHI DỰA VÀO NÓ.
