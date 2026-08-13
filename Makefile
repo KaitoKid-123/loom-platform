@@ -750,6 +750,84 @@ probe-single-commit: check-context  ## Đo 2 GĐ3a (CỬA CHẶN) — PyIceberg 
 	@# chạy SAU KHI verdict đã chốt, một lỗi dọn dẹp (dù là gì) không được phép
 	@# đổi mã thoát của một phép đo đã tính đúng.
 
+.PHONY: measure-ingest
+measure-ingest: check-context  ## Đo 3 GĐ3a (CỬA CHẶN cuối) — đường NẠP tách theo giai đoạn
+	@# Ba lần gọi, KHÔNG một: dựng nguồn, đo, rồi xoá nguồn.
+	@#
+	@#   make measure-ingest ARGS="--seed-source"
+	@#   make measure-ingest ARGS="--mode incremental --batch-rows 10000 --run-id <uuid>"
+	@#   make measure-ingest ARGS="--mode full        --batch-rows 10000 --run-id <uuid>"
+	@#   make measure-ingest ARGS="--mode incremental --batch-rows 40000 --run-id <uuid>"
+	@#   make measure-ingest ARGS="--drop-source"
+	@#
+	@# `--run-id` phải là một hàng `ingest_run` CÓ THẬT (tạo bằng một lần nạp
+	@# thật qua `POST /api/v1/lakehouses/<id>/ingest`). Thiếu nó thì giai đoạn 5
+	@# — báo tiến độ về control plane — KHÔNG được đo, và báo cáo phải nói thế
+	@# thay vì để một cột 0,0s trông như "miễn phí".
+	@#
+	@# Image lấy TỪ `LOOM_TASK_IMAGE` của deployment loom-api, không viết cứng:
+	@# đó là đúng image mà `JobLauncher` dựng pod nạp thật bằng, nên phép đo
+	@# chạy trên cùng bộ thư viện (psycopg + pyarrow + pyiceberg + icebergkit)
+	@# mà production chạy. Một image khác đo một hệ thống khác.
+	@#
+	@# KHÔNG đặt `resources.limits.memory`, và đó là một quyết định: pod nạp
+	@# thật chạy ở `LOOM_TASK_MEMORY` (512Mi hiện tại), nhưng một phép đo bị
+	@# OOMKilled không cho ra số nào cả — nó chỉ cho ra một pod chết. Chạy KHÔNG
+	@# limit rồi ĐỌC `ru_maxrss` cho biết cấu hình nào vừa 512Mi và cấu hình nào
+	@# không; đó là dữ liệu, còn một OOMKill thì không.
+	@#
+	@# Nạp script qua ConfigMap và `backoffLimit=0`: cùng hai lý do đã ghi dài ở
+	@# `measure-ingest-pod` phía trên (backtick trong docstring làm `python -c
+	@# "$$(cat ...)"` vỡ thật; thiếu `backoffLimit` thì Kubernetes tự chạy lại
+	@# một job hỏng và để lại NHIỀU warehouse rác).
+	@#
+	@# Chờ TRẠNG THÁI CUỐI CÙNG (`.status.succeeded`/`.status.failed`, số đếm),
+	@# KHÔNG `kubectl wait --for=condition=complete`: cùng lý do đã ghi ở
+	@# `probe-single-commit` — script này thoát khác 0 khi hỏng, và với
+	@# `backoffLimit=0` một Job như thế KHÔNG BAO GIỜ đạt Complete.
+	@#
+	@# Trần 3600s: một cấu hình 10.000 dòng/lô trên 1,2 triệu dòng là 120 lô, và
+	@# 2c đã đo commit catalog ở 6,7s/lô trên một bảng lớn — nếu đường này cũng
+	@# thế thì một cấu hình mất trên 13 phút. Trần phải rộng hơn hẳn dự đoán,
+	@# nếu không phép đo bị chính cái đồng hồ của nó cắt ngang.
+	@set -eo pipefail; \
+	img=$$(kubectl -n $(NS) get deploy loom-api \
+	  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LOOM_TASK_IMAGE")].value}'); \
+	test -n "$$img" || { echo "không đọc được LOOM_TASK_IMAGE từ deploy/loom-api"; exit 1; }; \
+	echo "image: $$img"; \
+	kubectl -n $(NS) delete job measure-ingest-path --ignore-not-found; \
+	kubectl -n $(NS) delete configmap measure-ingest-path-script --ignore-not-found; \
+	kubectl -n $(NS) create configmap measure-ingest-path-script \
+	  --from-file=measure_ingest_path.py=scripts/measure_ingest_path.py \
+	  --dry-run=client -o yaml | kubectl -n $(NS) apply -f -; \
+	kubectl -n $(NS) create job measure-ingest-path --image="$$img" --dry-run=client -o json \
+	  -- python /scripts/measure_ingest_path.py $(ARGS) \
+	| jq '.spec.backoffLimit = 0 | .spec.template.spec.containers[0].volumeMounts = [{"name":"script","mountPath":"/scripts"}] | .spec.template.spec.volumes = [{"name":"script","configMap":{"name":"measure-ingest-path-script"}}] | .spec.template.spec.containers[0].env = [{"name":"MINIO_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-user"}}},{"name":"MINIO_SECRET_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-password"}}},{"name":"BENCH_PG_USER","valueFrom":{"secretKeyRef":{"name":"loom-db-app","key":"username"}}},{"name":"BENCH_PG_PASSWORD","valueFrom":{"secretKeyRef":{"name":"loom-db-app","key":"password"}}},{"name":"BENCH_PG_HOST","valueFrom":{"secretKeyRef":{"name":"loom-db-app","key":"host"}}},{"name":"BENCH_PG_PORT","valueFrom":{"secretKeyRef":{"name":"loom-db-app","key":"port"}}},{"name":"BENCH_PG_DBNAME","valueFrom":{"secretKeyRef":{"name":"loom-db-app","key":"dbname"}}},{"name":"LOOM_INGEST_SHARED_SECRET","valueFrom":{"secretKeyRef":{"name":"loom-app","key":"ingest-shared-secret"}}}]' \
+	| kubectl -n $(NS) apply -f -; \
+	elapsed=0; phase=""; \
+	while [ "$$phase" != "Complete" ] && [ "$$phase" != "Failed" ]; do \
+	  if [ "$$elapsed" -ge 3600 ]; then \
+	    echo "Job không kết thúc sau 3600s — trạng thái:"; \
+	    kubectl -n $(NS) describe job measure-ingest-path | tail -20; \
+	    kubectl -n $(NS) logs job/measure-ingest-path --tail=40 || true; \
+	    kubectl -n $(NS) delete job measure-ingest-path --ignore-not-found; \
+	    kubectl -n $(NS) delete configmap measure-ingest-path-script --ignore-not-found; \
+	    exit 1; \
+	  fi; \
+	  sleep 5; elapsed=$$((elapsed + 5)); \
+	  succeeded=$$(kubectl -n $(NS) get job measure-ingest-path \
+	    -o jsonpath='{.status.succeeded}' 2>/dev/null || true); \
+	  failed=$$(kubectl -n $(NS) get job measure-ingest-path \
+	    -o jsonpath='{.status.failed}' 2>/dev/null || true); \
+	  if [ "$$succeeded" = "1" ]; then phase="Complete"; \
+	  elif [ "$$failed" = "1" ]; then phase="Failed"; \
+	  else phase=""; fi; \
+	done; \
+	kubectl -n $(NS) logs job/measure-ingest-path; \
+	kubectl -n $(NS) delete job measure-ingest-path --ignore-not-found; \
+	kubectl -n $(NS) delete configmap measure-ingest-path-script --ignore-not-found; \
+	test "$$phase" = "Complete"
+
 .PHONY: ram
 ram: check-context  ## Tổng RAM cụm đang dùng, so với NGÂN SÁCH tự đặt 4 GiB
 	@# ĐỌC KỸ CON SỐ NÀY TRƯỚC KHI DỰA VÀO NÓ.
