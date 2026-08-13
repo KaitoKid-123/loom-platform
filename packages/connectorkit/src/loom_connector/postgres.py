@@ -22,11 +22,26 @@ dòng psycopg lấy MỖI VÒNG MẠNG (itersize) và số dòng trong MỘT `Re
 một vòng mạng bị cắt thành nhiều batch nhỏ), và RAM đỉnh phụ thuộc bội số của
 cả hai chứ không phải một con số duy nhất dễ suy luận. Đặt bằng nhau thì "một
 batch" chỉ còn đúng MỘT nghĩa.
+
+**Kiểu nguồn về Python dạng gì: ĐO, không nhớ.** Bản trước ánh xạ `uuid`,
+`json`, `jsonb` sang `pa.string()` rồi để psycopg trả `uuid.UUID` và `dict`;
+pyarrow từ chối cả hai (`ArrowTypeError: Expected bytes, got a 'UUID' object`),
+nên MỌI bảng nguồn có một cột uuid hoặc jsonb đều không nạp được — kể cả mọi
+bảng trong schema của chính dự án này. Nguyên nhân gốc KHÔNG phải thiếu hai
+nhánh ép kiểu: nó là hai chỗ cùng mô tả một hợp đồng ("cột kiểu này về Python
+dạng gì") mà không gì bắt chúng khớp nhau — `_ARROW_TYPE_MAP` nói kiểu Arrow,
+một hàm `_coerce_for_arrow` riêng nói giá trị nào cần sửa. Hai bảng trôi khỏi
+nhau, và chỗ trôi chỉ lộ ra khi gặp đúng cột đó ở production.
+
+Bản này bỏ hẳn bước ép kiểu phía Python: `_needs_text_cast` là chỗ DUY NHẤT
+quyết định, và nó để chính Postgres kết xuất giá trị ra text trước khi giá trị
+rời server. Số đo của từng kiểu nằm ở `_arrow_type_for` và `_needs_text_cast`;
+phép canh giữ chúng không trôi lại là `test_every_mapped_type_round_trips` và
+`test_the_type_zoo_covers_every_mapped_type` (chạy trên Postgres 17 thật).
 """
 
 from __future__ import annotations
 
-import decimal
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -52,6 +67,30 @@ from loom_core.cursor import CURSOR_TYPE_ALLOWLIST
 # DUY NHẤT `loom_connector` được phép chạm `loom_core` — xem allowlist trong
 # `tests/test_connector_no_io.py`.
 
+# Khoá là giá trị `information_schema.columns.data_type` ĐÚNG NGUYÊN VĂN (chuỗi
+# chuẩn SQL, có dấu cách), không phải tên rút gọn của `pg_catalog` — cùng quy
+# ước với `CURSOR_TYPE_ALLOWLIST` ngay trên, và vì cùng một lý do: đó là chuỗi
+# `discover()` đọc được.
+#
+# Những kiểu về kiểu Arrow ĐÚNG NGHĨA (không phải string) là những kiểu psycopg
+# đã trả sẵn một giá trị pyarrow nhận trực tiếp. Đã đo trên Postgres 17 +
+# psycopg 3.3.4 + pyarrow 25, không suy từ trí nhớ:
+#
+#     smallint/integer/bigint  -> int                 nhận
+#     real/double precision    -> float               nhận
+#     boolean                  -> bool                nhận
+#     date                     -> datetime.date       nhận
+#     timestamp [without tz]   -> datetime naive      nhận
+#     timestamp with tz        -> datetime aware      nhận (pyarrow quy về UTC
+#                                                     đúng thời điểm kể cả khi
+#                                                     server đặt múi giờ khác)
+#     text/character varying   -> str                 nhận
+#     character                -> str, CÒN đệm đuôi   nhận
+#
+# Những kiểu về `pa.string()` thì KHÔNG được suy là "psycopg trả str": `uuid`
+# trả `uuid.UUID`, `json`/`jsonb` trả `dict`, `numeric` trả `decimal.Decimal`,
+# và pyarrow từ chối cả ba trước một mảng string. Chúng đi qua `::text` phía
+# Postgres — xem `_needs_text_cast`, nơi giữ toàn bộ lý do.
 _ARROW_TYPE_MAP: dict[str, pa.DataType] = {
     "smallint": pa.int16(),
     "integer": pa.int32(),
@@ -74,16 +113,126 @@ _ARROW_TYPE_MAP: dict[str, pa.DataType] = {
     # một cột tiền tệ đó là lỗi NGHIỆP VỤ chứ không phải sai số làm tròn vô
     # hại. Bronze giữ nguyên chuỗi thập phân nguồn; silver ép về kiểu decimal
     # thật khi đã biết precision/scale nó thực sự cần.
+    #
+    # "Giữ nguyên chuỗi thập phân nguồn" là một khẳng định về CHUỖI, và nó chỉ
+    # đúng nhờ `::text` — `str(decimal.Decimal)` cho ký hiệu khoa học ở số nhỏ,
+    # tức là bản trước KHÔNG giữ nguyên. Xem `_needs_text_cast` cho số đo.
     "numeric": pa.string(),
 }
 
 
 def _arrow_type_for(pg_type: str) -> pa.DataType:
-    # Kiểu lạ (mảng, enum, kiểu người dùng tự định nghĩa, ...) rơi về string
-    # thay vì ném lỗi: một connector từ chối cả bảng vì MỘT cột lạ là tệ hơn
-    # một cột chưa được ép kiểu tối ưu — string luôn nhận được mọi giá trị
-    # Postgres trả về dưới dạng text an toàn.
+    """Kiểu nguồn -> kiểu Arrow. Kiểu LẠ rơi về `pa.string()` thay vì ném lỗi.
+
+    Giữ nguyên tính dễ dãi của bản trước — một connector từ chối cả bảng vì
+    MỘT cột lạ tệ hơn một cột chưa được ép kiểu tối ưu — nhưng bỏ LÝ DO mà bản
+    trước viết ra cho nó ("string luôn nhận được mọi giá trị Postgres trả về
+    dưới dạng text an toàn"). Câu đó không đúng, và nó sai theo hướng nguy
+    hiểm nhất: nhánh này tồn tại để DỄ DÃI, mà chính nó biến một cột lạ thành
+    sự cố nạp. psycopg dựng SẴN đối tượng Python cho phần lớn kiểu lạ, và
+    pyarrow từ chối gần hết chúng trước một mảng string.
+
+    Bảng dưới nói về GIÁ TRỊ PSYCOPG TRẢ THẲNG, chưa qua `::text`; "nhận"
+    nghĩa là `pa.array([giá trị], type=pa.string())` chạy được, "từ chối"
+    nghĩa là nó ném — và đó là toàn bộ vấn đề. Đo trên Postgres 17 +
+    psycopg 3.3.4 + pyarrow 25:
+
+        integer[] / text[]  -> list               từ chối (Expected bytes)
+        inet / cidr         -> IPv4Address, ...   từ chối (Expected bytes)
+        interval            -> timedelta          từ chối (Expected bytes)
+        time [with tz]      -> datetime.time      từ chối (Expected bytes)
+        daterange           -> psycopg Range      từ chối (Expected bytes)
+        oid                 -> int                từ chối (Expected bytes)
+        bytea               -> bytes              từ chối (không phải utf8)
+        enum, xml, money, bit, point, macaddr, tsvector, composite -> str  nhận
+
+    Dòng `oid` đáng nhìn kỹ: một `int` bình thường cũng bị từ chối trước một
+    mảng string. Nên "kiểu lạ" không phải điều kiện — điều kiện là kiểu Python
+    psycopg chọn KHÔNG khớp kiểu Arrow đã khai, và điều đó xảy ra với cả kiểu
+    quen thuộc.
+
+    Thứ làm nhánh này dễ dãi THẬT là `_needs_text_cast` ngay dưới: Postgres tự
+    kết xuất giá trị ra text TRƯỚC KHI nó rời server, nên cái về tới Python
+    luôn là `str` (hoặc `None`), cho mọi kiểu trong bảng trên và cả những kiểu
+    chưa ai gặp.
+    """
     return _ARROW_TYPE_MAP.get(pg_type, pa.string())
+
+
+# Kiểu mà psycopg ĐÃ trả `str` VÀ một phép `::text` sẽ LÀM ĐỔI giá trị. Chỉ có
+# ba, và lý do nằm ở `character`: phép ép `bpchar -> text` của Postgres CẮT
+# khoảng trắng đệm đuôi. Đã đo trên `character(8)` chứa `'abc'` — đọc thẳng ra
+# `'abc     '`, đọc qua `::text` ra `'abc'`. Đó đúng là loại biến đổi ÂM THẦM
+# mà bronze không được phép làm. `text` và `character varying` thì cast không
+# đổi gì (đã đo, kể cả với khoảng trắng đuôi có thật trong dữ liệu), nhưng để
+# chúng ở đây cùng `character` giữ cho quy tắc phát biểu được thành MỘT câu:
+# cột nào Postgres vốn đã đưa sang dạng text thì không đụng vào.
+_NATIVE_TEXT_TYPES = frozenset({"text", "character varying", "character"})
+
+
+def _needs_text_cast(pg_type: str) -> bool:
+    """Cột này có để POSTGRES kết xuất ra text ngay trong câu SELECT không?
+
+    **Đây là chỗ DUY NHẤT quyết định một giá trị về tới Python dưới dạng gì**,
+    và đó là cả điểm của nó. Bản trước có HAI chỗ — `_ARROW_TYPE_MAP` nói cột
+    về kiểu Arrow nào, `_coerce_for_arrow` nói giá trị Python nào cần sửa
+    trước khi giao cho pyarrow — cho cùng MỘT hợp đồng, và không gì bắt chúng
+    khớp. Nên `uuid`, `json`, `jsonb` có mặt ở bảng thứ nhất mà vắng ở bảng
+    thứ hai, và điều đó chỉ lộ ra ở lần nạp thật đầu tiên gặp một cột uuid.
+    Một chỗ quyết định thì không còn hai chỗ để trôi khỏi nhau.
+
+    **Vì sao để Postgres kết xuất chứ không `str()` ở Python.** Chuỗi Postgres
+    in ra là chuỗi CỦA NGUỒN — đọc lại vào Postgres cho đúng giá trị cũ. Chuỗi
+    `str()` của Python là chuỗi của Python. Chênh lệch không phải giả thuyết,
+    đã đo:
+
+        integer[]  Postgres '{1,2,3}'    Python str(list)  '[1, 2, 3]'
+        text[]     Postgres '{a,b}'      Python str(list)  "['a', 'b']"
+        bytea      Postgres '\\xdeadbeef' Python str(bytes) "b'\\xde\\xad\\xbe\\xef'"
+        interval   Postgres '1 day 02:03:04'  Python str(timedelta) '1 day, 2:03:04'
+        daterange  Postgres '[2024-01-01,2024-02-01)'
+                   Python str(Range) 'Range(datetime.date(2024, 1, 1), ...)'
+
+    **`numeric` là một lỗi CÓ THẬT của bản trước, không phải ví dụ giả định.**
+    `str(decimal.Decimal)` chuyển sang ký hiệu KHOA HỌC khi số mũ hiệu chỉnh
+    nhỏ hơn -6. Đã đo, cùng một cột `numeric`:
+
+        nguồn 0.00000000000000000001  ->  ::text '0.00000000000000000001'
+                                      ->  str(Decimal) '1E-20'
+        nguồn 1e-10                   ->  ::text '0.0000000001'
+                                      ->  str(Decimal) '1E-10'
+
+    Tức là chú thích "bronze giữ nguyên chuỗi thập phân nguồn" ở
+    `_ARROW_TYPE_MAP` chỉ đúng với những con số ai đó tình cờ đã thử — cùng
+    đúng một lối hỏng mà cả thay đổi này tồn tại để sửa. Sau đây nó đúng theo
+    nghĩa đen. (Mười lăm dạng `numeric` khác đã kiểm cho ra chuỗi Y HỆT nhau ở
+    hai đường, kể cả `NaN`, đuôi số 0 như `19.90`, và 39 chữ số — nên đây là
+    một phép SỬA, không phải một phép đánh đổi.)
+
+    **json/jsonb.** psycopg 3 mặc định PARSE cả hai thành `dict`/`list`, và khi
+    đã thành `dict` thì văn bản gốc mất hẳn: `json.dumps` dựng lại được một
+    chuỗi HỢP LỆ nhưng không phải chuỗi cũ. Đã đo — `{"b": 1, "a": 2.50}` đi
+    một vòng parse/serialise ra `{"b": 1, "a": 2.5}`: mất `2.50`, và với kiểu
+    `json` mất cả thứ tự khoá lẫn khoảng trắng. `::text` không đi vòng đó: với
+    `json` nó trả về ĐÚNG văn bản đã lưu (đã đo, khớp từng byte, kể cả escape
+    `\\u00e9` giữ nguyên); với `jsonb` nó trả về dạng chuẩn tắc mà chính server
+    giữ — khoá đã sắp, `2.50` còn nguyên, vì jsonb lưu số dưới dạng numeric.
+    Bronze là nơi đổ THÔ; sắp xếp lại là việc của silver.
+
+    Lựa chọn còn lại cho json là `psycopg.types.json.set_json_loads(<giải mã>,
+    conn)` — bảo psycopg đừng parse. Đã kiểm trên psycopg 3.3.4: nó CHẠY, nhận
+    đúng phạm vi một connection (một connection mới vẫn trả `dict`, không rò
+    trạng thái toàn cục), và sống qua cả cursor có tên. Không chọn nó, và lý do
+    không phải kỹ thuật: nó là một CƠ CHẾ THỨ HAI cho cùng một việc. `::text`
+    dù sao cũng phải tồn tại cho mảng, `inet`, `interval`, `bytea`; thêm một
+    đường riêng cho json là dựng lại đúng hình dạng "hai chỗ phải khớp nhau"
+    vừa bị xoá đi ở trên.
+
+    Điều kiện là kiểu ARROW, không phải một danh sách tên kiểu: mọi thứ về
+    `pa.string()` đều cần một `str`, và đó đúng là điều `::text` bảo đảm — kể
+    cả cho kiểu chưa có trong `_ARROW_TYPE_MAP`, tức là kiểu chưa ai gặp.
+    """
+    return pg_type not in _NATIVE_TEXT_TYPES and pa.types.is_string(_arrow_type_for(pg_type))
 
 
 def _parse_stream(stream: str) -> tuple[str, str]:
@@ -93,32 +242,28 @@ def _parse_stream(stream: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _coerce_for_arrow(value: object) -> object:
-    """psycopg trả NUMERIC dưới dạng `decimal.Decimal` — `pa.array` với
-    `type=pa.string()` không tự chuyển được `Decimal` (ném `ArrowInvalid`), nên
-    phải ép về `str` tại đây. Mọi kiểu khác (int, bool, `datetime`, `date`,
-    `str`, `None`) psycopg đã trả sẵn đúng dạng mà pyarrow nhận trực tiếp cho
-    kiểu Arrow tương ứng trong `_ARROW_TYPE_MAP`."""
-    if isinstance(value, decimal.Decimal):
-        return str(value)
-    return value
-
-
 @dataclass(frozen=True, slots=True)
 class _ColumnInfo:
     name: str
     arrow_type: pa.DataType
     nullable: bool
+    # Postgres kết xuất cột này ra text ngay trong câu SELECT — xem
+    # `_needs_text_cast`. Mang theo CỘT chứ không tính lại ở `_read_rows`: chỉ
+    # `_columns_for` cầm chuỗi `data_type` của nguồn, và tính lại ở nơi khác là
+    # tạo ra chỗ thứ hai phải khớp với chỗ thứ nhất.
+    text_cast: bool
 
 
 def _rows_to_record_batch(
     rows: list[dict[str, object]], columns: tuple[_ColumnInfo, ...]
 ) -> pa.RecordBatch:
+    """Không còn bước ép kiểu nào ở đây, và sự VẮNG MẶT đó là điều đáng nói:
+    mọi giá trị tới được chỗ này đã đúng dạng pyarrow nhận, vì `_needs_text_cast`
+    đã quyết định điều đó từ lúc dựng câu SELECT. `pa.array` vẫn ném
+    `ArrowTypeError`/`ArrowInvalid` nếu một ngày điều đó không còn đúng — nó là
+    phép canh cuối cùng, không phải chỗ để vá thêm một nhánh `isinstance`."""
     fields = [pa.field(c.name, c.arrow_type, nullable=c.nullable) for c in columns]
-    arrays = [
-        pa.array([_coerce_for_arrow(row[c.name]) for row in rows], type=c.arrow_type)
-        for c in columns
-    ]
+    arrays = [pa.array([row[c.name] for row in rows], type=c.arrow_type) for c in columns]
     return pa.RecordBatch.from_arrays(arrays, schema=pa.schema(fields))
 
 
@@ -244,7 +389,10 @@ class PostgresConnector:
             raise ValueError(f"stream '{schema_name}.{table_name}' không tồn tại")
         return tuple(
             _ColumnInfo(
-                name=name, arrow_type=_arrow_type_for(pg_type), nullable=(is_nullable == "YES")
+                name=name,
+                arrow_type=_arrow_type_for(pg_type),
+                nullable=(is_nullable == "YES"),
+                text_cast=_needs_text_cast(pg_type),
             )
             for name, pg_type, is_nullable in rows
         )
@@ -258,7 +406,26 @@ class PostgresConnector:
         state: StreamState,
     ) -> Iterator[pa.RecordBatch]:
         try:
-            select_list = sql.SQL(", ").join(sql.Identifier(c.name) for c in columns)
+            # Cột nào cần Postgres kết xuất ra text (xem `_needs_text_cast`)
+            # mang `::text` NGAY TRONG câu SELECT, và được ĐẶT LẠI ĐÚNG TÊN CŨ
+            # bằng `AS`: `dict_row` lấy khoá của mỗi dòng từ tên cột KẾT QUẢ,
+            # nên thiếu alias là `row[c.name]` ở `_rows_to_record_batch` ném
+            # `KeyError` cho mọi cột được cast.
+            #
+            # `WHERE`/`ORDER BY` phía dưới không bị ảnh hưởng, và điều đó đúng
+            # vì một lý do cụ thể chứ không phải may: cột cursor chỉ có thể
+            # mang một trong sáu kiểu của `CURSOR_TYPE_ALLOWLIST` (nguyên,
+            # ngày, hai kiểu timestamp), không kiểu nào trong sáu về
+            # `pa.string()`, nên không kiểu nào bị cast. So sánh watermark vì
+            # thế vẫn là so sánh SỐ/NGÀY phía Postgres, không phải so sánh
+            # chuỗi — đúng thứ `loom_core.cursor` tồn tại để ngăn.
+            # `test_no_cursor_type_is_ever_read_as_text` canh mệnh đề đó.
+            select_list = sql.SQL(", ").join(
+                sql.SQL("{0}::text AS {0}").format(sql.Identifier(c.name))
+                if c.text_cast
+                else sql.Identifier(c.name)
+                for c in columns
+            )
             # Tên schema/bảng/cột đi qua `sql.Identifier`, KHÔNG BAO GIỜ nội
             # suy bằng f-string: chúng tới từ cấu hình do người dùng nhập ở
             # UI (spec Giai đoạn 3c), và một dấu nháy kép trong tên bảng không
