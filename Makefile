@@ -213,16 +213,52 @@ helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
 	@# namespace mặc định của context. Tilt và ArgoCD đều tự tiêm namespace nên
 	@# khoảng trống này im lặng — cho tới khi ai đó apply tay và mọi thứ lặng lẽ
 	@# vào `default`. Đã dính đúng thế một lần ở Task 14.
+	@#
+	@# Phạm vi bắt buộc GIỚI HẠN vào bên trong khối `metadata:` cấp cao nhất
+	@# (cờ `im`, bật ở dòng `metadata:` thụt lề 0, tắt ở khoá thụt lề 0 kế
+	@# tiếp): api-rbac.yaml (Task 8) thêm `RoleBinding` đầu tiên của chart, và
+	@# `roleRef.name` của nó thụt lề 2 khoảng trắng — HỆT `metadata.name`. Bản
+	@# awk cũ không phân biệt hai chỗ đó, nên `roleRef.name` (xuất hiện SAU
+	@# `metadata.namespace`) âm thầm reset `has` về 0 mà không còn dòng
+	@# `namespace:` nào theo sau để bật lại — báo thiếu namespace trên một
+	@# RoleBinding đã khai namespace đầy đủ.
 	@set -eo pipefail; \
 	missing=$$(helm template loom deploy/helm/loom -n $(NS) \
 		-f deploy/envs/values-local.yaml \
-		| awk '/^kind:/{k=$$2} /^  name:/{n=$$2; has=0} \
-		       /^  namespace:/{has=1} \
-		       /^---$$/{if(k && !has) print k" "n; k=""; n=""; has=0} \
+		| awk '/^kind:/{k=$$2} \
+		       /^metadata:$$/{im=1; next} \
+		       im && /^[A-Za-z]/{im=0} \
+		       im && /^  name:/{n=$$2; has=0} \
+		       im && /^  namespace:/{has=1} \
+		       /^---$$/{if(k && !has) print k" "n; k=""; n=""; has=0; im=0} \
 		       END{if(k && !has) print k" "n}'); \
 	test -z "$$missing" || { \
 		echo "thiếu namespace: $$missing"; exit 1; }; \
 	echo "  mọi tài nguyên đều khai namespace"
+
+	@echo "→ chart: Role của loom-api chỉ cấp jobs/pods, không hơn không kém"
+	@# Canh CẢ HAI chiều cho api-rbac.yaml (xem lý do chi tiết trong chính file
+	@# đó). Chiều RỘNG: `secrets` (dỡ bỏ lời hứa `SECRET_REF_RE` — một lỗi SQL
+	@# injection trong API sẽ đọc được mật khẩu database NGUỒN), `deployments`
+	@# (workload sống ngoài vòng đời một run), hay resource "*" đều phải FAIL.
+	@#
+	@# Chiều HẸP — dễ bị bỏ quên nhất: nếu Role không còn cấp `jobs` thì CŨNG
+	@# phải FAIL. Một phép canh chỉ nhìn chiều rộng vẫn xanh khi Role bị làm
+	@# rỗng hoặc đổi tên nhầm resource — lúc đó nó đang canh một quyền không
+	@# còn hoạt động, và triệu chứng chỉ lộ ra sau, dưới dạng mọi run nạp kẹt
+	@# mãi ở `pending` (403 khi `JobLauncher.launch` gọi
+	@# `create_namespaced_job`) mà không một dòng log nào chỉ thẳng vào RBAC.
+	@set -eo pipefail; \
+	role=$$(helm template loom deploy/helm/loom -n $(NS) -f deploy/envs/values-local.yaml \
+		| awk '/^kind: Role$$/{f=1} f{print} f&&/^---$$/{exit}'); \
+	test -n "$$role" || { \
+		echo "không tìm thấy Role nào trong chart — loom-api mất hết quyền k8s"; exit 1; }; \
+	resources=$$(echo "$$role" | awk '/^[[:space:]]*resources:[[:space:]]*$$/{inres=1;next} inres&&/^[[:space:]]*-/{print;next} {inres=0}'); \
+	echo "$$resources" | grep -qiE '"?(secrets|deployments)"?|"?\*"?' && { \
+		echo "Role quá RỘNG — cấp quyền ngoài phạm vi jobs/pods:"; echo "$$resources"; exit 1; }; \
+	echo "$$resources" | grep -qw jobs || { \
+		echo "Role thiếu quyền 'jobs' — ingest sẽ kẹt mãi ở pending, không có gợi ý RBAC nào trong log"; exit 1; }; \
+	echo "  Role chỉ cấp: $$(echo "$$resources" | tr -d ' -' | tr '\n' ' ')"
 
 	@echo "→ argocd/"
 	@# ArgoCD Application là CRD nên không có trong catalog mặc định của

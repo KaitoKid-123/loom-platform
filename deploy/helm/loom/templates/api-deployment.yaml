@@ -18,6 +18,10 @@ spec:
         {{- include "loom.labels" . | nindent 8 }}
         app.kubernetes.io/component: api
     spec:
+      # ServiceAccount hẹp riêng cho api, xem lý do và ranh giới quyền ở
+      # api-rbac.yaml — KHÔNG dùng `default` của namespace, vốn không có quyền
+      # k8s nào cả nên JobLauncher.launch sẽ nhận 403 ngay khi tạo Job.
+      serviceAccountName: {{ include "loom.fullname" . }}-api
       terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
