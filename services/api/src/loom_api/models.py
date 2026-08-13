@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -370,5 +371,92 @@ class AuditLog(Base):
     request_id: Mapped[str] = mapped_column(String(128), nullable=False)
     summary: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class IngestRun(Base):
+    """Một hàng cho mỗi lần thử nạp một stream nguồn vào bronze.
+
+    Trạng thái: `pending`, `running`, `succeeded`, `failed`. KHÔNG có
+    `cancelled` — chưa có gì tự sinh run nên chưa có gì để huỷ, và một nút Huỷ
+    dựng nửa vời còn tệ hơn là không có.
+
+    `pending` là khoảng trống giữa "hàng vừa được tạo" và "Job đã báo đang
+    chạy". Một run kẹt mãi ở `pending` nghĩa là Job chưa bao giờ khởi động
+    được — thường do sai tên Secret — và vòng reconcile lười của Task 13 PHẢI
+    chuyển nó thành `failed`, không được để nó nằm mãi ở đây.
+
+    Pod nạp KHÔNG có credential Postgres nào: nó chỉ lấy spec và báo tiến độ
+    qua `/internal/ingest/*` (khuôn shared-secret đã dùng ở Giai đoạn 2b), nên
+    bảng này chỉ được `loom-api` đọc và ghi — pod không bao giờ đụng tới nó
+    trực tiếp.
+    """
+
+    __tablename__ = "ingest_run"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    lakehouse_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("item.id"), nullable=False, index=True
+    )
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("item.id"), nullable=False
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workspace.id"), nullable=False
+    )
+    # `schema.table` phía nguồn — xem StreamSchema.name ở loom_connector.protocol.
+    stream: Mapped[str] = mapped_column(String(255), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
+    rows_written: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StreamState(Base):
+    """Watermark của một stream — đúng MỘT hàng cho mỗi (lakehouse, connection, stream).
+
+    `cursor_value` là chuỗi, không phải cột có kiểu gốc — khớp `StreamState` ở
+    `loom_connector.protocol`: giá trị đi qua JSON tới pod nạp rồi quay lại, và
+    một timestamp đi vòng qua JSON thì đã mất kiểu. Ép về chuỗi ngay từ đây làm
+    điểm chuyển đổi duy nhất nằm ở connector — nơi biết kiểu gốc — thay vì rải
+    rác khắp nơi.
+
+    UNIQUE trên (lakehouse_id, connection_id, stream) — CỐ Ý KHÔNG có
+    cursor_column trong khoá. Cho phép hai hàng tồn tại nghĩa là đổi
+    cursor_column sẽ để lại một hàng cũ mà lần nạp sau chọn bừa, và giá trị nó
+    mang là một con số thuộc về một thang đo khác hẳn — bỏ sót dữ liệu mà
+    không có lỗi nào báo ra.
+    """
+
+    __tablename__ = "stream_state"
+    __table_args__ = (
+        UniqueConstraint(
+            "lakehouse_id",
+            "connection_id",
+            "stream",
+            name="uq_stream_state_lakehouse_connection_stream",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    lakehouse_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("item.id"), nullable=False, index=True
+    )
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("item.id"), nullable=False
+    )
+    stream: Mapped[str] = mapped_column(String(255), nullable=False)
+    cursor_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    cursor_value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
