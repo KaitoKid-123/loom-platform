@@ -25,9 +25,8 @@ tiến trình CÒN SỐNG để kể lại thì được kể lại ngay, kèm l
 **Đường ghi bronze (Iceberg) được nối Ở ĐÂY từ Task 12** — xem `_build_sink` và
 `loom_task.sink`. Cả hai mode đã có đường ghi thật: `incremental` (Task 11) ghi
 và commit từng lô vào bảng đích, `full` (Task 12) ghi vào bảng tạm rồi tráo tên
-ba bước. Cái mà `_build_sink` KHÔNG dựng nổi cho đúng spec là slug connection
-trong tên bảng bronze — `IngestSpec` không mang tên connection, xem docstring của
-nó cho khoảng trống đó và cái giá của việc để nó lại.
+ba bước. Tên bảng đích đến từ `target_table` — một hàm riêng, vì nó là quyết định
+không được đổi sau khi có dữ liệu thật và vì vậy phải có phép canh rẻ.
 """
 
 from __future__ import annotations
@@ -101,24 +100,32 @@ def _source_dsn(source: IngestSourceSpec, credentials: SourceCredentials) -> str
     return f"postgresql://{user}:{password}@{source.host}:{source.port}/{database}"
 
 
+def target_table(spec: IngestSpec) -> str:
+    """Bảng bronze mà run này ghi vào — TÊN, tách khỏi việc mở kết nối.
+
+    Hàm riêng chứ không một dòng trong `_build_sink`, vì đây là quyết định duy
+    nhất trong cả đường nạp mà một phép canh KHÔNG THỂ chạm tới nếu nó nằm trong
+    đó: `_build_sink` gọi `build_catalog`, và `RestCatalog.__init__` của PyIceberg
+    gọi `GET /v1/config` ngay lúc dựng — nên không có test nào pin được tên bảng
+    mà không dựng một Lakekeeper. Tên bảng bronze là thứ KHÔNG được đổi sau khi có
+    dữ liệu thật (đổi quy ước làm dữ liệu cũ trông như đã biến mất), nên nó phải
+    có một phép canh rẻ, và đây là hình dạng làm được điều đó.
+
+    `connection_slug`, KHÔNG `connection_id`: xem `IngestSpec.connection_slug` cho
+    lý do hai trường tồn tại cạnh nhau và cái nào đi vào đâu.
+    """
+    return bronze_table_name(spec.connection_slug, spec.stream)
+
+
 def _build_sink(spec: IngestSpec) -> Sink:
     """Đường ghi bronze THẬT: một `Lakehouse` trên warehouse của lakehouse này.
 
     `warehouse=str(spec.lakehouse_id)` là quy ước đã có từ Giai đoạn 2b
     (`loom_query.runner`, và `loom_api.warehouse_provisioning` là bên tạo):
     warehouse của Lakekeeper mang tên `item.id`, KHÔNG mang `item.name` — tên đổi
-    được, id thì không.
-
-    **Slug connection trong tên bảng bronze hiện là `connection_id.hex`, và đó là
-    một khoảng trống đã biết.** Spec mục 5 nói tên đích là
-    `bronze.<slug connection>__<schema>_<bảng>` với slug lấy từ TÊN connection
-    (`pos_aiven`), nhưng `IngestSpec` không mang tên connection — nó chỉ có
-    `connection_id` (xem `loom_core.schemas.IngestSpec`), và pod không đọc được
-    bảng `item`. Nên chỗ này dùng id: đúng, tất định, đọc ngược ra được nguồn, và
-    KHÓ ĐỌC cho người. Sửa cho đúng spec đòi thêm một trường vào `IngestSpec` và
-    một hàm tạo slug ở `loom-api` — việc thật, ngoài phạm vi Task 12, và nó phải
-    được làm TRƯỚC khi có bảng bronze thật nào tồn tại, vì đổi quy ước tên sau đó
-    làm dữ liệu cũ trông như đã biến mất.
+    được, id thì không. (Ngược hẳn với TÊN BẢNG bronze, chỗ slug thắng vì tên bảng
+    phải đọc được — xem `target_table`. Hai quy ước khác nhau cho hai thứ khác
+    nhau, có chủ đích.)
     """
     lakehouse_settings = LakehouseSettings()
     catalog = build_catalog(
@@ -128,8 +135,9 @@ def _build_sink(spec: IngestSpec) -> Sink:
     )
     return IcebergSink(
         Lakehouse(catalog),
-        target=bronze_table_name(spec.connection_id.hex, spec.stream),
+        target=target_table(spec),
         run_id=spec.run_id,
+        stream=spec.stream,
     )
 
 

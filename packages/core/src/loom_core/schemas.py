@@ -404,12 +404,38 @@ class IngestSpec(BaseModel):
     Postgres control plane — xem `routers/internal_ingest.py`). Một id, không
     phải một bí mật: `test_the_spec_never_mentions_a_password_or_a_secret` quét
     toàn bộ thân phản hồi và trường này nằm trong phạm vi quét đó.
+
+    **`connection_slug` là `item.name` của connection, và nó đi CẠNH
+    `connection_id` chứ không thay nó.** Hai trường cho hai việc khác nhau, và
+    gộp lại thì một trong hai việc sai:
+
+    - `connection_slug` đi vào TÊN BẢNG bronze (`bronze.<slug>__<schema>_<bảng>`,
+      spec 3a mục 5) vì tên bảng phải đọc được — `bronze.pos_aiven__public_orders`
+      nói ngay dữ liệu tới từ đâu, còn một `connection_id.hex` trong tên bảng thì
+      không ai đọc ngược ra nguồn được.
+    - `connection_id` đi vào CỘT `_source` vì nó KHÔNG ĐỔI. `item.name` đổi được
+      (và `uq_item_active_name` chỉ giữ tên duy nhất trong phạm vi các item còn
+      `active`, nên một connection bị xoá mềm còn nhả tên nó ra cho một
+      connection khác dùng lại), nên một cột `_source` mang slug sẽ nói sai về
+      những dòng đã nằm đó hàng tháng.
+
+    Trường này BẮT BUỘC phải đi qua spec: pod không đọc được bảng `item` (không
+    có credential Postgres control plane), nên đây là đường DUY NHẤT để tên
+    connection tới được nó.
+
+    Chỉ `min_length`/`max_length`, KHÔNG lặp lại `pattern` của `ItemCreate.name`:
+    hình dạng tên đã được canh ở BIÊN nơi tên được đặt, và một `pattern` ở đây
+    biến một cái tên lạ (dữ liệu đã lưu) thành lỗi validate PHẢN HỒI — tức là 500
+    từ `/spec`, rồi một run `failed` mang lý do "HTTP 500". Chỗ từ chối đúng là
+    `loom_task.runner.bronze_table_name`: nó biết vì sao nó không mã hoá nổi cái
+    tên đó, và nói ra được trong `ingest_run.error`.
     """
 
     run_id: uuid.UUID
     lakehouse_id: uuid.UUID
     workspace_id: uuid.UUID
     connection_id: uuid.UUID
+    connection_slug: str = Field(min_length=1, max_length=128)
     stream: str
     mode: Literal["full", "incremental"]
     source: IngestSourceSpec

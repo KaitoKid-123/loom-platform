@@ -143,6 +143,18 @@ async def _run_row(world: ApiWorld, run_id: uuid.UUID) -> IngestRun:
         return (await session.execute(select(IngestRun).where(IngestRun.id == run_id))).scalar_one()
 
 
+async def _item_name(world: ApiWorld, item_id: uuid.UUID) -> str:
+    """Cột `item.name` — nguồn sự thật của `IngestSpec.connection_slug`.
+
+    Đọc lại từ database chứ không dựng lại chuỗi mà `_insert_item` đã sinh: nếu
+    quy ước đặt tên trong fixture đổi, phép khẳng định vẫn nói đúng điều nó muốn
+    nói ("slug đến TỪ cột name"), không thành một phép so hai chuỗi trùng nhau vì
+    cùng được viết ra hai lần.
+    """
+    async with _maker(world)() as session:
+        return (await session.execute(select(Item.name).where(Item.id == item_id))).scalar_one()
+
+
 async def _watermark(world: ApiWorld, run: IngestRun) -> StreamState | None:
     async with _maker(world)() as session:
         return (
@@ -367,6 +379,15 @@ async def test_the_spec_says_what_to_ingest_and_where_from(api_world: ApiWorld) 
     # `connection_id` là thứ pod ghi vào cột bronze `_source` (spec mục 5.5) —
     # nó không có đường nào khác để biết giá trị này, nên nó phải có mặt ở đây.
     assert body["connection_id"] == str(run.connection_id)
+    # `connection_slug` là `item.name` của connection, và nó đi vào TÊN BẢNG
+    # bronze (`bronze.<slug>__<schema>_<bảng>`, spec mục 5). Pod không đọc được
+    # bảng `item` (không có credential Postgres control plane), nên spec là đường
+    # DUY NHẤT để cái tên đó tới được nó — thiếu trường này thì `loom-task` chỉ
+    # còn `connection_id` để đặt tên bảng, và không ai đọc ngược ra nguồn được từ
+    # một uuid. Dẫn từ hàng `item` THẬT chứ không từ một chuỗi viết cứng: câu
+    # khẳng định phải nói "slug đến từ cột `name`", không phải "slug tình cờ bằng
+    # chuỗi này".
+    assert body["connection_slug"] == await _item_name(api_world, run.connection_id)
     assert (body["stream"], body["mode"]) == (STREAM, "incremental")
     assert body["source"] == {
         "kind": "postgres",

@@ -28,9 +28,15 @@ from loom_task.sink import IcebergSink, old_target_name, staging_table_name
 
 pytestmark = pytest.mark.integration
 
-# `connection_id` của "connection" mà mọi bài dưới đây nạp qua. Cố định là đủ:
-# mỗi bài có warehouse riêng (xem fixture `warehouse_name`), nên hai bài không
-# nhìn thấy bảng của nhau dù tên bảng đích giống nhau.
+# "Connection" mà mọi bài dưới đây nạp qua. Cố định là đủ: mỗi bài có warehouse
+# riêng (xem fixture `warehouse_name`), nên hai bài không nhìn thấy bảng của nhau
+# dù tên bảng đích giống nhau.
+#
+# Slug mang một dấu GẠCH NGANG có chủ đích — đó là khuôn mà `ItemCreate.name` cho
+# phép và là khuôn mà fixture của repo dùng (`can-sua`). Nó bắt bộ integration
+# này đi qua đúng đường mã hoá `-` -> `_` mà bảng bronze cần để truy vấn được, thay
+# vì một slug "sạch" tình cờ không cần mã hoá gì.
+_CONNECTION_SLUG = "pos-aiven"
 _CONNECTION_ID = uuid.UUID("00000000-0000-0000-0000-0000000000c1")
 
 # Lô thứ 2 trong NĂM lô — đứt ở GIỮA. Một crash sau lô cuối không phân biệt được
@@ -41,18 +47,20 @@ _CRASH_AT_BATCH = 2
 class _Client:
     """Đúng phần `IngestClientLike` mà `run_full` gọi tới, không hơn.
 
-    `run_full` chỉ đọc `source_id` (giá trị cột bronze `_source`) và KHÔNG được
-    gọi `current_state()` hay `report_progress()` — `full` không có watermark
-    (spec mục 5). Nên hai phương thức đó ném ở đây: một `full` đọc watermark sẽ
-    lặng lẽ trở thành `incremental` rồi THAY cả bảng bằng phần đuôi vừa đọc, và
-    một `AssertionError` đọc được rẻ hơn nhiều so với việc đi tìm những dòng đã
-    biến mất.
+    `run_full` đọc `source_id` (giá trị cột bronze `_source`) và báo số dòng, nhưng
+    KHÔNG được gọi `current_state()` — `full` đọc lại từ đầu (spec mục 5). Nên
+    phương thức đó ném ở đây: một `full` đọc watermark sẽ lặng lẽ trở thành
+    `incremental` rồi THAY cả bảng bằng phần đuôi vừa đọc, và một `AssertionError`
+    đọc được rẻ hơn nhiều so với việc đi tìm những dòng đã biến mất.
 
     Không dùng `RecordingClient` ở `tests/doubles.py`: thư mục này không phải một
     package (xem docstring conftest), nên `from doubles import ...` ở đây chỉ chạy
     khi pytest tình cờ đã chèn `tests/` vào `sys.path` vì đang collect cả bộ unit
     test — tức là bộ này sẽ hỏng khi có ai chạy riêng nó.
     """
+
+    def __init__(self) -> None:
+        self.rows_reported: list[int] = []
 
     @property
     def source_id(self) -> str:
@@ -61,21 +69,43 @@ class _Client:
     def current_state(self) -> StreamState:
         raise AssertionError("`full` đọc lại từ đầu — nó không được hỏi watermark")
 
-    def report_progress(self, **kwargs: object) -> None:
-        raise AssertionError("`full` không đụng watermark — xem spec mục 5")
+    def report_progress(
+        self,
+        *,
+        rows: int,
+        cursor_column: str | None = None,
+        cursor_type: str | None = None,
+        cursor_value: str | None = None,
+    ) -> None:
+        """`full` báo SỐ DÒNG nhưng không bao giờ báo cursor — xem spec mục 5.
+
+        Ném khi có cursor chứ không im lặng bỏ qua: một `full` đẩy watermark lên
+        làm lần `incremental` KẾ TIẾP bỏ qua đúng khoảng dữ liệu vừa đọc, và hậu
+        quả xuất hiện ở một lần chạy khác nên không ai nối được với nguyên nhân.
+        Bài đơn vị canh cùng tính chất trên chuỗi lời gọi; ở đây nó là một cái
+        chốt cho đường đi qua Iceberg thật.
+        """
+        if (cursor_column, cursor_type, cursor_value) != (None, None, None):
+            raise AssertionError(
+                "`full` không đụng watermark — xem spec mục 5; nhận "
+                f"{(cursor_column, cursor_type, cursor_value)!r}"
+            )
+        self.rows_reported.append(rows)
 
     def complete(self, **kwargs: object) -> None:
         raise AssertionError("`complete` là việc của main.run_reporting_the_outcome")
 
 
 def _target(stream: str) -> str:
-    """Tên bảng bronze mà `main._build_sink` sẽ tính ra cho spec này.
+    """Tên bảng bronze mà `main.target_table` sẽ tính ra cho spec này.
 
-    `connection_id.hex` làm slug là khoảng trống đã biết của Task 12 (`IngestSpec`
-    không mang tên connection) — dùng lại ĐÚNG cách tính đó ở đây thay vì một tên
-    tự đặt, để bộ test này đi qua cùng một hàm với mã sản phẩm.
+    Gọi CHÍNH `bronze_table_name` thay vì viết cứng một chuỗi: một tên viết cứng ở
+    đây và một tên tính ở mã sản phẩm là hai thứ phải giữ khớp nhau bằng trí nhớ,
+    và bài `test_the_swap_leaves_no_extra_table_in_the_namespace` (so danh sách
+    bảng THẬT) sẽ đỏ với một thông báo về `list_tables` khi thứ sai thật là quy
+    ước tên.
     """
-    return bronze_table_name(_CONNECTION_ID.hex, stream)
+    return bronze_table_name(_CONNECTION_SLUG, stream)
 
 
 def _ingest_full(
@@ -84,6 +114,7 @@ def _ingest_full(
     *,
     run_id: uuid.UUID | None = None,
     crash_after_batch: int | None = None,
+    client: _Client | None = None,
 ) -> int:
     """Một lần nạp `full`, đúng như `main.ingest` dựng nó — `run_id` MỚI mỗi lần.
 
@@ -93,8 +124,10 @@ def _ingest_full(
     """
     dsn, stream, _, batch_rows = source
     connector = PostgresConnector(dsn=dsn, batch_rows=batch_rows)
-    sink = IcebergSink(lakehouse, target=_target(stream), run_id=run_id or uuid.uuid4())
-    return run_full(connector, sink, _Client(), stream, crash_after_batch)
+    sink = IcebergSink(
+        lakehouse, target=_target(stream), run_id=run_id or uuid.uuid4(), stream=stream
+    )
+    return run_full(connector, sink, client or _Client(), stream, crash_after_batch)
 
 
 def _read_all(lakehouse: Lakehouse, qualified: str) -> list[dict[str, object]]:
@@ -135,6 +168,31 @@ def test_the_very_first_full_load_creates_the_target(
     # `numeric` của Postgres về Arrow string (xem `PostgresConnector`) và đi qua
     # `create_from` được — kiểu này là chỗ một lỗi chuyển schema lộ ra.
     assert landed[0]["amount"] == "19.99"
+
+
+def test_full_reports_every_staged_batch_so_the_row_count_is_not_zero(
+    lakehouse: Lakehouse, seeded_source: tuple[str, str, int, int]
+) -> None:
+    """`ingest_run.rows_written` phải có một con số THẬT cho một run `full`.
+
+    `/progress` là đường DUY NHẤT cộng dồn cột đó (`/complete` cố ý không mang
+    `rows` — xem `IngestCompletionReport`), nên một `run_full` không báo gì để nó
+    ở 0 suốt cả lần nạp: giao diện 3c hiển thị "đã nạp 0 dòng" cho một lần nạp
+    500 dòng đã xong. Bài này khẳng định tổng báo về khớp số dòng nguồn VÀ khớp
+    số dòng thật sự hạ cánh trong bảng đích — hai con số đó bằng nhau khi cú tráo
+    làm đúng việc.
+
+    `_Client.report_progress` ném nếu có bất kỳ trường cursor nào, nên bài này
+    cũng là cái chốt "không đụng watermark" cho đường đi qua Iceberg thật.
+    """
+    _, stream, rows, batch_rows = seeded_source
+    client = _Client()
+
+    _ingest_full(lakehouse, seeded_source, client=client)
+
+    assert sum(client.rows_reported) == rows
+    assert client.rows_reported == [batch_rows] * (rows // batch_rows)
+    assert len(_read_all(lakehouse, _target(stream))) == sum(client.rows_reported)
 
 
 def test_full_replaces_it_does_not_pile_up(

@@ -71,6 +71,14 @@ class IngestClientLike(Protocol):
     `str`; hoán vị hai đối số theo vị trí không sai kiểu, không sai số lượng, và
     hậu quả là `cursor_type="2026-08-13"` — một `CursorTypeNotAllowed` ở biên nếu
     may, một watermark vô nghĩa nếu không. `*` làm lớp lỗi đó không viết ra được.
+
+    **Ba tham số cursor là TUỲ CHỌN vì `mode="full"` báo dòng mà KHÔNG báo
+    watermark**, và hợp đồng trên dây đã cho phép điều đó từ Task 10:
+    `IngestProgressReport` để cả ba trường cursor `default=None` và
+    `_cursor_fields_travel_together` chỉ từ chối một cursor MỘT PHẦN (`if present
+    and len(present) != 3`) — `{"rows": 500}` là một thân request hợp lệ. Trước
+    Task 12 chữ ký ở đây bắt buộc cả ba, nên `run_full` không báo gì được và cột
+    `ingest_run.rows_written` của mọi run `full` đứng ở 0 tới lúc kết thúc.
     """
 
     @property
@@ -79,7 +87,12 @@ class IngestClientLike(Protocol):
     def current_state(self) -> StreamState: ...
 
     def report_progress(
-        self, *, cursor_column: str, cursor_type: str, cursor_value: str, rows: int
+        self,
+        *,
+        rows: int,
+        cursor_column: str | None = None,
+        cursor_type: str | None = None,
+        cursor_value: str | None = None,
     ) -> None: ...
 
     def complete(self, *, status: CompletionStatus, error: str | None = None) -> None: ...
@@ -135,14 +148,27 @@ class IngestClient:
         return StreamState(cursor_column=spec.cursor_column, cursor_value=spec.cursor_value)
 
     def report_progress(
-        self, *, cursor_column: str, cursor_type: str, cursor_value: str, rows: int
+        self,
+        *,
+        rows: int,
+        cursor_column: str | None = None,
+        cursor_type: str | None = None,
+        cursor_value: str | None = None,
     ) -> None:
         """Một lô ĐÃ hạ cánh. Gọi SAU khi ghi, không bao giờ trước — xem `runner`.
 
-        `cursor_type` BẮT BUỘC (`IngestProgressReport` đòi cả ba trường cursor
-        cùng lúc): không có nó, phía server chỉ so được CHUỖI, và so chuỗi trên
-        cursor nguyên làm watermark kẹt vĩnh viễn ở lần đầu vượt mốc đổi số chữ
-        số — `"1000" > "400"` là `False`. Xem `loom_core.cursor`.
+        Ba trường cursor đi CÙNG NHAU hoặc KHÔNG CÓ CÁI NÀO, và
+        `IngestProgressReport` là bên canh (dựng model ở đây nghĩa là một lời gọi
+        đưa hai trong ba nổ TẠI pod, không thành 422 sau một chặng mạng):
+
+        - `incremental` đưa cả ba. `cursor_type` không thể thiếu ở đó — không có
+          nó phía server chỉ so được CHUỖI, và so chuỗi trên một cursor nguyên làm
+          watermark kẹt vĩnh viễn ở lần đầu vượt mốc đổi số chữ số (`"1000" >
+          "400"` là `False`). Xem `loom_core.cursor`.
+        - `full` đưa MỘT MÌNH `rows`: nó đọc lại cả bảng nên không có mốc nào để
+          tiến, và đẩy một watermark ở chế độ đó sẽ làm lần `incremental` sau bỏ
+          qua đúng khoảng dữ liệu vừa đọc. Nhưng số DÒNG thì vẫn thật, và
+          `ingest_run.rows_written` là chỗ duy nhất người dùng thấy được tiến độ.
         """
         report = IngestProgressReport(
             rows=rows,

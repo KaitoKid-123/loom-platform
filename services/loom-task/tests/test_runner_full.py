@@ -88,17 +88,28 @@ def test_the_very_first_full_load_has_no_target_to_rename_away() -> None:
     assert "drop_old_target" not in kinds, "không có `đích_cũ` nào để xoá"
 
 
-def test_full_does_not_touch_the_watermark() -> None:
-    """`full` không có watermark — xem spec mục 5.
+def test_full_reports_rows_but_never_a_cursor() -> None:
+    """Số dòng thì báo; watermark thì KHÔNG — hai tính chất, một lời gọi.
 
-    Watermark chỉ thuộc về `incremental`. Một lần nạp `full` đẩy watermark lên
-    sẽ làm lần `incremental` sau đó bỏ qua đúng khoảng dữ liệu mà `full` vừa
-    đọc, dưới danh nghĩa "đã nạp rồi".
+    Báo dòng vì `ingest_run.rows_written` chỉ cộng dồn qua `/progress`
+    (`/complete` không mang `rows`), nên một `run_full` im lặng để cột đó ở 0 và
+    người dùng không có con số nào để xem trong lúc nạp.
+
+    KHÔNG báo cursor vì `full` đọc lại từ đầu (spec mục 5): không có mốc nào để
+    tiến, và một watermark đẩy lên ở đây làm lần `incremental` KẾ TIẾP bỏ qua đúng
+    khoảng dữ liệu vừa đọc — mất dòng, im lặng, và ở một lần chạy khác nên không
+    ai nối được hậu quả với nguyên nhân.
+
+    So CẢ BỐN phần tử của mỗi lời gọi, không chỉ đếm số lời gọi: chính ba `None`
+    kia là tính chất. Một bản cài đặt chép lời gọi `report_progress` từ
+    `run_incremental` sang vẫn báo đúng số dòng, và chỉ ba `None` này bắt được nó.
     """
     client = RecordingClient([], initial_cursor="500")
     run_full(_source(), RecordingSink([]), client, _STREAM)
-    assert client.progress_calls == []
+
+    assert client.progress_calls == [(None, None, None, _BATCH)] * 3
     assert client.initial_cursor == "500", "watermark cũ phải nguyên vẹn, không bị đặt lại"
+    assert client.cursor_column == "id", "cột watermark cũ cũng không được đổi"
 
 
 def test_full_reads_the_whole_table_even_when_a_watermark_already_exists() -> None:

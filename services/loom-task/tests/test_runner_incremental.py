@@ -147,6 +147,44 @@ def test_a_stream_without_a_schema_is_rejected() -> None:
         bronze_table_name("pos", "orders")
 
 
+def test_a_hyphen_in_the_connection_name_becomes_an_underscore() -> None:
+    """Tên connection có gạch NGANG là khuôn bình thường (`ItemCreate.name` canh
+    `^[a-z0-9][a-z0-9-]*$`, và fixture của repo đặt tên kiểu `can-sua`), nhưng một
+    gạch ngang trong tên bảng làm bảng đó không truy vấn được nếu không trích dẫn.
+
+    Dựng lại thật trên DuckDB — engine mà `loom-query` chạy:
+    `SELECT * FROM bronze.pos-aiven__public_orders` trả `ParserException: syntax
+    error at or near "-"`; cùng câu đó với tên trong ngoặc kép thì chạy. Ví dụ của
+    spec mục 5 cũng là `pos_aiven`, gạch DƯỚI.
+    """
+    assert bronze_table_name("pos-aiven", "public.orders") == "bronze.pos_aiven__public_orders"
+
+
+def test_two_connection_names_never_encode_to_the_same_table() -> None:
+    """Phép đổi `-` -> `_` là ĐƠN ÁNH trên bộ ký tự mà `item.name` cho phép.
+
+    `^[a-z0-9][a-z0-9-]*$` không cho `_`, nên không có tên nào "đã sẵn" mang gạch
+    dưới để trùng với một tên khác sau phép đổi. Nếu ràng buộc đó ở
+    `ItemCreate.name` một ngày nào đó nới ra cho `_`, bài này đỏ — và nó PHẢI đỏ,
+    vì lúc đó `pos-aiven` và `pos_aiven` là hai connection ghi vào MỘT bảng
+    bronze, tức là hai nguồn trộn vào nhau trong im lặng.
+    """
+    assert bronze_table_name("pos-aiven", "s.t") != bronze_table_name("pos-aiveo", "s.t")
+    assert bronze_table_name("a-b", "s.t") != bronze_table_name("a-b-c", "s.t")
+
+
+def test_a_connection_name_with_two_hyphens_in_a_row_is_refused() -> None:
+    """`pos--aiven` hợp lệ theo pattern nhưng thành `pos__aiven` — một dấu ngăn
+    `__` THỨ HAI, và tên bảng không còn đọc ngược ra được nguồn.
+
+    Từ chối ồn ào chứ không thu gọn `--` về một `_`: thu gọn thì `pos-aiven` và
+    `pos--aiven` cho ra CÙNG một bảng bronze, và hai nguồn ghi đè lẫn nhau mà
+    không có lỗi nào báo.
+    """
+    with pytest.raises(ValueError, match="pos--aiven"):
+        bronze_table_name("pos--aiven", "public.orders")
+
+
 def test_the_cursor_type_comes_from_the_connector_not_from_a_guess() -> None:
     """Lần nạp ĐẦU TIÊN không có watermark, nên `IngestSpec.cursor_type` là
     `None` — mà `/progress` thì đòi nó ngay từ lô đầu. Chỗ duy nhất biết kiểu

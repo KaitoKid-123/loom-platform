@@ -174,14 +174,13 @@ async def ingest_spec(run_id: uuid.UUID, session: AsyncSession = SessionDep) -> 
     # incremental tiếp theo dùng lại nó đúng ở mốc cũ.
     #
     # SỬA Ở TASK 12: câu cuối của chú thích này từng nói "lần full này vẫn đẩy
-    # watermark lên qua `/progress` như thường". Điều đó KHÔNG còn đúng — và
-    # cũng chưa bao giờ nên đúng: `run_full` không gọi `/progress` một lần nào
-    # (spec mục 5, "full không đụng tới stream_state", và
-    # `test_full_does_not_touch_the_watermark`). Hệ quả phải nói ra vì nó nhìn
-    # thấy được từ ngoài: cột `ingest_run.rows_written` của một run `full` đứng
-    # ở 0 tới lúc run kết thúc, vì `/progress` là đường DUY NHẤT cộng dồn nó và
-    # `/complete` cố ý không mang `rows` (xem `IngestCompletionReport`). Một
-    # thanh tiến trình cho mode `full` vì vậy chưa có số để hiển thị.
+    # watermark lên qua `/progress` như thường". Điều đó KHÔNG đúng, và nó lẫn
+    # hai thứ khác nhau vào một câu. `run_full` GỌI `/progress` cho mỗi lô, nhưng
+    # chỉ với `rows` — cả ba trường cursor để `None`, một hình dạng mà
+    # `IngestProgressReport._cursor_fields_travel_together` cho phép tường minh
+    # (nó chỉ từ chối một cursor MỘT PHẦN). Nên `ingest_run.rows_written` của một
+    # run `full` có số thật, còn `stream_state` thì không bị chạm: `_advance_
+    # watermark` dưới đây chỉ chạy khi `cursor_column` VÀ `cursor_type` đều có.
     watermark = state if (run.mode == "incremental" and state is not None) else None
 
     spec = IngestSpec(
@@ -194,6 +193,14 @@ async def ingest_spec(run_id: uuid.UUID, session: AsyncSession = SessionDep) -> 
         # connection mà RUN NÀY được tạo với, không phải hàng item nào tình cờ
         # được tra ra ở đây.
         connection_id=run.connection_id,
+        # `item.name`, KHÔNG `display_name`: `name` LÀ slug rồi — cột
+        # `String(128)` mà `ItemCreate` canh bằng `^[a-z0-9][a-z0-9-]*$`, và là
+        # cột mà `uq_item_active_name` dựng khoá duy nhất trên. Nên ở đây không
+        # có bước tạo-slug nào; có một bước tạo-slug nghĩa là hai chỗ trong hệ
+        # thống tự nghĩ ra tên bảng bronze theo hai cách. `display_name` thì
+        # ngược lại — nó là chữ cho người đọc ("Cần sửa"), có dấu và khoảng
+        # trắng, và không phải một định danh.
+        connection_slug=connection.name,
         stream=run.stream,
         # `run.mode` là `str` ở tầng ORM (cột `String(16)`) nhưng `IngestSpec.
         # mode` là `Literal["full", "incremental"]`, nên phải thu hẹp ở đây.

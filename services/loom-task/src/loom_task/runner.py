@@ -135,11 +135,49 @@ def bronze_table_name(connection_slug: str, stream: str) -> str:
     có bảng trùng tên không đụng nhau, và để đọc ngược ra được nguồn từ tên bảng.
     Một dấu gạch thôi thì `pos_public_orders` không phân biệt được với connection
     tên `pos_public` đọc bảng `orders`.
+
+    **Dấu `-` của slug thành `_`, và đó là một phép sửa lỗi, không phải trang
+    trí.** `IngestSpec.connection_slug` là `item.name`, mà `ItemCreate.name` canh
+    `^[a-z0-9][a-z0-9-]*$` — tức là tên connection THƯỜNG có gạch ngang
+    (`can-sua`, `pos-aiven`), đó là khuôn bình thường của repo này chứ không phải
+    một trường hợp biên. Và một gạch ngang trong tên bảng làm bảng đó KHÔNG TRUY
+    VẤN ĐƯỢC nếu không trích dẫn: đã dựng lại thật trên DuckDB (engine mà
+    `loom-query` chạy) — `SELECT * FROM bronze.pos-aiven__public_orders` trả
+    `ParserException: syntax error at or near "-"`, còn cùng câu đó với
+    `"pos-aiven__public_orders"` trong ngoặc kép thì chạy. Ví dụ của spec mục 5
+    cũng là `pos_aiven`, gạch DƯỚI.
+
+    Phép đổi này KHÔNG làm hai connection khác nhau đụng vào một bảng: `item.name`
+    không được phép chứa `_` (xem pattern ở trên), nên trên bộ ký tự đó phép
+    `-` -> `_` là ĐƠN ÁNH — hai tên khác nhau lệch ở ít nhất một vị trí, và sau
+    phép đổi vẫn lệch ở đúng vị trí ấy.
+
+    Chuyện KHÔNG được bảo đảm, nói ra vì nó nhìn giống chuyện trên: một tên bị
+    NHẢ RA rồi dùng lại (`uq_item_active_name` chỉ duy nhất trong phạm vi item còn
+    `active`, nên xoá mềm một connection là nhả tên nó) trỏ hai `connection_id`
+    khác nhau vào CÙNG một bảng bronze qua thời gian. Đó là lý do cột `_source`
+    mang `connection_id` chứ không mang slug — xem `IngestSpec`.
+
+    Một slug sinh ra `__` sau phép đổi (tên `pos--aiven`, hợp lệ theo pattern) bị
+    TỪ CHỐI: nó dựng một dấu ngăn thứ hai và làm chính câu "đọc ngược ra được
+    nguồn từ tên bảng" ở trên thành sai. Từ chối ồn ào chứ không thu gọn `--` về
+    một `_`: thu gọn thì `pos-aiven` và `pos--aiven` cho ra CÙNG một bảng, tức là
+    hai nguồn ghi đè lẫn nhau trong im lặng — đổi một lỗi đọc-được lấy một lỗi
+    mất dữ liệu.
     """
     schema, _, table = stream.partition(".")
     if not schema or not table:
         raise ValueError(f"stream phải là 'schema.table', nhận {stream!r}")
-    return f"bronze.{connection_slug}__{schema}_{table}"
+    encoded = connection_slug.replace("-", "_")
+    if "__" in encoded:
+        raise ValueError(
+            f"tên connection {connection_slug!r} có hai dấu ngăn liền nhau sau khi "
+            f"đổi '-' thành '_' ({encoded!r}) — nó sẽ trùng khuôn với dấu ngăn "
+            "'__' giữa phần connection và phần bảng, và tên bảng bronze không còn "
+            "đọc ngược ra được nguồn. Đổi tên connection (một dấu gạch ngang một "
+            "lần) rồi nạp lại"
+        )
+    return f"bronze.{encoded}__{schema}_{table}"
 
 
 def add_bronze_columns(batch: pa.RecordBatch, source: str, batch_id: uuid.UUID) -> pa.RecordBatch:
@@ -318,6 +356,24 @@ def run_full(
     người đó còn nguyên. Không đáng thêm một cơ chế khoá cho một khe hở mà kết
     quả xấu nhất là một run `failed` đọc được.
 
+    **BÁO SỐ DÒNG, KHÔNG BAO GIỜ BÁO CURSOR** — và hai nửa câu đó là hai tính
+    chất riêng, không phải một.
+
+    Số dòng thì báo, vì `ingest_run.rows_written` chỉ cộng dồn qua `/progress`
+    (`/complete` cố ý không mang `rows` — xem `IngestCompletionReport`), nên một
+    `run_full` im lặng để cột đó ở 0 suốt cả lần nạp và người dùng không có con số
+    nào để xem. Cursor thì KHÔNG, vì `full` đọc lại từ đầu: không có mốc nào để
+    tiến, và một watermark đẩy lên ở chế độ này làm lần `incremental` KẾ TIẾP bỏ
+    qua đúng khoảng dữ liệu vừa đọc — mất dòng, im lặng, ở một lần chạy KHÁC.
+    `IngestProgressReport` cho phép đúng hình dạng này (cả ba trường cursor
+    `None`); `test_full_reports_rows_but_never_a_cursor` canh nó.
+
+    Số dòng báo về đếm những dòng đã vào STAGING, nên một lần chạy đứt giữa chừng
+    để lại `rows_written` lớn hơn số dòng thật sự có trong bảng đích (staging bị
+    bỏ, bảng đích không đổi). Đó là hình dạng đúng của một chỉ số TIẾN ĐỘ; biến nó
+    thành một con số chỉ đúng lúc kết thúc đòi báo tất cả sau cú tráo, tức là
+    không có tiến độ nào trong lúc chạy.
+
     **KHÔNG đụng watermark, và KHÔNG đọc nó.** `connector.read` nhận
     `StreamState()` RỖNG chứ không `client.current_state()`: `full` nghĩa là đọc
     lại từ đầu (spec mục 5), và nếu một watermark lọt vào đây thì lần nạp này
@@ -333,7 +389,13 @@ def run_full(
     total = 0
     for index, batch in enumerate(connector.read(stream, StreamState())):
         enriched = add_bronze_columns(batch, client.source_id, uuid.uuid4())
+        # 1. ghi VÀ commit lô này vào staging
         sink.stage(enriched)
+        # 2. chỉ khi (1) đã xong mới báo — cùng thứ tự với `run_incremental`, dù ở
+        #    đây nó không mua được tính đúng đắn nào (không có watermark để tiến
+        #    quá dữ liệu chưa ghi). Giữ một thứ tự cho cả hai đường để không ai
+        #    phải đọc hai vòng lặp mới biết cái nào báo trước.
+        client.report_progress(rows=batch.num_rows)
         total += batch.num_rows
         if crash_after_batch is not None and index + 1 >= crash_after_batch:
             raise Boom("crash có chủ đích để kiểm bảng đích còn nguyên")

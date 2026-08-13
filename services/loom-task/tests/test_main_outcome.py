@@ -7,16 +7,19 @@ bị cắt ở dấu `@` trong mật khẩu gửi họ đi tìm một lỗi DNS 
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from doubles import RecordingClient
 
-from loom_core.schemas import IngestSourceSpec
+from loom_core.schemas import IngestSourceSpec, IngestSpec
 from loom_task.config import SourceCredentials
 from loom_task.main import (
     SourceKindNotSupported,
     _describe,
     _source_dsn,
     run_reporting_the_outcome,
+    target_table,
 )
 
 
@@ -128,6 +131,38 @@ def test_a_source_kind_without_a_connector_is_refused() -> None:
             IngestSourceSpec(kind="mysql", host="db", port=3306, database="shop"),
             SourceCredentials(source_user="loom", source_password="x"),
         )
+
+
+def _spec(*, connection_slug: str = "pos-aiven", stream: str = "public.orders") -> IngestSpec:
+    return IngestSpec(
+        run_id=uuid.uuid4(),
+        lakehouse_id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        connection_id=uuid.UUID("11111111-2222-3333-4444-555555555555"),
+        connection_slug=connection_slug,
+        stream=stream,
+        mode="full",
+        source=IngestSourceSpec(kind="postgres", host="db", port=5432, database="shop"),
+    )
+
+
+def test_the_bronze_table_is_named_after_the_connection_slug_not_its_id() -> None:
+    """Tên bảng bronze là quyết định KHÔNG SỬA ĐƯỢC sau khi có dữ liệu thật.
+
+    Đổi quy ước tên sau đó không mất một byte nào, nhưng bảng cũ biến mất khỏi mọi
+    câu truy vấn và mọi dashboard — nhìn từ phía người dùng thì đó LÀ mất dữ liệu.
+    Nên nó cần một phép canh rẻ, và `target_table` tồn tại tách khỏi `_build_sink`
+    để phép canh này chạy được mà không dựng một Lakekeeper (xem docstring của nó).
+
+    Hai vế, và vế thứ hai mới là vế bắt lỗi: tên phải LÀ slug, và phải KHÔNG chứa
+    id. `connection_id.hex` cũng cho ra một cái tên tất định, hợp lệ, chạy được —
+    chỉ là không ai đọc ngược ra nguồn được từ nó (spec mục 5 đòi
+    `bronze.pos_aiven__public_orders`).
+    """
+    spec = _spec()
+    assert target_table(spec) == "bronze.pos_aiven__public_orders"
+    assert spec.connection_id.hex not in target_table(spec)
+    assert str(spec.connection_id) not in target_table(spec)
 
 
 def _raise(exc: BaseException) -> int:

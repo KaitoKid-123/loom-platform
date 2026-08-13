@@ -124,10 +124,21 @@ class RecordingClient:
         return StreamState(cursor_column=self.cursor_column, cursor_value=self.initial_cursor)
 
     def report_progress(
-        self, *, cursor_column: str, cursor_type: str, cursor_value: str, rows: int
+        self,
+        *,
+        rows: int,
+        cursor_column: str | None = None,
+        cursor_type: str | None = None,
+        cursor_value: str | None = None,
     ) -> None:
         self.events.append(("progress", rows))
         self.progress_calls.append((cursor_column, cursor_type, cursor_value, rows))
+        # Một lời báo KHÔNG mang cursor (đường `full`) không được đụng watermark —
+        # đúng như `/progress` bên server: nó chỉ gọi `_advance_watermark` khi
+        # `cursor_column` VÀ `cursor_type` đều có. Bỏ nhánh này thì double sẽ
+        # `moves_forward(None, ...)` và nổ, che mất chính tính chất đang canh.
+        if cursor_column is None or cursor_type is None or cursor_value is None:
+            return
         # Gọi CHÍNH `moves_forward` mà `_advance_watermark` gọi — không viết lại
         # luật (xem docstring module).
         if self.initial_cursor is None or moves_forward(

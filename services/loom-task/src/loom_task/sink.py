@@ -69,11 +69,17 @@ class NothingStaged(RuntimeError):
     tồn tại là `NoSuchTableError` từ PyIceberg, một câu không nhắc gì tới việc
     nguồn đọc ra rỗng.
 
-    Nguồn RỖNG THẬT (bảng nguồn không có dòng nào) rơi vào đây, và đó là một hạn
-    chế chứ không phải hành vi mong muốn: đúng ra `full` nên thay bảng đích bằng
-    một bảng rỗng. Làm được thì phải dựng bảng staging từ schema của
-    `discover()` chứ không từ lô đầu tiên — việc thật, chưa làm, và một lần nạp
-    `failed` kèm lý do đọc được là chỗ dừng an toàn cho tới lúc làm.
+    **Thông báo phải tự đủ nghĩa, vì nó là thứ DUY NHẤT còn lại.** Nó đi vào
+    `ingest_run.error` và hiện lên UI; pod đã bị TTL dọn từ lâu khi có người đọc
+    tới, nên log của nó không còn để tra. Vì vậy thông báo nói cả ba: bảng NGUỒN
+    rỗng, TÊN STREAM nào, và bảng đích KHÔNG bị đổi.
+
+    HẠN CHẾ ĐÃ BIẾT, không phải hành vi mong muốn: một bảng nguồn rỗng THẬT đáng
+    ra phải làm `full` thay bảng đích bằng một bảng rỗng, chứ không làm run hỏng.
+    Làm đúng thì bảng staging phải dựng từ schema của `connector.discover()` thay
+    vì từ lô đầu tiên (lô đầu tiên là chỗ duy nhất bản này lấy được schema Arrow,
+    và với 0 lô thì không có lô nào cả). Chưa làm; một run `failed` kèm lý do đọc
+    được là chỗ dừng an toàn cho tới lúc làm, vì nó không chạm dữ liệu của ai.
     """
 
 
@@ -138,9 +144,17 @@ class IcebergSink:
     5.9 khả thi thay vì chỉ là một lời hứa.
     """
 
-    def __init__(self, lakehouse: Lakehouse, *, target: str, run_id: uuid.UUID) -> None:
+    def __init__(
+        self, lakehouse: Lakehouse, *, target: str, run_id: uuid.UUID, stream: str
+    ) -> None:
         self._lakehouse = lakehouse
         self._target = target
+        # `stream` KHÔNG dùng để ghi gì — nó chỉ đi vào thông báo của
+        # `NothingStaged`, và có mặt vì thông báo đó là artifact duy nhất còn lại
+        # sau khi pod bị dọn (xem `NothingStaged`). Tên bảng đích mang `<schema>_
+        # <bảng>` đã bị làm phẳng, nên nó KHÔNG nói lại được `schema.table` mà
+        # người dùng đã nhập — mà đó chính là chuỗi họ cần đối chiếu ở nguồn.
+        self._stream = stream
         self._staging = staging_table_name(target, run_id)
         self._old_target = old_target_name(target, run_id)
         # Những tên mà lần chạy NÀY đã xác nhận tồn tại. Sau lô đầu, câu hỏi
@@ -183,9 +197,11 @@ class IcebergSink:
         """Không có bảng staging thì KHÔNG tráo — xem `NothingStaged`."""
         if not self._lakehouse.exists(self._staging):
             raise NothingStaged(
-                f"mode 'full' đọc nguồn ra 0 lô nên bảng tạm {self._staging!r} chưa "
-                f"bao giờ được tạo — {self._target!r} KHÔNG bị thay đổi. Nếu bảng "
-                "nguồn thật sự rỗng, đây là hạn chế đã biết của Giai đoạn 3a"
+                f"bảng nguồn {self._stream!r} không trả về dòng nào, nên mode 'full' "
+                f"không có gì để thay vào {self._target!r} — bảng đích KHÔNG bị thay "
+                "đổi, dữ liệu cũ còn nguyên. Kiểm lại bảng nguồn có dữ liệu chưa; "
+                "một bảng nguồn RỖNG thật sự là hạn chế đã biết của Giai đoạn 3a "
+                "(Loom chưa thay được một bảng bronze bằng một bảng rỗng)"
             )
 
     def target_exists(self) -> bool:
