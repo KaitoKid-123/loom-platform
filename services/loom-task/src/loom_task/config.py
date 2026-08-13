@@ -56,6 +56,35 @@ class Settings(BaseSettings):
     shared_secret: str = Field(min_length=1)
 
 
+class LakehouseSettings(BaseSettings):
+    """Cách với tới LAKEHOUSE — lớp thứ BA, cùng lập luận tách như `SourceCredentials`.
+
+    Không gộp vào `Settings`: hai giá trị này CÓ mặc định dùng được, còn ba
+    trường của `Settings` thì không có và không được có. Gộp lại thì một lỗi
+    chính tả trong `LOOM_TASK_CATALOG_URI` không phân biệt được với một Job thiếu
+    `LOOM_TASK_RUN_ID` — hai lỗi sửa ở hai chỗ hoàn toàn khác nhau. Và như
+    `SourceCredentials`, tách ra giữ nó trong vùng BÁO ĐƯỢC LỖI: `IngestClient`
+    đã tồn tại trước khi đường ghi bronze được dựng, nên một catalog sai địa chỉ
+    thành một run `failed` kèm lý do đọc được.
+
+    **Mặc định là địa chỉ THẬT của chart ở tên release mặc định (`loom`), không
+    phải một placeholder** — nhưng `loom.fullname` đổi theo release name, nên
+    Task 15 vẫn phải truyền hai biến này TƯỜNG MINH vào env của Job, đúng cách
+    `query-deployment.yaml` làm cho `LOOM_QUERY_CATALOG_URI`/`LOOM_QUERY_S3_
+    ENDPOINT`. Mặc định ở đây chỉ giữ cho pod chạy được ở cụm local; nó không
+    phải hợp đồng triển khai.
+
+    `warehouse` KHÔNG có ở đây: mỗi lakehouse là một warehouse riêng, đặt tên
+    theo `str(lakehouse_id)` (cùng quy ước `loom_query.runner`), nên nó tới từ
+    `IngestSpec` của từng run chứ không từ môi trường của pod.
+    """
+
+    model_config = _ENV_ONLY
+
+    catalog_uri: str = "http://loom-lakekeeper.loom.svc.cluster.local:8181/catalog"
+    s3_endpoint: str = "http://minio.loom.svc.cluster.local:9000"
+
+
 class SourceCredentials(BaseSettings):
     """Cách MỞ nguồn — cặp duy nhất mà `IngestSourceSpec` cố ý KHÔNG mang.
 

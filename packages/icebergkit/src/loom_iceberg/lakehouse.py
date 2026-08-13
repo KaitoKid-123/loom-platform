@@ -71,6 +71,30 @@ class Lakehouse:
     def drop_namespace(self, namespace: str) -> None:
         self._catalog.drop_namespace(namespace)
 
+    def rename_table(self, from_qualified: str, to_qualified: str) -> None:
+        """Đổi tên một bảng trong catalog. Dữ liệu KHÔNG bị chép lại.
+
+        **Hai sự thật đã ĐO trên Lakekeeper v0.9.2 + PyIceberg 0.11.1 thật**
+        (Đo 2 mục D, `scripts/probe_iceberg_single_commit.py` — đọc phần "KẾT
+        QUẢ D ĐÃ GHI NHẬN" ở docstring script đó), vì cả hai quyết định cách
+        người gọi phải dùng phương thức này:
+
+        - **Đây là MOVE, không phải COPY** (D3): sau lời gọi, `from_qualified`
+          ném `NoSuchTableError`. Dữ liệu nguyên vẹn dưới tên mới (D2:
+          1000/1000 dòng khớp cả hai cột).
+        - **ĐÈ lên một tên ĐANG TỒN TẠI bị TỪ CHỐI** (D4:
+          `TableAlreadyExistsError`). Nên "thay bảng X bằng nội dung của bảng
+          Y" KHÔNG viết được thành một lời gọi duy nhất — nó phải là một chuỗi
+          nhiều bước, và chuỗi đó có một cửa sổ mà tên đích không phân giải
+          được. `loom_task.sink.IcebergSink` là chỗ dựng chuỗi ba bước đó, kèm
+          lý do vì sao ba chứ không hai.
+
+        KHÔNG bọc lỗi lại: một `TableAlreadyExistsError` từ PyIceberg nói đúng
+        chuyện đã xảy ra, và người gọi (chuỗi tráo bảng của `full`) cần phân
+        biệt được nó với một lỗi mạng.
+        """
+        self._catalog.rename_table(from_qualified, to_qualified)
+
     def list_tables(self, namespace: str) -> list[TableInfo]:
         return [
             TableInfo(namespace=".".join(identifier[:-1]), name=identifier[-1])

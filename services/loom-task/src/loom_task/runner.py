@@ -1,14 +1,19 @@
-"""Vòng lặp nạp `incremental`: GHI TRƯỚC, BÁO SAU. Xem spec 3a mục 3.1.
+"""HAI vòng lặp nạp, HAI hợp đồng đứt-giữa-chừng. Xem spec 3a mục 3.1.
+
+`incremental`: GHI TRƯỚC, BÁO SAU — commit từng lô, nạp lại đi tiếp.
+`full`: ghi hết vào bảng STAGING (commit từng lô), rồi TRÁO tên ba bước.
 
 `Sink` là một Protocol chứ không phải `loom_iceberg.Lakehouse` trực tiếp: nó cho
-phép kiểm THỨ TỰ và khả năng nạp lại mà không cần Iceberg, và chính thứ tự mới
-là chỗ lỗi mất-dòng sinh ra. Đường ghi Iceberg thật được kiểm ở integration.
+phép kiểm THỨ TỰ mà không cần Iceberg, và chính thứ tự mới là chỗ mất dữ liệu
+sinh ra — ở `incremental` là mất dòng im lặng, ở `full` là mất cả bảng cũ. Đường
+ghi Iceberg thật (`loom_task.sink.IcebergSink`) được kiểm ở integration.
 
-Chỉ có `run_incremental` ở đây. Đường `full` (bảng tạm rồi tráo tên — thiết kế
-"một commit ở cuối" đã bị ĐO 2 bác bỏ, xem spec mục 3.1) là việc của Task 12, và
-`Sink` cố ý CHƯA có `stage`/`promote`/`drop`: khai sẵn một phương thức mà không
-đường nào gọi và không test nào canh là mời một chữ ký sai đứng đó cho tới ngày
-có người tin nó.
+**`full` KHÔNG nguyên tử, và không có chỗ nào trong file này được nói ngược lại.**
+Thiết kế "một commit ở cuối" đã bị ĐO 2 bác bỏ bằng số: `table.transaction()` của
+PyIceberg 0.11.1 không gộp (hai `append` cho 2 snapshot), và gom trong transaction
+còn tốn 478 MiB so với 421 MiB khi commit từng lô. Cú tráo tên vì vậy phải qua
+nhiều lời gọi catalog, và giữa chúng có một cửa sổ mà tên bảng đích không phân
+giải được. `full` là GẦN nguyên tử — xem `run_full`.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from typing import Protocol
 
 import pyarrow as pa  # type: ignore[import-untyped]
 
-from loom_connector import Connector, CursorCandidate, StreamSchema
+from loom_connector import Connector, CursorCandidate, StreamSchema, StreamState
 from loom_core.cursor import format_cursor_value
 from loom_task.client import IngestClientLike
 
@@ -50,12 +55,76 @@ class CursorNotAvailable(RuntimeError):
 
 
 class Sink(Protocol):
+    """Bề mặt ghi mà HAI vòng lặp cần, và tên phương thức = tên sự kiện.
+
+    **Một Protocol cho cả hai mode, không hai.** `main._build_sink` dựng ĐÚNG
+    MỘT đối tượng cho một lần chạy (nó chưa biết mode khi dựng), nên tách thành
+    `Sink` + `FullSink` chỉ thêm một cái tên thứ hai cho cùng một lớp mà không
+    thêm phép canh nào. Đổi lại, `run_incremental` nhận một tham số khai 7
+    phương thức trong khi nó gọi 1 — nói ra để không ai đọc `Sink` thành "mọi
+    phương thức ở đây đều dùng ở mọi đường".
+
+    **Tên phương thức TRÙNG tên sự kiện mà `RecordingSink` ghi lại** (`stage`,
+    `staging_done`, `rename_target_away`, `promote_staging`, `drop_old_target`).
+    Một bản nháp trước dùng `stage`/`commit_replacing` cho protocol nhưng
+    `staging_done`/`promote_staging` cho test — hai bộ từ vựng cho một hợp đồng,
+    nên không đọc được test nào canh phương thức nào. Ngoại lệ duy nhất là
+    `append` (ghi sự kiện `"write"`, có từ Task 11): đổi nó bây giờ chỉ để cho
+    đều là sửa ba bài test đang xanh mà không mua thêm gì.
+    """
+
     def append(self, batch: pa.RecordBatch) -> None:
-        """Ghi VÀ commit ngay — hợp đồng của `incremental`.
+        """Ghi VÀ commit ngay VÀO BẢNG ĐÍCH — hợp đồng của `incremental`.
 
         Một `append` chỉ ghi file dữ liệu mà chưa commit sẽ phá đúng tính chất
         mà `run_incremental` dựa vào: sau khi nó trả về, dữ liệu của lô này phải
         ĐÃ bền, vì watermark được báo ngay sau đó.
+        """
+
+    def stage(self, batch: pa.RecordBatch) -> None:
+        """Ghi VÀ commit một lô vào bảng STAGING — không chạm bảng đích.
+
+        Commit TỪNG LÔ có chủ đích, và đây là chỗ dễ đọc ngược nhất trong cả
+        Task 12: ĐO 2 đã bác bỏ "gom rồi commit một lần" bằng số đo (không gộp
+        được snapshot, và tốn thêm 57 MiB RAM), nên commit từng lô là hành vi
+        ĐÚNG ở đây, không phải một thoả hiệp. Cái làm nó an toàn không phải số
+        lần commit mà là ĐÍCH của chúng: staging là một bảng khác, nên một lần
+        chạy đứt giữa chừng không để lại lô nửa vời trong bảng người dùng đang
+        đọc.
+        """
+
+    def staging_done(self) -> None:
+        """Chốt staging: sau lời gọi này bảng staging phải TỒN TẠI và đủ dòng.
+
+        Có mặt vì `run_full` cần một điểm phân chia QUAN SÁT ĐƯỢC giữa "đang
+        ghi" và "đang tráo" — `test_full_writes_everything_to_staging_before_
+        touching_the_target` cắt chuỗi sự kiện ở đúng đây. Và nó có việc thật:
+        một lần chạy không ghi được lô nào (nguồn rỗng) thì bảng staging chưa
+        bao giờ được tạo, và phải hỏng ồn ào ở đây thay vì hỏng ở
+        `promote_staging` dưới dạng một `NoSuchTableError` không nhắc gì tới
+        nguyên nhân.
+        """
+
+    def target_exists(self) -> bool:
+        """Bảng đích đã tồn tại chưa — quyết định lần nạp này đi đường nào.
+
+        KHÔNG ghi sự kiện: đây là một câu HỎI, và lần nạp `full` ĐẦU TIÊN của
+        một lakehouse (chưa có bảng đích) phải cho ra một chuỗi sự kiện KHÔNG
+        có `rename_target_away` nào — xem `run_full`.
+        """
+
+    def rename_target_away(self) -> None:
+        """Bước 2: `rename(đích -> đích_cũ)`. Dữ liệu cũ SỐNG dưới tên khác."""
+
+    def promote_staging(self) -> None:
+        """Bước 3: `rename(staging -> đích)`. Cửa sổ đóng lại ở đây."""
+
+    def drop_old_target(self) -> None:
+        """Bước 4: bỏ `đích_cũ` khỏi catalog. KHÔNG xoá object dưới S3.
+
+        Giai đoạn 2c đã chứng minh `drop_table` không chạm data file trên S3
+        (xem `Lakehouse.drop_table`), nên bước này giải phóng cái TÊN chứ không
+        giải phóng đĩa. Dọn đĩa là nợ có tên ở spec mục 13.
         """
 
 
@@ -202,4 +271,78 @@ def run_incremental(
         total += batch.num_rows
         if crash_after_batch is not None and index + 1 >= crash_after_batch:
             raise Boom("crash có chủ đích để kiểm nạp lại")
+    return total
+
+
+def run_full(
+    connector: Connector,
+    sink: Sink,
+    client: IngestClientLike,
+    stream: str,
+    crash_after_batch: int | None = None,
+) -> int:
+    """Đọc CẢ bảng vào staging, rồi TRÁO tên BA bước. Trả về số dòng đã đọc.
+
+    ```
+    1. ghi hết vào staging, commit TỪNG LÔ   <- RAM có chặn; đích còn nguyên
+    2. rename(đích -> đích_cũ)
+    3. rename(staging -> đích)               <- cửa sổ nằm giữa 2 và 3
+    4. drop(đích_cũ)
+    ```
+
+    **Vì sao BA bước chứ không `drop(đích)` rồi `rename(staging -> đích)`.** Hai
+    bước trông gọn hơn và là cái bẫy: nó kéo cửa sổ ra suốt thao tác `drop`, và
+    nếu `rename` hỏng ngay sau đó thì dữ liệu cũ ĐÃ MẤT còn dữ liệu mới CHƯA
+    VÀO — mất trắng, không lùi lại được. Ba bước giữ dữ liệu cũ sống dưới một
+    tên khác tới bước cuối, nên hỏng ở giữa còn đổi tên ngược lại được bằng tay.
+    `test_the_swap_renames_the_target_away_before_promoting_staging` canh đúng
+    thứ tự này.
+
+    **`full` là GẦN nguyên tử, không nguyên tử** — và không có câu nào ở đây
+    được hứa hơn thế. ĐO 2 mục D4 đã đo: `rename_table` TỪ CHỐI đè lên một tên
+    đang tồn tại, nên cú tráo không viết được thành một lời gọi duy nhất. Giữa
+    bước 2 và bước 3 có một khoảnh khắc tên bảng đích không phân giải được. Cái
+    `full` bảo đảm là KHÔNG BAO GIỜ thấy dữ liệu nửa vời; cái nó không bảo đảm
+    là bảng luôn tồn tại.
+
+    **Lần nạp `full` ĐẦU TIÊN của một lakehouse không có bảng đích**, và bước 2
+    trên một bảng không tồn tại là `NoSuchTableError`. Đường đó là `staging_done`
+    rồi `promote_staging` THẲNG — không bước 2, không bước 4. Đây là đường mà
+    MỌI lakehouse mới đi qua đúng một lần, nên nó có test riêng
+    (`test_the_very_first_full_load_has_no_target_to_rename_away`); hỏng ở đây là
+    hỏng ngay lần dùng đầu, ở đúng chỗ không ai kịp có dữ liệu để mất.
+
+    `target_exists()` rồi `rename_target_away()` là hai lời gọi tách rời, nên có
+    một khe hở lý thuyết: ai đó tạo bảng đích ngay giữa hai lời gọi. Hậu quả là
+    `promote_staging` ném `TableAlreadyExistsError` — hỏng ồn ào, dữ liệu của
+    người đó còn nguyên. Không đáng thêm một cơ chế khoá cho một khe hở mà kết
+    quả xấu nhất là một run `failed` đọc được.
+
+    **KHÔNG đụng watermark, và KHÔNG đọc nó.** `connector.read` nhận
+    `StreamState()` RỖNG chứ không `client.current_state()`: `full` nghĩa là đọc
+    lại từ đầu (spec mục 5), và nếu một watermark lọt vào đây thì lần nạp này
+    lặng lẽ trở thành một lần `incremental` mang tên `full` — rồi cú tráo THAY
+    cả bảng bằng đúng phần đuôi vừa đọc. Đó là mất dữ liệu, không phải một tối
+    ưu. `loom-api` cũng đã không gửi watermark cho mode này (xem `ingest_spec`),
+    nên đây là lớp canh thứ hai cho cùng một lỗi.
+
+    `crash_after_batch` chỉ để test (main.py không truyền): nó ném `Boom` SAU khi
+    lô thứ N vào staging, đúng chỗ đứt mà một OOMKill tạo ra — và bài test đòi
+    bảng đích lúc đó chưa bị chạm tới.
+    """
+    total = 0
+    for index, batch in enumerate(connector.read(stream, StreamState())):
+        enriched = add_bronze_columns(batch, client.source_id, uuid.uuid4())
+        sink.stage(enriched)
+        total += batch.num_rows
+        if crash_after_batch is not None and index + 1 >= crash_after_batch:
+            raise Boom("crash có chủ đích để kiểm bảng đích còn nguyên")
+
+    sink.staging_done()
+    had_target = sink.target_exists()
+    if had_target:
+        sink.rename_target_away()
+    sink.promote_staging()
+    if had_target:
+        sink.drop_old_target()
     return total

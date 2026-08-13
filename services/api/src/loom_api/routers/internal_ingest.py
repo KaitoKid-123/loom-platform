@@ -171,8 +171,17 @@ async def ingest_spec(run_id: uuid.UUID, session: AsyncSession = SessionDep) -> 
     # tồn tại từ những lần nạp gia tăng trước: "full" nghĩa là đọc lại từ đầu,
     # và đưa một watermark cho pod ở chế độ đó là mời nó lặng lẽ làm một lần
     # nạp gia tăng dưới cái tên "full". Hàng cũ vẫn NGUYÊN VẸN — lần nạp
-    # incremental tiếp theo dùng lại nó, và lần full này vẫn đẩy watermark lên
-    # qua `/progress` như thường.
+    # incremental tiếp theo dùng lại nó đúng ở mốc cũ.
+    #
+    # SỬA Ở TASK 12: câu cuối của chú thích này từng nói "lần full này vẫn đẩy
+    # watermark lên qua `/progress` như thường". Điều đó KHÔNG còn đúng — và
+    # cũng chưa bao giờ nên đúng: `run_full` không gọi `/progress` một lần nào
+    # (spec mục 5, "full không đụng tới stream_state", và
+    # `test_full_does_not_touch_the_watermark`). Hệ quả phải nói ra vì nó nhìn
+    # thấy được từ ngoài: cột `ingest_run.rows_written` của một run `full` đứng
+    # ở 0 tới lúc run kết thúc, vì `/progress` là đường DUY NHẤT cộng dồn nó và
+    # `/complete` cố ý không mang `rows` (xem `IngestCompletionReport`). Một
+    # thanh tiến trình cho mode `full` vì vậy chưa có số để hiển thị.
     watermark = state if (run.mode == "incremental" and state is not None) else None
 
     spec = IngestSpec(

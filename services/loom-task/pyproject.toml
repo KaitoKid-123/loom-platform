@@ -14,6 +14,13 @@ dependencies = [
     # (xem `packages/connectorkit/pyproject.toml`) — dòng trên vẫn cần vì service
     # NÀY import trực tiếp, và một dependency bắc cầu không phải một lời hứa.
     "loom-connector",
+    # `Lakehouse`/`build_catalog` — đường ghi bronze thật (`loom_task.sink`).
+    # KHÔNG khai `loom-storage` ở đây dù `loom-iceberg` kéo nó theo: `loom_task`
+    # không import `loom_storage` ở bất kỳ dòng nào, và khai một dependency mình
+    # không dùng là một lời hứa sai theo hướng còn lại của chú thích ở trên. Nó
+    # VẪN phải có mặt ở COPY layer của Dockerfile, vì `uv sync` phải phân giải
+    # được mọi member workspace bắc cầu — xem chú thích ở đó.
+    "loom-iceberg",
     "httpx>=0.28",
     # `add_bronze_columns` dựng `RecordBatch` — pyarrow là kiểu dữ liệu đi qua
     # toàn bộ đường nạp, không phải chi tiết cài đặt của connector.
@@ -24,6 +31,7 @@ dependencies = [
 [tool.uv.sources]
 loom-core = { workspace = true }
 loom-connector = { workspace = true }
+loom-iceberg = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

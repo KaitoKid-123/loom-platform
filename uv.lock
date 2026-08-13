@@ -1276,6 +1276,7 @@ dependencies = [
     { name = "httpx" },
     { name = "loom-connector" },
     { name = "loom-core" },
+    { name = "loom-iceberg" },
     { name = "pyarrow" },
     { name = "structlog" },
 ]
@@ -1285,6 +1286,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "loom-connector", editable = "packages/connectorkit" },
     { name = "loom-core", editable = "packages/core" },
+    { name = "loom-iceberg", editable = "packages/icebergkit" },
     { name = "pyarrow", specifier = ">=18.0" },
     { name = "structlog", specifier = ">=24.4" },
 ]

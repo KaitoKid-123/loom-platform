@@ -39,13 +39,51 @@ from loom_core.schemas import IngestCompletionReport
 
 
 class RecordingSink:
-    """Ghi lại `("write", số dòng)` theo đúng thứ tự, vào list dùng chung."""
+    """Ghi lại `(tên sự kiện, số dòng)` theo đúng thứ tự, vào list dùng chung.
 
-    def __init__(self, events: list[tuple[str, int]]) -> None:
+    Tên sự kiện TRÙNG tên phương thức của `Sink` cho cả năm bước của đường
+    `full` — xem docstring `Sink`. Riêng `append` ghi `"write"` (di sản Task 11,
+    ba bài test đang canh chuỗi đó).
+
+    **`stage` ghi `"stage"`, KHÔNG `"write"`, và khác biệt đó là cả điểm của
+    double này.** Đột biến nguy hiểm nhất của Task 12 là "bỏ staging, ghi thẳng
+    vào bảng đích": nếu hai đường ghi cùng để lại một tên sự kiện, chuỗi sự kiện
+    của bản đúng và bản sai giống nhau từng phần tử, và mọi bài test thứ tự ở
+    đây xanh cho một bản cài đặt xoá bảng của người dùng.
+
+    `has_target` mô phỏng câu trả lời của `target_exists()`: `True` là lakehouse
+    đã có bảng đích (chuỗi ba bước), `False` là lần nạp `full` ĐẦU TIÊN (không
+    có gì để đổi tên đi, không có gì để xoá).
+    """
+
+    def __init__(self, events: list[tuple[str, int]], *, has_target: bool = True) -> None:
         self.events = events
+        self.has_target = has_target
 
     def append(self, batch: pa.RecordBatch) -> None:
         self.events.append(("write", batch.num_rows))
+
+    def stage(self, batch: pa.RecordBatch) -> None:
+        self.events.append(("stage", batch.num_rows))
+
+    def staging_done(self) -> None:
+        self.events.append(("staging_done", 0))
+
+    def target_exists(self) -> bool:
+        # KHÔNG ghi sự kiện — một câu hỏi, không phải một thao tác. Ghi nó vào
+        # `events` sẽ làm `kinds[-3:]` của bài canh thứ tự đọc ra một chuỗi khác
+        # tuỳ theo bản cài đặt hỏi lúc nào, tức là biến một phép canh về THỨ TỰ
+        # TRÁO thành một phép canh về thứ tự đặt câu hỏi.
+        return self.has_target
+
+    def rename_target_away(self) -> None:
+        self.events.append(("rename_target_away", 0))
+
+    def promote_staging(self) -> None:
+        self.events.append(("promote_staging", 0))
+
+    def drop_old_target(self) -> None:
+        self.events.append(("drop_old_target", 0))
 
 
 class CollectingSink:

@@ -22,12 +22,12 @@ Thứ phủ cả ba là vòng đối chiếu của Task 13 (`job_name` tất đ�
 khối `try` dưới đây. Cái `try` này chỉ mua một thứ, và mua thật: những lỗi mà
 tiến trình CÒN SỐNG để kể lại thì được kể lại ngay, kèm lý do.
 
-**Đường ghi bronze (Iceberg) CHƯA được nối ở Task 11** — xem `_build_sink`. Vòng
-lặp `incremental` và hợp đồng thứ tự của nó đã xong và đã có phép canh; thứ còn
-thiếu là một `Sink` thật, và nó thuộc Task 12 (thiết kế staging-rồi-tráo-tên, sau
-ĐO 2). Cho tới lúc đó ảnh này chạy được, khởi động được, và ĐÓNG run bằng
-`failed` kèm đúng lý do đó — không phải kẹt ở `running`, và không phải một lần
-nạp "thành công" không ghi gì.
+**Đường ghi bronze (Iceberg) được nối Ở ĐÂY từ Task 12** — xem `_build_sink` và
+`loom_task.sink`. Cả hai mode đã có đường ghi thật: `incremental` (Task 11) ghi
+và commit từng lô vào bảng đích, `full` (Task 12) ghi vào bảng tạm rồi tráo tên
+ba bước. Cái mà `_build_sink` KHÔNG dựng nổi cho đúng spec là slug connection
+trong tên bảng bronze — `IngestSpec` không mang tên connection, xem docstring của
+nó cho khoảng trống đó và cái giá của việc để nó lại.
 """
 
 from __future__ import annotations
@@ -41,9 +41,17 @@ import structlog
 from loom_connector import Connector
 from loom_connector.postgres import PostgresConnector
 from loom_core.schemas import IngestSourceSpec, IngestSpec
+from loom_iceberg import Lakehouse, build_catalog
 from loom_task.client import IngestClient, IngestClientLike
-from loom_task.config import Settings, SourceCredentials
-from loom_task.runner import Sink, resolve_cursor, run_incremental
+from loom_task.config import LakehouseSettings, Settings, SourceCredentials
+from loom_task.runner import (
+    Sink,
+    bronze_table_name,
+    resolve_cursor,
+    run_full,
+    run_incremental,
+)
+from loom_task.sink import IcebergSink
 
 logger = structlog.get_logger(__name__)
 
@@ -62,14 +70,6 @@ class SourceKindNotSupported(RuntimeError):
     """Giai đoạn 3a chỉ đọc Postgres — `ConnectionDefinition.kind` cho phép
     `mysql`/`sqlserver`/`rest` từ Giai đoạn 1, nhưng không có connector nào cho
     chúng. Hỏng ồn ào thay vì thử một DSN Postgres tới một cổng MySQL."""
-
-
-class ModeNotBuiltYet(RuntimeError):
-    """`mode="full"` là Task 12 (bảng tạm rồi tráo tên, sau ĐO 2)."""
-
-
-class SinkNotBuiltYet(RuntimeError):
-    """Đường ghi bronze chưa được nối — xem docstring module và `_build_sink`."""
 
 
 def _source_dsn(source: IngestSourceSpec, credentials: SourceCredentials) -> str:
@@ -102,15 +102,34 @@ def _source_dsn(source: IngestSourceSpec, credentials: SourceCredentials) -> str
 
 
 def _build_sink(spec: IngestSpec) -> Sink:
-    """CHƯA có bản cài đặt. Task 12 nối `loom_iceberg.Lakehouse` vào đây.
+    """Đường ghi bronze THẬT: một `Lakehouse` trên warehouse của lakehouse này.
 
-    Không trả về một sink "tạm" ghi vào đâu đó khác: một lần nạp báo `succeeded`
-    mà không có dòng nào trong bronze là chính xác loại hỏng mà cả Task 11 tồn
-    tại để chặn — im lặng, và chỉ lộ ra khi có người đi tìm dữ liệu của mình.
+    `warehouse=str(spec.lakehouse_id)` là quy ước đã có từ Giai đoạn 2b
+    (`loom_query.runner`, và `loom_api.warehouse_provisioning` là bên tạo):
+    warehouse của Lakekeeper mang tên `item.id`, KHÔNG mang `item.name` — tên đổi
+    được, id thì không.
+
+    **Slug connection trong tên bảng bronze hiện là `connection_id.hex`, và đó là
+    một khoảng trống đã biết.** Spec mục 5 nói tên đích là
+    `bronze.<slug connection>__<schema>_<bảng>` với slug lấy từ TÊN connection
+    (`pos_aiven`), nhưng `IngestSpec` không mang tên connection — nó chỉ có
+    `connection_id` (xem `loom_core.schemas.IngestSpec`), và pod không đọc được
+    bảng `item`. Nên chỗ này dùng id: đúng, tất định, đọc ngược ra được nguồn, và
+    KHÓ ĐỌC cho người. Sửa cho đúng spec đòi thêm một trường vào `IngestSpec` và
+    một hàm tạo slug ở `loom-api` — việc thật, ngoài phạm vi Task 12, và nó phải
+    được làm TRƯỚC khi có bảng bronze thật nào tồn tại, vì đổi quy ước tên sau đó
+    làm dữ liệu cũ trông như đã biến mất.
     """
-    raise SinkNotBuiltYet(
-        f"chưa có đường ghi bronze cho lakehouse {spec.lakehouse_id} — "
-        "vòng lặp incremental đã xong, `Sink` thật là việc của Task 12"
+    lakehouse_settings = LakehouseSettings()
+    catalog = build_catalog(
+        catalog_uri=lakehouse_settings.catalog_uri,
+        warehouse=str(spec.lakehouse_id),
+        s3_endpoint=lakehouse_settings.s3_endpoint,
+    )
+    return IcebergSink(
+        Lakehouse(catalog),
+        target=bronze_table_name(spec.connection_id.hex, spec.stream),
+        run_id=spec.run_id,
     )
 
 
@@ -128,11 +147,26 @@ def _build_connector(spec: IngestSpec) -> Connector:
 
 
 def ingest(client: IngestClientLike, spec: IngestSpec) -> int:
-    """Một lần nạp `incremental`, từ spec tới dòng cuối. Trả về số dòng đã đọc."""
-    if spec.mode != "incremental":
-        raise ModeNotBuiltYet(f"mode {spec.mode!r} chưa được nối ở ảnh này — xem Task 12")
+    """Một lần nạp, từ spec tới dòng cuối. Trả về số dòng đã ĐỌC.
 
+    HAI mode, HAI hàm, không một hàm có cờ: chúng có hai hợp đồng
+    đứt-giữa-chừng khác nhau (spec mục 3.1) và chỉ một trong hai có watermark.
+
+    `resolve_cursor` chỉ chạy cho `incremental`, và đó là một tính chất chứ không
+    một tối ưu: một bảng không có cột nào dùng được làm cursor vẫn nạp `full`
+    được (xem `CursorNotAvailable`), nên hỏi cursor ở đường `full` sẽ TỪ CHỐI
+    đúng những bảng mà `full` tồn tại để phục vụ.
+    """
     connector = _build_connector(spec)
+    if spec.mode == "full":
+        logger.info("ingest.starting", stream=spec.stream, mode="full")
+        return run_full(
+            connector=connector,
+            sink=_build_sink(spec),
+            client=client,
+            stream=spec.stream,
+        )
+
     # `discover()` một lần, dùng cho việc chọn cursor (và cho phép đối chiếu
     # schema của Task 14 — cùng một lượt đọc `information_schema`, không phải
     # hai).
@@ -140,6 +174,7 @@ def ingest(client: IngestClientLike, spec: IngestSpec) -> int:
     logger.info(
         "ingest.starting",
         stream=spec.stream,
+        mode="incremental",
         cursor_column=cursor.name,
         cursor_type=cursor.cursor_type,
         resuming_from=spec.cursor_value,
