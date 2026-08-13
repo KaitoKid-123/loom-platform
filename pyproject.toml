@@ -72,6 +72,14 @@ plugins = ["pydantic.mypy"]
 module = ["testcontainers.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# kubernetes (client Python chính thức) KHÔNG có py.typed — đã kiểm trong venv
+# (`.venv/lib/python3.12/site-packages/kubernetes/py.typed` không tồn tại).
+# Đúng MỘT module đọc nó — `loom_api.jobs`, xem `test_k8s_client_guard.py` —
+# nên bỏ qua thiếu stub ở phạm vi hẹp này không mở lỗ kiểm type nào ở chỗ khác.
+module = ["kubernetes.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages", "services"]

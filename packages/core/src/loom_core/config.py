@@ -93,6 +93,22 @@ class Settings(BaseSettings):
     # `loom_query.config.Settings.catalog_uri`, field đó CÓ hậu tố `/catalog`).
     lakekeeper_url: str = "http://loom-lakekeeper.loom.svc.cluster.local:8181"
 
+    # Task nạp (Giai đoạn 3a) — cấu hình cho `loom_api.jobs.JobLauncher`, module
+    # DUY NHẤT được `import kubernetes` (xem `services/api/tests/
+    # test_k8s_client_guard.py`). Cùng khuôn DNS nội bộ "loom" viết cứng như
+    # `query_base_url`/`lakekeeper_url` ở trên.
+    task_image: str = "loom-task:dev"
+    task_namespace: str = "loom"
+    task_cpu: str = "50m"
+    # `limits.memory` cho pod nạp — 512Mi, TRÊN đỉnh RSS 421 MiB đã đo thật cho
+    # hình dạng lô 200k dòng/lô, 20 lô, còn đang bò lên ở lô cuối (xem mục 8 của
+    # docs/superpowers/specs/2026-08-11-loom-phase-3a-ingest-design.md, "ĐO 1 —
+    # KẾT QUẢ CUỐI"). Con số này CHỈ đúng cho hình dạng lô đã đo — lô lớn hơn
+    # hoặc dòng rộng hơn (nhiều cột hơn, cột kiểu lớn hơn) đòi đo lại, không
+    # suy ra được từ con số này.
+    task_memory: str = "512Mi"
+    task_api_base_url: str = "http://loom-api.loom.svc.cluster.local:8000"
+
     @field_validator(
         "public_base_url",
         "oidc_issuer",
