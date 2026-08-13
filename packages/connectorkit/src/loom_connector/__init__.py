@@ -13,6 +13,7 @@ from loom_connector.protocol import (
     CheckResult,
     ColumnSchema,
     Connector,
+    CursorCandidate,
     StreamSchema,
     StreamState,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "CheckResult",
     "ColumnSchema",
     "Connector",
+    "CursorCandidate",
     "StreamSchema",
     "StreamState",
 ]

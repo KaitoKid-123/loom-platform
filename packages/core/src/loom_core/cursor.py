@@ -159,6 +159,84 @@ def parse_cursor_value(cursor_type: str, raw: str) -> _Comparable:
     return moment
 
 
+def format_cursor_value(cursor_type: str, value: object) -> str:
+    """Giá trị Python -> CHUỖI đi trên dây. Phép nghịch của `parse_cursor_value`.
+
+    **Vì sao hàm này tồn tại thay vì một `str(value)` ở chỗ gọi.** Chuỗi này rời
+    `loom-task` qua JSON (`IngestProgressReport.cursor_value`) và được
+    `parse_cursor_value` ngay trên đọc lại, nên định dạng của nó là một HỢP ĐỒNG
+    liên-service. Với cursor nguyên thì `str(int)` an toàn. Với timestamp thì
+    KHÔNG: `str(datetime)` cho `'2026-08-13 00:00:01+00:00'` — dấu CÁCH, không
+    phải `T` — và nó đọc được chỉ vì `datetime.fromisoformat` của Python 3.11+
+    tình cờ nhận dấu cách. Đã kiểm cả hai chiều trên 3.12:
+
+        str(dt.datetime(2026, 8, 13, 0, 0, 1, tzinfo=dt.UTC))
+            -> '2026-08-13 00:00:01+00:00'          (dấu cách)
+        dt.datetime(...).isoformat()
+            -> '2026-08-13T00:00:01+00:00'          (ISO-8601 thật)
+        dt.datetime.fromisoformat('2026-08-13 00:00:01+00:00')
+            -> đọc được, KHÔNG ném
+
+    Nghĩa là một bên gửi dấu cách vẫn chạy hôm nay, và hỏng vào ngày bên đọc
+    không còn là `fromisoformat` của CPython (một Postgres `WHERE ts >= %s`, một
+    parser JS, một service viết bằng ngôn ngữ khác). Đó là loại hợp đồng chỉ
+    đứng vững nhờ may mắn, nên nó được viết ra thành một hàm có tên và có phép
+    canh — `test_a_cursor_value_survives_the_round_trip_for_every_allowed_type`.
+
+    Kiểu SAI thì NÉM, không `str()` bừa: một `datetime` gửi dưới `cursor_type`
+    `"bigint"` mà lặng lẽ thành `'2026-08-13 00:00:01+00:00'` sẽ bị chính
+    `parse_cursor_value` ở đầu kia từ chối (422) — xa chỗ gây ra, và thông báo
+    nói về một giá trị mà người đọc log không thấy mình đã tạo ra.
+    """
+    if cursor_type not in CURSOR_TYPE_ALLOWLIST:
+        raise CursorTypeNotAllowed(
+            f"cursor_type {cursor_type!r} is not usable as a watermark; "
+            f"use one of {sorted(CURSOR_TYPE_ALLOWLIST)}"
+        )
+
+    if cursor_type in _INTEGER_CURSOR_TYPES:
+        # `bool` là lớp con của `int` ở Python, nên `True` đi qua được nhánh này
+        # và thành `'True'` — một chuỗi mà `parse_cursor_value` từ chối. Loại nó
+        # ra ở đây để lỗi nổ ở BÊN GỬI, chỗ biết mình vừa đọc cột nào.
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise CursorValueUnusable(
+                f"cursor_value {value!r} is not an integer, but cursor_type is {cursor_type!r}"
+            )
+        return str(value)
+
+    if cursor_type == _DATE_CURSOR_TYPE:
+        # `datetime` LÀ lớp con của `date`, nên thứ tự hai phép kiểm là quan
+        # trọng: không loại `datetime` ra thì một cột timestamp khai là `date`
+        # cho ra `'2026-08-13T00:00:01'`, và `date.fromisoformat` ở đầu kia ném.
+        if not isinstance(value, dt.date) or isinstance(value, dt.datetime):
+            raise CursorValueUnusable(
+                f"cursor_value {value!r} is not a date, but cursor_type is {cursor_type!r}"
+            )
+        return value.isoformat()
+
+    if not isinstance(value, dt.datetime):
+        raise CursorValueUnusable(
+            f"cursor_value {value!r} is not a timestamp, but cursor_type is {cursor_type!r}"
+        )
+    # Cùng phép kiểm offset mà `parse_cursor_value` làm, ở đầu GỬI: `utcoffset()`
+    # chứ không `tzinfo is not None` (xem lý do ở hàm đó). Bắt tại đây nghĩa là
+    # pod nạp hỏng với một câu nói rõ cột nào sai kiểu, thay vì nhận một 422 mô
+    # tả chuỗi nó vừa gửi.
+    is_aware = value.utcoffset() is not None
+    if cursor_type == _AWARE_TIMESTAMP_CURSOR_TYPE and not is_aware:
+        raise CursorValueUnusable(
+            f"cursor_value {value!r} carries no UTC offset, but cursor_type is "
+            f"{_AWARE_TIMESTAMP_CURSOR_TYPE!r}"
+        )
+    if cursor_type == _NAIVE_TIMESTAMP_CURSOR_TYPE and is_aware:
+        raise CursorValueUnusable(
+            f"cursor_value {value!r} carries a UTC offset, but cursor_type is "
+            f"{_NAIVE_TIMESTAMP_CURSOR_TYPE!r}"
+        )
+    # `isoformat()`, KHÔNG `str()` — đó là toàn bộ điểm của hàm này.
+    return value.isoformat()
+
+
 def moves_forward(cursor_type: str, current: str, candidate: str) -> bool:
     """`candidate` có TIẾN LÊN so với `current` không, đọc dưới `cursor_type`.
 

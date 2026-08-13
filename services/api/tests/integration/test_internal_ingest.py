@@ -364,6 +364,9 @@ async def test_the_spec_says_what_to_ingest_and_where_from(api_world: ApiWorld) 
     assert body["run_id"] == str(run.id)
     assert body["lakehouse_id"] == str(run.lakehouse_id)
     assert body["workspace_id"] == str(api_world.ws_a)
+    # `connection_id` là thứ pod ghi vào cột bronze `_source` (spec mục 5.5) —
+    # nó không có đường nào khác để biết giá trị này, nên nó phải có mặt ở đây.
+    assert body["connection_id"] == str(run.connection_id)
     assert (body["stream"], body["mode"]) == (STREAM, "incremental")
     assert body["source"] == {
         "kind": "postgres",

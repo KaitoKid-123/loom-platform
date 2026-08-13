@@ -131,8 +131,12 @@ build-web:  ## Build image loom-web
 build-query:  ## Build image loom-query
 	docker build -f services/loom-query/Dockerfile -t loom/query:$(IMAGE_TAG) .
 
+.PHONY: build-task
+build-task:  ## Build image loom-task (chạy một lần rồi chết, không phải server)
+	docker build -f services/loom-task/Dockerfile -t loom/task:$(IMAGE_TAG) .
+
 .PHONY: build
-build: build-api build-web build-query  ## Build cả ba image
+build: build-api build-web build-query build-task  ## Build cả bốn image
 
 .PHONY: helm-validate
 helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
@@ -282,6 +286,8 @@ check-pins:  ## Chặn FROM trong Dockerfile lệch với deploy/versions.env
 		|| { echo "services/api/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
 	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/loom-query/Dockerfile \
 		|| { echo "services/loom-query/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
+	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/loom-task/Dockerfile \
+		|| { echo "services/loom-task/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
 	@echo "Pin khớp: node $(NODE_VERSION), uv $(UV_VERSION)"
 
 .PHONY: bootstrap

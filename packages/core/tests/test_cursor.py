@@ -18,9 +18,34 @@ from loom_core.cursor import (
     CURSOR_TYPE_ALLOWLIST,
     CursorTypeNotAllowed,
     CursorValueUnusable,
+    format_cursor_value,
     moves_forward,
     parse_cursor_value,
 )
+
+# Một giá trị Python cho MỖI kiểu trong allowlist. Bảng này bị khẳng định là
+# ĐẦY ĐỦ ngay dưới đây, nên thêm một kiểu vào allowlist mà quên nó là một test
+# đỏ, không phải một kiểu chưa ai kiểm phép tuần tự hoá.
+_SAMPLE_BY_TYPE: dict[str, object] = {
+    "smallint": 32_767,
+    "integer": 2_147_483_647,
+    # Chữ số nhiều hơn `integer` có chủ đích: nếu một bản cài đặt nào đó ép về
+    # int32 thì nó tràn ở đây chứ không im lặng.
+    "bigint": 9_223_372_036_854_775_807,
+    "date": dt.date(2026, 8, 13),
+    "timestamp without time zone": dt.datetime(2026, 8, 13, 0, 0, 1, 123_456),
+    "timestamp with time zone": dt.datetime(2026, 8, 13, 0, 0, 1, 123_456, tzinfo=dt.UTC),
+}
+
+
+def test_the_round_trip_table_covers_every_allowed_type() -> None:
+    """Bảng mẫu ở trên phải phủ ĐÚNG allowlist — không thiếu, không thừa.
+
+    Không có dòng này, thêm một kiểu vào `CURSOR_TYPE_ALLOWLIST` mà quên thêm
+    mẫu chỉ làm bài khứ hồi chạy ít hơn một trường hợp, và nó vẫn xanh. Kiểu
+    mới đó là kiểu DUY NHẤT chưa ai kiểm hợp đồng chuỗi cho nó.
+    """
+    assert set(_SAMPLE_BY_TYPE) == CURSOR_TYPE_ALLOWLIST
 
 
 def test_the_allowlist_is_exactly_the_six_types_the_connector_offers() -> None:
@@ -61,6 +86,79 @@ def test_every_allowed_type_can_be_parsed(cursor_type: str) -> None:
         "timestamp with time zone": "2026-08-13T00:00:01+00:00",
     }[cursor_type]
     assert parse_cursor_value(cursor_type, sample) is not None
+
+
+@pytest.mark.parametrize("cursor_type", sorted(CURSOR_TYPE_ALLOWLIST))
+def test_a_cursor_value_survives_the_round_trip_for_every_allowed_type(cursor_type: str) -> None:
+    """`parse(format(x)) == x` cho CẢ SÁU kiểu — hợp đồng chuỗi giữa hai service.
+
+    Giá trị này đi từ `loom-task` (`_max_cursor` trong `loom_task.runner`) qua
+    JSON tới `loom-api`, nơi `parse_cursor_value` đọc lại nó. Không ai canh thì
+    một bên đổi định dạng và bên kia không biết.
+
+    **Phép khứ hồi MỘT MÌNH không đủ, và đây là chỗ dễ tưởng là đủ nhất.** Nếu
+    nhánh timestamp đổi từ `isoformat()` sang `str()` — tức từ `'…T00:00:01'`
+    sang `'… 00:00:01'`, dấu CÁCH thay cho `T` — thì `parse(format(x)) == x`
+    VẪN XANH, vì `datetime.fromisoformat` của CPython 3.11+ nhận cả dấu cách.
+    Đã kiểm thật trên 3.12:
+
+        dt.datetime.fromisoformat('2026-08-13 00:00:01+00:00')  -> đọc được
+
+    Nên bài này khẳng định THÊM một tính chất của chính chuỗi trên dây: không
+    kiểu nào trong sáu kiểu có dạng chuẩn chứa dấu cách. Đó không phải chép lại
+    bản cài đặt — nó là điều kiện để chuỗi này còn đọc được bởi một bên phân
+    tích KHÔNG phải `fromisoformat` của CPython (Postgres, một parser JS, một
+    service viết bằng ngôn ngữ khác), và nó là thứ duy nhất bắt được đúng đột
+    biến trên.
+    """
+    value = _SAMPLE_BY_TYPE[cursor_type]
+    rendered = format_cursor_value(cursor_type, value)
+
+    assert parse_cursor_value(cursor_type, rendered) == value
+    assert " " not in rendered, (
+        f"{cursor_type}: {rendered!r} mang dấu cách — dạng chuẩn của cả sáu kiểu "
+        "không có dấu cách nào; xem docstring bài này"
+    )
+
+
+def test_formatting_refuses_a_value_that_is_not_of_the_type_it_claims() -> None:
+    """Ném ở BÊN GỬI, không đẩy một chuỗi sai kiểu sang cho biên bên nhận.
+
+    Cả bốn cặp dưới đây đều là lỗi chọn nhầm cột làm cursor, và cả bốn đều sẽ
+    thành 422 ở `IngestProgressReport` nếu lọt qua đây — một 422 mô tả CHUỖI
+    thay vì mô tả GIÁ TRỊ, cách chỗ gây ra nó một chặng mạng.
+    """
+    with pytest.raises(CursorValueUnusable):
+        format_cursor_value("bigint", dt.datetime(2026, 8, 13, tzinfo=dt.UTC))
+    with pytest.raises(CursorValueUnusable):
+        format_cursor_value("bigint", "1000")
+    # `datetime` LÀ lớp con của `date`: không loại nó ra thì một cột timestamp
+    # khai là `date` cho ra `'2026-08-13T00:00:01'`, và `date.fromisoformat` ném.
+    with pytest.raises(CursorValueUnusable):
+        format_cursor_value("date", dt.datetime(2026, 8, 13, 0, 0, 1))
+    # `bool` LÀ lớp con của `int` — `True` mà thành `'True'` thì đầu kia từ chối.
+    with pytest.raises(CursorValueUnusable):
+        format_cursor_value("bigint", True)
+
+
+def test_formatting_applies_the_same_offset_rule_as_parsing() -> None:
+    """Hai đầu của cùng một luật, để chúng không thể trôi khỏi nhau.
+
+    `parse_cursor_value` từ chối một `timestamptz` không có offset (và ngược
+    lại) vì Python không so được naive với aware. Nếu bên GỬI không có cùng
+    phép kiểm thì lỗi đó vẫn xảy ra, chỉ là ở xa hơn một chặng mạng.
+    """
+    with pytest.raises(CursorValueUnusable, match="offset"):
+        format_cursor_value("timestamp with time zone", dt.datetime(2026, 8, 13, 0, 0, 1))
+    with pytest.raises(CursorValueUnusable, match="offset"):
+        format_cursor_value(
+            "timestamp without time zone", dt.datetime(2026, 8, 13, 0, 0, 1, tzinfo=dt.UTC)
+        )
+
+
+def test_formatting_refuses_a_type_outside_the_allowlist() -> None:
+    with pytest.raises(CursorTypeNotAllowed):
+        format_cursor_value("numeric", 1)
 
 
 def test_an_integer_cursor_compares_numerically_not_lexicographically() -> None:

@@ -34,6 +34,7 @@ import pytest
 from psycopg import sql
 
 from loom_connector.protocol import Connector, StreamState
+from loom_core.cursor import CURSOR_TYPE_ALLOWLIST
 
 # ConnectorFactory: (số dòng muốn có) -> Connector sẵn sàng dùng. Mỗi cài đặt
 # tự quyết "số dòng" nghĩa là gì (bảng in-memory, bảng Postgres đã seed, ...) —
@@ -188,20 +189,34 @@ def test_discover_returns_at_least_one_stream_with_columns(
 
 
 def test_candidate_cursors_are_real_columns(connector_factory: ConnectorFactory) -> None:
-    """Mỗi tên trong `candidate_cursors` phải là một cột THẬT của chính stream đó.
+    """Mỗi ứng viên cursor phải là một cột THẬT của chính stream đó, và mang một
+    KIỂU mà `loom-api` chấp nhận.
 
     Một cursor trỏ tới cột không tồn tại là cấu hình chết ngay từ lúc khai
     báo — nhưng nó không nổ ra ở `discover()`, nó nằm im cho tới lần đọc gia
     tăng (incremental) đầu tiên dùng cursor đó, tức là xa hẳn chỗ gây ra nó.
     Bài này bắt lỗi tại nguồn, lúc discover(), thay vì tại nơi nó phát tác.
+
+    Vế `cursor_type` là vế THỨ HAI của cùng lớp lỗi, và nó có thật: `loom-task`
+    gửi chuỗi này nguyên văn tới `/internal/ingest/{run_id}/progress`, nơi
+    `IngestProgressReport` từ chối (422) mọi kiểu ngoài `CURSOR_TYPE_ALLOWLIST`.
+    Một connector khai `"int4"` (tên `pg_catalog`, không phải tên
+    `information_schema`) hay `"BIGINT"` hoa vẫn qua được mọi bài khác trong bộ
+    này, rồi làm MỌI lần báo tiến độ của nó 422 — watermark không bao giờ tiến,
+    và mỗi lần nạp đọc lại từ đầu.
     """
     connector = connector_factory(_DEFAULT_ROWS)
     for stream in connector.discover():
         column_names = {c.name for c in stream.columns}
         for cursor in stream.candidate_cursors:
-            assert cursor in column_names, (
-                f"stream '{stream.name}' khai báo candidate_cursor '{cursor}' "
+            assert cursor.name in column_names, (
+                f"stream '{stream.name}' khai báo candidate_cursor '{cursor.name}' "
                 f"nhưng không có cột nào tên vậy trong {sorted(column_names)}"
+            )
+            assert cursor.cursor_type in CURSOR_TYPE_ALLOWLIST, (
+                f"stream '{stream.name}' khai báo cursor '{cursor.name}' kiểu "
+                f"'{cursor.cursor_type}' — `loom-api` chỉ nhận "
+                f"{sorted(CURSOR_TYPE_ALLOWLIST)}"
             )
 
 
@@ -271,7 +286,7 @@ def test_cursor_filter_is_inclusive_not_exclusive(connector_factory: ConnectorFa
     """
     connector = connector_factory(_DEFAULT_ROWS)
     stream = connector.discover()[0]
-    cursor_column = stream.candidate_cursors[0]
+    cursor_column = stream.candidate_cursors[0].name
 
     full_batches = list(connector.read(stream.name, StreamState()))
     full_table = pa.Table.from_batches(full_batches)

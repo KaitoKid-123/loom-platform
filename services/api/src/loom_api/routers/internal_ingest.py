@@ -179,6 +179,12 @@ async def ingest_spec(run_id: uuid.UUID, session: AsyncSession = SessionDep) -> 
         run_id=run.id,
         lakehouse_id=run.lakehouse_id,
         workspace_id=run.workspace_id,
+        # Lấy từ hàng `ingest_run`, không từ `connection.id` vừa tra ở trên: hai
+        # giá trị luôn bằng nhau (câu tra dùng chính `run.connection_id`), nhưng
+        # đọc từ `run` nói đúng nguồn sự thật — cột `_source` của bronze phải ghi
+        # connection mà RUN NÀY được tạo với, không phải hàng item nào tình cờ
+        # được tra ra ở đây.
+        connection_id=run.connection_id,
         stream=run.stream,
         # `run.mode` là `str` ở tầng ORM (cột `String(16)`) nhưng `IngestSpec.
         # mode` là `Literal["full", "incremental"]`, nên phải thu hẹp ở đây.

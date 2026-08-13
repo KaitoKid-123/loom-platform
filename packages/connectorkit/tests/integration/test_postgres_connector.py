@@ -59,7 +59,16 @@ def test_discover_finds_the_table_columns_and_right_candidate_cursors(
     # `amount` là NUMERIC — sắp xếp được nhưng không đảm bảo tăng dần theo
     # thời gian chèn. `note` là TEXT — sắp theo từ điển, không theo thời gian.
     # Chỉ còn "id" và "placed_at" là watermark AN TOÀN.
-    assert set(stream.candidate_cursors) == {"id", "placed_at"}
+    #
+    # Khẳng định cả KIỂU, không chỉ tên: chuỗi kiểu này đi nguyên văn tới
+    # `/internal/ingest/{run_id}/progress` và bị `CURSOR_TYPE_ALLOWLIST` kiểm ở
+    # đó (xem `CursorCandidate`), nên nó phải là tên của `information_schema`
+    # (`timestamp with time zone`) chứ không phải tên `pg_catalog` (`timestamptz`
+    # — đúng chữ mà `CREATE TABLE` trong fixture dùng).
+    assert {(c.name, c.cursor_type) for c in stream.candidate_cursors} == {
+        ("id", "integer"),
+        ("placed_at", "timestamp with time zone"),
+    }
 
 
 def test_nullable_is_read_from_the_source_not_guessed(

@@ -36,13 +36,40 @@ class ColumnSchema:
 
 
 @dataclass(frozen=True, slots=True)
+class CursorCandidate:
+    """Một cột DÙNG ĐƯỢC làm watermark, và KIỂU mà phép so sánh phải đọc nó dưới.
+
+    **Hai trường đi cùng nhau vì chúng vô dụng khi tách rời.** Đường báo tiến độ
+    (`IngestProgressReport`) đòi `cursor_column` VÀ `cursor_type` cùng lúc —
+    thiếu kiểu thì `loom-api` chỉ so được CHUỖI, và so chuỗi trên một cursor
+    `bigint` làm watermark kẹt vĩnh viễn ở lần đầu vượt mốc đổi số chữ số (xem
+    `loom_core.cursor`). Nên một `candidate_cursors` chỉ mang TÊN buộc người gọi
+    phải tìm kiểu ở đâu đó khác, và chỗ "đâu đó khác" duy nhất còn lại là suy
+    ngược từ `ColumnSchema.arrow_type` — tức là dựng một bản ánh xạ NGƯỢC của
+    `_ARROW_TYPE_MAP` (`postgres.py`) và giữ hai bảng khớp nhau bằng trí nhớ.
+    Bản ánh xạ đó còn không phải song ánh: `text`, `numeric`, `uuid`, `json` đều
+    về `pa.string()`, nên chiều ngược không xác định.
+
+    `cursor_type` là chuỗi kiểu của NGUỒN, khớp chính xác `CURSOR_TYPE_ALLOWLIST`
+    ở `loom_core.cursor` (giá trị `information_schema.columns.data_type` của
+    Postgres). Connector đã đọc chuỗi đó để LỌC ra danh sách này, nên nó có sẵn
+    trong tay — bản trước ném nó đi, rồi `loom-task` phải đoán lại.
+    `test_candidate_cursors_are_real_columns` canh cả hai trường.
+    """
+
+    name: str
+    cursor_type: str
+
+
+@dataclass(frozen=True, slots=True)
 class StreamSchema:
     name: str
     columns: tuple[ColumnSchema, ...]
-    # Cột DÙNG ĐƯỢC làm watermark. Để connector tự nêu thay vì bắt `loom-api`
-    # đoán từ kiểu dữ liệu: mỗi nguồn có quy ước riêng, và chỉ connector mới biết
-    # cột nào thật sự không-giảm-dần ở nguồn đó.
-    candidate_cursors: tuple[str, ...]
+    # Cột DÙNG ĐƯỢC làm watermark, KÈM kiểu nguồn của nó (xem `CursorCandidate`).
+    # Để connector tự nêu thay vì bắt `loom-api` đoán từ kiểu dữ liệu: mỗi nguồn
+    # có quy ước riêng, và chỉ connector mới biết cột nào thật sự không-giảm-dần
+    # ở nguồn đó.
+    candidate_cursors: tuple[CursorCandidate, ...]
 
 
 @dataclass(frozen=True, slots=True)

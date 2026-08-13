@@ -35,7 +35,13 @@ import pyarrow as pa  # type: ignore[import-untyped]
 from psycopg import sql
 from psycopg.rows import dict_row
 
-from loom_connector.protocol import CheckResult, ColumnSchema, StreamSchema, StreamState
+from loom_connector.protocol import (
+    CheckResult,
+    ColumnSchema,
+    CursorCandidate,
+    StreamSchema,
+    StreamState,
+)
 from loom_core.cursor import CURSOR_TYPE_ALLOWLIST
 
 # Kiểu Postgres DÙNG ĐƯỢC làm watermark. Danh sách và LÝ DO loại TEXT/NUMERIC
@@ -189,8 +195,14 @@ class PostgresConnector:
                 ColumnSchema(name=name, arrow_type=_arrow_type_for(pg_type), nullable=nullable)
                 for name, pg_type, nullable in cols
             )
+            # Kiểu đi CÙNG tên, không bị ném đi: `pg_type` ở đây chính là chuỗi
+            # mà `loom-api` sẽ kiểm lại khi pod nạp báo `cursor_type` về, và nó
+            # đã nằm trong tay ở đúng dòng này. Xem `CursorCandidate` cho lý do
+            # suy ngược từ `arrow_type` không phải một phương án.
             candidate_cursors = tuple(
-                name for name, pg_type, _ in cols if pg_type in CURSOR_TYPE_ALLOWLIST
+                CursorCandidate(name=name, cursor_type=pg_type)
+                for name, pg_type, _ in cols
+                if pg_type in CURSOR_TYPE_ALLOWLIST
             )
             streams.append(
                 StreamSchema(

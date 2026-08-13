@@ -27,6 +27,7 @@ import pyarrow as pa  # type: ignore[import-untyped]
 from loom_connector.protocol import (
     CheckResult,
     ColumnSchema,
+    CursorCandidate,
     StreamSchema,
     StreamState,
 )
@@ -42,7 +43,17 @@ _SCHEMA = StreamSchema(
     ),
     # Cả hai cùng ứng viên: `id` tăng dần vì nó là thứ tự chèn, `updated_at`
     # tăng dần vì đây là fake dựng sẵn (không mô phỏng cập nhật ngoài thứ tự).
-    candidate_cursors=("id", "updated_at"),
+    #
+    # `cursor_type="bigint"` chứ không một chuỗi tuỳ ý: nó phải nằm trong
+    # `CURSOR_TYPE_ALLOWLIST` (`loom-api` từ chối mọi kiểu ngoài đó) và phải nói
+    # ĐÚNG về dữ liệu fake này — cả hai cột là `pa.int64()`, mà `bigint` là tên
+    # Postgres của int64. Khai `integer` ở đây sẽ là một lời nói dối nhỏ mà
+    # `loom-task` không có cách nào phát hiện, và nó sẽ đi thẳng vào
+    # `stream_state.cursor_type` của một lần nạp thật.
+    candidate_cursors=(
+        CursorCandidate(name="id", cursor_type="bigint"),
+        CursorCandidate(name="updated_at", cursor_type="bigint"),
+    ),
 )
 
 

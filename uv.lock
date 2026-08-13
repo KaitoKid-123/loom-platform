@@ -16,6 +16,7 @@ members = [
     "loom-query",
     "loom-sql",
     "loom-storage",
+    "loom-task",
 ]
 
 [manifest.dependency-groups]
@@ -1266,6 +1267,27 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "boto3", specifier = ">=1.35" }]
+
+[[package]]
+name = "loom-task"
+version = "0.1.0"
+source = { editable = "services/loom-task" }
+dependencies = [
+    { name = "httpx" },
+    { name = "loom-connector" },
+    { name = "loom-core" },
+    { name = "pyarrow" },
+    { name = "structlog" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "loom-connector", editable = "packages/connectorkit" },
+    { name = "loom-core", editable = "packages/core" },
+    { name = "pyarrow", specifier = ">=18.0" },
+    { name = "structlog", specifier = ">=24.4" },
+]
 
 [[package]]
 name = "mako"

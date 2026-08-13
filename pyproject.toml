@@ -35,6 +35,7 @@ src = [
     "packages/connectorkit/src",
     "services/api/src",
     "services/loom-query/src",
+    "services/loom-task/src",
 ]
 
 [tool.ruff.lint]
@@ -59,6 +60,7 @@ files = [
     "services/api/src",
     "services/api/migrations",
     "services/loom-query/src",
+    "services/loom-task/src",
     "scripts",
 ]
 plugins = ["pydantic.mypy"]

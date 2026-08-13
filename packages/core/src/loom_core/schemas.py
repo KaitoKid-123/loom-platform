@@ -397,11 +397,19 @@ class IngestSpec(BaseModel):
 
     `workspace_id` có mặt để pod ghi vào đúng prefix storage; nó lấy TỪ hàng
     `ingest_run` (được điền từ lakehouse lúc tạo run), không phải từ pod.
+
+    `connection_id` có mặt vì cột bronze `_source` LÀ nó (spec 3a mục 5.5: "biết
+    dòng tới từ nguồn nào"), và pod không có đường nào khác để biết: nó chỉ được
+    cấp `run_id`, và bảng `ingest_run` thì nó không đọc được (không có credential
+    Postgres control plane — xem `routers/internal_ingest.py`). Một id, không
+    phải một bí mật: `test_the_spec_never_mentions_a_password_or_a_secret` quét
+    toàn bộ thân phản hồi và trường này nằm trong phạm vi quét đó.
     """
 
     run_id: uuid.UUID
     lakehouse_id: uuid.UUID
     workspace_id: uuid.UUID
+    connection_id: uuid.UUID
     stream: str
     mode: Literal["full", "incremental"]
     source: IngestSourceSpec

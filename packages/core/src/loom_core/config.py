@@ -98,7 +98,14 @@ class Settings(BaseSettings):
     # DUY NHẤT được `import kubernetes` (xem `services/api/tests/
     # test_k8s_client_guard.py`). Cùng khuôn DNS nội bộ "loom" viết cứng như
     # `query_base_url`/`lakekeeper_url` ở trên.
-    task_image: str = "loom-task:dev"
+    # `loom/task:dev`, cùng khuôn `loom/api`/`loom/web`/`loom/query` — ba ảnh kia
+    # dùng dấu GẠCH CHÉO (xem `deploy/helm/loom/values.yaml` và các target
+    # `build-*` trong Makefile). Task 7 viết `loom-task:dev` khi chưa có
+    # Dockerfile nào để đối chiếu; đổi ở đây để tag mà Tilt nạp vào node
+    # (`loom-task-image` trong Tiltfile) và tag mà Job yêu cầu là CÙNG một chuỗi.
+    # Lệch nhau thì pod nạp `ImagePullBackOff` đi hỏi docker.io, và hàng
+    # `ingest_run` kẹt ở `pending`.
+    task_image: str = "loom/task:dev"
     task_namespace: str = "loom"
     task_cpu: str = "50m"
     # `limits.memory` cho pod nạp — 512Mi, TRÊN đỉnh RSS 421 MiB đã đo thật cho
