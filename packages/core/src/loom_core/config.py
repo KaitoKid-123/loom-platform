@@ -113,16 +113,25 @@ class Settings(BaseSettings):
     # `JobLauncher.launch`); nó không đọc nội dung, và không có trường nào ở đây
     # để nó đọc.
     #
-    # Mặc định trỏ vào Secret `loom-app` khoá `query-shared-secret` — CÙNG bí
-    # mật mà Giai đoạn 2b đã cấp phát cho loom-query (xem `secret.yaml` và
-    # `loom_core.internal_auth`). Dùng LẠI chứ không cấp thêm một bí mật thứ
-    # hai là một lựa chọn có giá, ghi ra chứ không giấu: `loom-api` đã biết
-    # giá trị đó dưới tên `query_shared_secret`, nên `/internal/ingest/*`
-    # (Task 10) so khớp được ngay mà không cần một Secret nữa phải tồn tại
-    # trước khi Job chạy được — nhưng đổi lại, một pod nạp bị chiếm cũng cầm
-    # đúng bí mật để giả làm `loom-api` khi gọi `loom-query`. Tách đôi khi cần
-    # là đổi hai trường này (và thêm một khoá vào `secret.yaml`), không phải
-    # sửa mã.
+    # Mặc định `loom-app` chỉ ĐÚNG cho một lần install chart với
+    # `oidc.existingSecret` để trống (local) — đó là lúc `secret.yaml` được
+    # render, dưới tên `<fullname>-app`. Dev/prod đặt
+    # `oidc.existingSecret: loom-app-secrets` và khi đó `secret.yaml` KHÔNG
+    # render chút nào, nên `api-deployment.yaml` PHẢI truyền
+    # `LOOM_TASK_SHARED_SECRET_NAME={{ include "loom.appSecretName" . }}` (nó
+    # có truyền — cùng biểu thức với `LOOM_QUERY_SHARED_SECRET` ngay trên đó).
+    # Thiếu dòng ấy, Job nạp hỏi một Secret không tồn tại: pod kẹt ở
+    # `CreateContainerConfigError` còn hàng `ingest_run` kẹt ở `pending`.
+    #
+    # Khoá `query-shared-secret` là CÙNG bí mật Giai đoạn 2b đã cấp cho
+    # loom-query (xem `loom_core.internal_auth`). Dùng LẠI chứ không cấp thêm
+    # một bí mật thứ hai là một lựa chọn có giá, ghi ra chứ không giấu:
+    # `loom-api` đã biết giá trị đó dưới tên `query_shared_secret`, nên
+    # `/internal/ingest/*` (Task 10) so khớp được ngay mà không cần một Secret
+    # nữa phải tồn tại trước khi Job chạy được — nhưng đổi lại, một pod nạp bị
+    # chiếm cũng cầm đúng bí mật để giả làm `loom-api` khi gọi `loom-query`.
+    # Tách đôi khi cần là thêm một khoá vào `secret.yaml` và đổi
+    # `task_shared_secret_key`, không phải sửa mã.
     task_shared_secret_name: str = "loom-app"  # noqa: S105 — tên Secret, không phải giá trị
     task_shared_secret_key: str = "query-shared-secret"  # noqa: S105 — tên khoá
 

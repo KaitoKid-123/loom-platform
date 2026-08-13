@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom_api.models import DEFAULT_TENANT_ID, IngestRun, Item
@@ -30,8 +30,12 @@ from .conftest import ApiWorld
 
 pytestmark = pytest.mark.integration
 
-# `#password` là KHOÁ bên trong Secret, không phải mật khẩu — xem `SECRET_REF_RE`.
-K8S_REF = "k8s://loom/source-pg#password"
+# `#<key>` là KHOÁ bên trong Secret, không phải mật khẩu — xem `SECRET_REF_RE`.
+# Hằng số riêng cho phần khoá vì một phép kiểm dưới đây khẳng định nó KHÔNG đi
+# tới launcher; dẫn câu khẳng định đó từ chính hằng số dựng ref là cách duy nhất
+# để nó không lặng lẽ thành no-op khi ai đó đổi giá trị ở đây.
+REF_KEY = "pg-app-credentials"
+K8S_REF = f"k8s://loom/source-pg#{REF_KEY}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +163,26 @@ async def _run_row(world: ApiWorld, run_id: uuid.UUID) -> IngestRun:
     return row
 
 
+async def _run_count(world: ApiWorld, lakehouse_id: uuid.UUID) -> int:
+    """Số hàng `ingest_run` cho lakehouse này — ĐẾM TRÊN DATABASE THẬT.
+
+    Cần vì `launched == []` một mình không nói được gì về Postgres: một bản cài
+    đặt tạo hàng run TRƯỚC khi qua cổng `secret_ref` vẫn không phóng Job nào,
+    nên nó xanh y nguyên trong khi để lại rác `pending` cho mỗi lần người dùng
+    gõ sai. Docstring module viết cả một đoạn về "ghi Postgres TRƯỚC, phóng Job
+    SAU"; đây là chỗ khẳng định vế còn lại — bị từ chối thì KHÔNG hàng nào.
+    """
+    maker = async_sessionmaker(world.engine, expire_on_commit=False)
+    async with maker() as session:
+        return (
+            await session.execute(
+                select(func.count())
+                .select_from(IngestRun)
+                .where(IngestRun.lakehouse_id == lakehouse_id)
+            )
+        ).scalar_one()
+
+
 async def test_a_viewer_cannot_start_an_ingest(api_world: ApiWorld) -> None:
     """403, và KHÔNG có Job nào được phóng.
 
@@ -204,14 +228,20 @@ async def test_the_run_row_is_pending_and_carries_the_lakehouse_workspace(
     """`workspace_id` của hàng `ingest_run` lấy TỪ LAKEHOUSE, không từ client —
     client không có ô nào để khai nó, và đó là cố ý (xem `IngestStartRequest`).
 
+    Lakehouse ở `ws_a`, connection ở `ws_b` — CỐ Ý khác nhau. Với cả hai ở cùng
+    một workspace, câu khẳng định dưới đây xanh y nguyên cho một bản cài đặt
+    lấy `workspace_id` từ CONNECTION, tức là canh một thứ nó không thấy.
+
     `status='pending'` là trạng thái ĐÚNG ngay sau khi phóng: nó nghĩa là "ý
     định đã bền trong Postgres, Job đã được yêu cầu". Chỉ pod nạp mới được
     chuyển nó sang `running` (Task 10), nên một bản cài đặt ghi thẳng
     `running` ở đây đang nói dối về một thứ nó không quan sát được.
     """
     await api_world.grant(("workspace", api_world.ws_a), Role.contributor)
-    lakehouse_id = await _lakehouse(api_world)
-    connection_id = await _connection(api_world)
+    # viewer là đủ cho cổng `item.read` trên connection — xem docstring module.
+    await api_world.grant(("workspace", api_world.ws_b), Role.viewer)
+    lakehouse_id = await _lakehouse(api_world, api_world.ws_a)
+    connection_id = await _connection(api_world, workspace_id=api_world.ws_b)
     _launcher(api_world)
 
     response = await api_world.client.post(
@@ -222,18 +252,28 @@ async def test_the_run_row_is_pending_and_carries_the_lakehouse_workspace(
     assert response.status_code == 202, response.text
     row = await _run_row(api_world, uuid.UUID(response.json()["run_id"]))
     assert row.workspace_id == api_world.ws_a
+    # Giữ dòng này: nó nói ra VÌ SAO fixture trải trên hai workspace, để không
+    # ai "đơn giản hoá" connection về lại `ws_a` và biến phép kiểm trên thành
+    # một câu luôn đúng.
+    assert row.workspace_id != api_world.ws_b
     assert row.lakehouse_id == lakehouse_id
     assert row.connection_id == connection_id
     assert (row.status, row.mode, row.stream) == ("pending", "incremental", "public.orders")
 
 
-async def test_the_secret_value_never_reaches_the_launcher(api_world: ApiWorld) -> None:
-    """`loom-api` chuyển TÊN Secret, không bao giờ đọc giá trị. Phép kiểm này
-    khoá đúng lời hứa của Giai đoạn 1 mà `SECRET_REF_RE` bảo vệ ở đầu kia.
+async def test_only_the_secret_name_reaches_the_launcher(api_world: ApiWorld) -> None:
+    """`loom-api` chuyển TÊN Secret và KHÔNG GÌ KHÁC.
 
-    Cả KHOÁ (`#password`) cũng không đi qua: `envFrom` chiếu TOÀN BỘ Secret
-    vào pod, nên launcher chỉ cần cái tên. Một bản cài đặt chuyền thêm khoá
-    (hay tệ hơn, đi đọc Secret để lấy giá trị) sẽ làm vế thứ hai đỏ.
+    Cả KHOÁ cũng không đi qua: `envFrom` chiếu TOÀN BỘ Secret vào pod, nên
+    launcher chỉ cần cái tên. Khẳng định trên `REF_KEY` (dẫn từ chính hằng số
+    dựng ref) chứ không trên chữ "password": một chuỗi chung chung sẽ lặng lẽ
+    thành no-op ngay khi ai đó đổi khoá trong fixture.
+
+    Không có giá trị Secret THẬT nào trong bài test này — không có k8s Secret
+    nào tồn tại — nên thứ đang thật sự được canh là hẹp hơn tên gọi cũ hứa:
+    không mảnh nào của `secret_ref` ngoài phần `name` đi tới launcher. Đẳng
+    thức toàn bộ `_LaunchCall` ở dưới là cách nói điều đó cho MỌI trường cùng
+    lúc, kể cả trường ai đó thêm vào sau.
     """
     await api_world.grant(("workspace", api_world.ws_a), Role.contributor)
     lakehouse_id = await _lakehouse(api_world)
@@ -245,8 +285,22 @@ async def test_the_secret_value_never_reaches_the_launcher(api_world: ApiWorld) 
     )
 
     (call,) = launcher.launched
-    assert call.secret_name == "source-pg"
-    assert "password" not in repr(call).lower()
+    settings = api_world.app.state.settings
+    # Đẳng thức TOÀN BỘ lời gọi, không chỉ một trường: `_LaunchCall` có hình
+    # dạng cố định, nên đây là câu khẳng định mạnh nhất có thể — không trường
+    # nào mang thêm được gì. Bao luôn cặp bí mật chia sẻ và cpu/memory: chúng
+    # tới từ Settings, và pod nạp đọc bí mật qua `secretKeyRef` từ cặp đó chứ
+    # không từ một giá trị `loom-api` đọc hộ.
+    assert call == _LaunchCall(
+        run_id=call.run_id,
+        secret_name="source-pg",
+        shared_secret_ref=(settings.task_shared_secret_name, settings.task_shared_secret_key),
+        cpu=settings.task_cpu,
+        memory=settings.task_memory,
+    )
+    blob = repr(call)
+    assert REF_KEY not in blob
+    assert "k8s://" not in blob
 
 
 async def test_an_unknown_mode_is_rejected(api_world: ApiWorld) -> None:
@@ -264,6 +318,7 @@ async def test_an_unknown_mode_is_rejected(api_world: ApiWorld) -> None:
 
     assert response.status_code == 422, response.text
     assert launcher.launched == []
+    assert await _run_count(api_world, lakehouse_id) == 0
 
 
 async def test_a_vault_secret_ref_is_rejected_at_local(api_world: ApiWorld) -> None:
@@ -287,6 +342,9 @@ async def test_a_vault_secret_ref_is_rejected_at_local(api_world: ApiWorld) -> N
     # "vault://" — xem `test_a_vault_ref_says_why_it_cannot_work_here`.
     assert "k8s://" in detail
     assert launcher.launched == []
+    # Bị từ chối thì KHÔNG hàng `ingest_run` nào — đây là dòng đỏ lên nếu ai đó
+    # chuyển `session.add(run)`/`commit()` lên TRƯỚC cổng `secret_ref`.
+    assert await _run_count(api_world, lakehouse_id) == 0
 
 
 async def test_a_connection_the_caller_cannot_see_is_not_found(api_world: ApiWorld) -> None:
@@ -340,24 +398,39 @@ async def test_an_id_that_is_not_a_connection_is_not_found(api_world: ApiWorld) 
     assert launcher.launched == []
 
 
-async def test_the_shared_secret_is_passed_by_name_and_key(api_world: ApiWorld) -> None:
-    """Pod nạp nhận bí mật chia sẻ qua `secretKeyRef` — `loom-api` chuyển cặp
-    (tên Secret, khoá) lấy từ Settings và không bao giờ đọc giá trị. Cùng lời
-    hứa như secret nguồn, chỉ khác là cặp này do người vận hành cấu hình chứ
-    không do người dùng nhập."""
+async def test_a_corrupt_connection_definition_is_not_blamed_on_the_request(
+    api_world: ApiWorld,
+) -> None:
+    """Definition đã lưu bị hỏng -> 409, KHÔNG phải 422 "the submitted data is
+    not valid".
+
+    Thân request ở đây hoàn toàn hợp lệ. Để `ValidationError` rơi vào
+    `_pydantic_validation_handler` sẽ gắn `loc: ["body", "secret_ref"]` vào một
+    ô KHÔNG TỒN TẠI trong `IngestStartRequest` — frontend đi tô một trường
+    không có, còn người dùng đọc được rằng thứ họ vừa gửi sai, trong khi thứ
+    sai là item connection từ một lần lưu trước.
+
+    Hàng `definition` chèn thẳng qua SQL (không qua `ItemStore`) vì đó đúng là
+    hình dạng dữ liệu đang được nói tới: một hàng đã lọt vào database và không
+    còn parse được — do migration, do sửa tay, hoặc do một phiên bản schema cũ.
+    """
     await api_world.grant(("workspace", api_world.ws_a), Role.contributor)
     lakehouse_id = await _lakehouse(api_world)
-    connection_id = await _connection(api_world)
+    connection_id = await _insert_item(
+        api_world,
+        api_world.ws_a,
+        ItemType.connection,
+        f"conn-{uuid.uuid4().hex[:8]}",
+        # Thiếu `host`/`port`/`secret_ref` — `ConnectionDefinition` từ chối.
+        {"schema_version": 1, "kind": "postgres"},
+    )
     launcher = _launcher(api_world)
 
-    await api_world.client.post(
+    response = await api_world.client.post(
         f"/api/v1/lakehouses/{lakehouse_id}/ingest", json=_body(connection_id)
     )
 
-    settings = api_world.app.state.settings
-    (call,) = launcher.launched
-    assert call.shared_secret_ref == (
-        settings.task_shared_secret_name,
-        settings.task_shared_secret_key,
-    )
-    assert (call.cpu, call.memory) == (settings.task_cpu, settings.task_memory)
+    assert response.status_code == 409, response.text
+    assert "connection" in response.json()["detail"]
+    assert launcher.launched == []
+    assert await _run_count(api_world, lakehouse_id) == 0

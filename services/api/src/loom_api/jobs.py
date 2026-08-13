@@ -24,9 +24,38 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from typing import Protocol
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+
+
+class JobLauncherLike(Protocol):
+    """Đúng phần bề mặt của `JobLauncher` mà đường nạp (Task 9) gọi tới.
+
+    Ở CẠNH lớp nó mô tả, không ở module người gọi: một Protocol đặt xa lớp thật
+    là hai khai báo phải giữ khớp nhau bằng trí nhớ. `JobLauncher` khớp theo
+    cấu trúc, và mypy kiểm điều đó tại chỗ gán trong `routers/ingest.py`.
+
+    Lý do nó tồn tại là để TEST thay được: double trong
+    `tests/integration/test_ingest_api.py` không dựng nổi một `JobLauncher`
+    thật (constructor nạp kubeconfig). Nó KHÔNG tồn tại vì phép canh AST ở
+    `tests/test_k8s_client_guard.py` — phép canh đó chỉ chặn `import
+    kubernetes`, và import chính module này thì hợp lệ ở mọi nơi.
+
+    Tên tham số là một phần của hợp đồng, không phải trang trí: người gọi
+    truyền `cpu`/`memory` bằng từ khoá để hai chuỗi tài nguyên không thể hoán
+    vị cho nhau mà không ai thấy.
+    """
+
+    def launch(
+        self,
+        run_id: uuid.UUID,
+        secret_name: str,
+        shared_secret_ref: tuple[str, str],
+        cpu: str,
+        memory: str,
+    ) -> None: ...
 
 
 def job_name(run_id: uuid.UUID) -> str:

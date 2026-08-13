@@ -1,37 +1,18 @@
-"""Logic của đường nạp. Không biết HTTP, không biết k8s — nhận `JobLauncher` vào.
+"""Phân giải `secret_ref` thành TÊN k8s Secret. Không biết HTTP, không biết k8s.
 
-Tách khỏi router để test được việc phân giải `secret_ref` mà không dựng cả ứng
-dụng (xem `tests/test_ingest_service.py`: không database, không Docker), và để
-`jobs.py` giữ được vị thế module DUY NHẤT chạm Kubernetes API — phép canh AST ở
-`tests/test_k8s_client_guard.py` khẳng định đúng điều đó.
-
-Vì lý do thứ hai, module này KHÔNG import `loom_api.jobs`: nó chỉ khai một
-`Protocol` mô tả đúng phần bề mặt mà nó gọi tới. `JobLauncher` thật khớp
-Protocol đó theo cấu trúc (mypy kiểm ở chỗ router truyền vào), còn double trong
-test khớp mà không phải kéo theo `kubernetes` — thứ mà chính test này tồn tại
-để không cần tới.
+Tách khỏi router để test được việc phân giải mà không dựng cả ứng dụng (xem
+`tests/test_ingest_service.py`: không database, không Docker, chạy trong
+`make test`). Module này KHÔNG import `loom_api.jobs` — không vì phép canh AST
+ở `tests/test_k8s_client_guard.py` (phép canh đó chỉ chặn `import kubernetes`,
+và `routers/ingest.py` import `loom_api.jobs` một cách hợp lệ), mà vì nó không
+cần: ở đây không có gì phóng Job.
 """
 
 from __future__ import annotations
 
-import re
-import uuid
 from dataclasses import dataclass
-from typing import Protocol
 
-# `k8s://<namespace>/<name>#<key>` — dạng DUY NHẤT dùng được ở local.
-# `vault://` hợp lệ với `SECRET_REF_RE` (Giai đoạn 1) nhưng cụm local không tới
-# được Vault, nên nó bị từ chối ở đây với thông báo nói đúng lý do.
-#
-# Hai lớp con của `SECRET_REF_RE` chứ không phải một bản chép: đây là tập CON
-# hẹp hơn (chỉ `k8s://`, và có nhóm bắt để tách ba phần). Nới nó rộng ra bằng
-# `SECRET_REF_RE` sẽ nhận lại `vault://` — đúng thứ hàm dưới đây tồn tại để
-# chặn. `\Z` chứ không `$`, cùng lý do đã ghi ở `SECRET_REF_RE`: `$` khớp cả
-# ngay trước một `\n` cuối chuỗi, và một tên Secret mang `\n` đi thẳng vào
-# `metadata.name` của Job.
-_K8S_REF = re.compile(
-    r"\Ak8s://(?P<ns>[a-z0-9-]+)/(?P<name>[a-z0-9.-]+)#(?P<key>[A-Za-z0-9._-]+)\Z"
-)
+from loom_core.item_definitions import K8S_SECRET_REF_RE
 
 
 class SecretRefUnusable(ValueError):
@@ -51,33 +32,28 @@ class SecretLocation:
     key: str
 
 
-class JobLauncherLike(Protocol):
-    """Đúng phần bề mặt của `loom_api.jobs.JobLauncher` mà đường nạp gọi tới.
-
-    Tên tham số là một phần của hợp đồng, không phải trang trí: người gọi
-    truyền `cpu`/`memory` bằng từ khoá để hai chuỗi tài nguyên không thể hoán
-    vị cho nhau mà không ai thấy.
-    """
-
-    def launch(
-        self,
-        run_id: uuid.UUID,
-        secret_name: str,
-        shared_secret_ref: tuple[str, str],
-        cpu: str,
-        memory: str,
-    ) -> None: ...
-
-
 def resolve_secret_ref(secret_ref: str) -> SecretLocation:
-    match = _K8S_REF.match(secret_ref)
+    """Ba phần của một ref `k8s://`, hoặc `SecretRefUnusable` với lý do.
+
+    `K8S_SECRET_REF_RE` là nhánh `k8s://` của `SECRET_REF_RE`, dựng từ CÙNG các
+    lớp ký tự (xem `loom_core.item_definitions`) — không phải một bản chép, vì
+    một bản chép trôi được và trôi ở đây nghĩa là từ chối một `secret_ref` mà
+    `POST /items` đã nhận.
+    """
+    match = K8S_SECRET_REF_RE.match(secret_ref)
     if match is None:
         if secret_ref.startswith("vault://"):
             raise SecretRefUnusable(
-                "secret_ref dùng vault:// nhưng cụm này không tới được Vault; "
-                "dùng k8s://<namespace>/<name>#<key> ở local"
+                "secret_ref uses vault:// but this cluster cannot reach Vault; "
+                "use k8s://<namespace>/<name>#<key> here"
             )
-        raise SecretRefUnusable(f"secret_ref không dùng được: {secret_ref!r}")
+        # KHÔNG với tới được từ router: mọi giá trị lưu được đã qua
+        # `SECRET_REF_RE` (`ConnectionDefinition._check_ref`), nên nó chỉ có
+        # thể là `vault://` — bắt ở nhánh trên — hoặc `k8s://`, khớp ngay. Giữ
+        # lại làm lớp phòng vệ cho người gọi trực tiếp (và cho ngày ai đó nới
+        # `SECRET_REF_RE` ra); nói ra ở đây để không ai đi tìm cái request sinh
+        # ra thông báo này.
+        raise SecretRefUnusable(f"secret_ref is not usable: {secret_ref!r}")
     return SecretLocation(match["ns"], match["name"], match["key"])
 
 
@@ -102,7 +78,7 @@ def secret_name_for(secret_ref: str, task_namespace: str) -> str:
     location = resolve_secret_ref(secret_ref)
     if location.namespace != task_namespace:
         raise SecretRefUnusable(
-            f"secret_ref trỏ vào namespace {location.namespace!r} nhưng Job nạp chạy ở "
-            f"{task_namespace!r}; envFrom không chiếu được Secret qua namespace"
+            f"secret_ref points at namespace {location.namespace!r} but the ingest Job runs "
+            f"in {task_namespace!r}; envFrom cannot project a Secret across namespaces"
         )
     return location.name

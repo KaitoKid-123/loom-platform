@@ -7,7 +7,6 @@ from fastapi import FastAPI
 from loom_api import VERSION
 from loom_api.db import Database, build_sqlalchemy_url
 from loom_api.errors import install_error_handlers
-from loom_api.ingest_service import JobLauncherLike
 from loom_api.logging import configure_logging
 from loom_api.middleware import RequestContextMiddleware
 from loom_api.oidc_client import OIDCClient
@@ -37,7 +36,6 @@ def create_app(
     oidc_http: httpx.AsyncClient | None = None,
     query_http: httpx.AsyncClient | None = None,
     verify_id_token: VerifyIdToken | None = None,
-    job_launcher: JobLauncherLike | None = None,
 ) -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -104,13 +102,14 @@ def create_app(
     app.state.user_store = store
     app.state.verify_id_token = verify_id_token
     app.state.query_http = query_client
-    # CÓ THỂ là None, và mặc định LÀ None — khác hẳn ba collaborator ở trên.
-    # `JobLauncher.__init__` nạp kubeconfig (xem `jobs.py`), nên dựng một cái
-    # ở đây sẽ giết mọi `create_app()` trên máy không ở trong cụm: CI, và mọi
-    # unit test hiện có. `routers/ingest.py::_launch` dựng nó lười, ở lần nạp
-    # đầu tiên, và ghi ngược lại đúng thuộc tính này; tham số `job_launcher`
-    # tồn tại để test gắn một double vào TRƯỚC khi điều đó xảy ra.
-    app.state.job_launcher = job_launcher
+    # LUÔN là None ở đây, khác hẳn ba collaborator ở trên.
+    # `JobLauncher.__init__` nạp kubeconfig (xem `jobs.py`), nên dựng một cái ở
+    # đây sẽ giết mọi `create_app()` trên máy không ở trong cụm: CI, và mọi unit
+    # test hiện có. `routers/ingest.py::_launch` dựng nó lười, ở lần nạp đầu
+    # tiên, và ghi ngược lại đúng thuộc tính này. Test thay bằng một double
+    # SAU khi app đã dựng (`app.state.job_launcher = ...`), đúng cách
+    # `test_query_proxy_api.py` thay `app.state.query_http`.
+    app.state.job_launcher = None
 
     # Phải là lệnh add_middleware() CUỐI CÙNG. Starlette bọc middleware theo thứ
     # tự đăng ký đảo ngược, nên cái thêm sau cùng chạy ngoài cùng — vào trước

@@ -50,8 +50,10 @@ def test_a_password_pasted_into_the_field_is_not_a_ref() -> None:
 def test_a_trailing_newline_does_not_sneak_through() -> None:
     r"""`\Z` chứ không `$` — cùng cái bẫy `SECRET_REF_RE` đã ghi ở
     `loom_core.item_definitions`: trong Python `$` khớp cả ngay trước một `\n`
-    cuối chuỗi, nên `^...$` nhận một chuỗi mà mắt người đọc là hai dòng. Ở đây
-    hậu quả cụ thể hơn: tên Secret mang `\n` đi thẳng vào `metadata` của Job.
+    cuối chuỗi, nên `^...$` NHẬN một chuỗi mà mắt người đọc là hai dòng. Cái
+    `\n` không lọt được vào nhóm `name` (lớp ký tự không chứa nó), nên điều
+    đang được canh là hẹp và cụ thể: một ref có `\n` ở cuối phải bị TỪ CHỐI,
+    không phải "được nhận rồi cắt bỏ âm thầm".
     """
     with pytest.raises(SecretRefUnusable):
         resolve_secret_ref("k8s://loom/source-pg#password\n")

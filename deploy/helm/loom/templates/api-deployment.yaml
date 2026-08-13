@@ -87,6 +87,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "loom.appSecretName" . }}
                   key: query-shared-secret
+            # TÊN của Secret ngay trên, KHÔNG phải giá trị trong nó. `loom-api`
+            # chuyển tên này vào `secretKeyRef` của pod nạp (Giai đoạn 3a, xem
+            # `JobLauncher.launch`) để pod tự đọc bí mật chia sẻ từ kubelet —
+            # `loom-api` không bao giờ đọc giá trị đó.
+            #
+            # Phải là CÙNG một biểu thức `loom.appSecretName` với dòng trên,
+            # không phải một chuỗi viết cứng: mặc định của `Settings` là
+            # `loom-app` (tên `secret.yaml` render ra khi `oidc.existingSecret`
+            # để trống — chỉ đúng ở local), còn dev/prod đặt
+            # `oidc.existingSecret: loom-app-secrets` và KHÔNG render
+            # `secret.yaml` chút nào. Thiếu dòng này, Job nạp ở dev/prod hỏi
+            # một Secret không tồn tại: pod kẹt ở `CreateContainerConfigError`
+            # còn hàng `ingest_run` kẹt ở `pending`.
+            - name: LOOM_TASK_SHARED_SECRET_NAME
+              value: {{ include "loom.appSecretName" . | quote }}
           # Cold start đo được 1.8s khi rảnh nhưng tới 35s khi CPU bị tranh chấp
           # (k3d + Dex + Tilt + docker build cùng chạy). Postgres không còn
           # chạy trong cụm (Aiven quản lý) nên không còn góp phần tranh chấp.

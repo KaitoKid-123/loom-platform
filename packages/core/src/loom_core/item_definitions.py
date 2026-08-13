@@ -12,6 +12,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# Các lớp ký tự dùng chung cho HAI regex dưới đây. Khai một lần vì bản `k8s://`
+# có nhóm bắt (`K8S_SECRET_REF_RE`) phải là đúng nhánh `k8s://` của bản chung —
+# xem lý do ở ngay trên nó.
+_K8S_NS = r"[a-z0-9-]+"
+_K8S_NAME = r"[a-z0-9.-]+"
+_SECRET_KEY = r"[A-Za-z0-9._-]+"  # noqa: S105 — lớp ký tự cho TÊN khoá, không phải khoá
+
 # vault://<path>#<key>  hoặc  k8s://<namespace>/<name>#<key>
 # Chặt có chủ đích: ô này là ĐƯỜNG DẪN, và mục đích chính của regex là chặn
 # người dùng dán mật khẩu thật vào đây.
@@ -21,7 +28,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # người đọc là hai dòng. Đây là đúng lớp lỗi đã làm thủng bộ lọc URL của không
 # ít dự án; `\Z` không có ngoại lệ đó.
 SECRET_REF_RE = re.compile(
-    r"\A(?:vault://[A-Za-z0-9._\-/]+|k8s://[a-z0-9-]+/[a-z0-9.-]+)#[A-Za-z0-9._-]+\Z"
+    rf"\A(?:vault://[A-Za-z0-9._\-/]+|k8s://{_K8S_NS}/{_K8S_NAME})#{_SECRET_KEY}\Z"
+)
+
+# Nhánh `k8s://` của `SECRET_REF_RE`, có nhóm bắt — dạng DUY NHẤT mà đường nạp
+# (Giai đoạn 3a, xem `loom_api.ingest_service`) dùng được, vì cụm local không
+# tới được Vault. `\Z` vì đúng lý do đã ghi ở trên.
+#
+# Dùng CÙNG các lớp ký tự ở trên chứ không viết lại: hai bản chép sẽ trôi, và
+# trôi ở đây có hướng và người dùng thấy được — nới `SECRET_REF_RE` rộng ra
+# (thêm ký tự vào namespace hay tên) mà quên bản kia thì một `secret_ref` mà
+# `POST /items` đã NHẬN và đã LƯU bị đường nạp từ chối bằng 400 "not usable",
+# trỏ vào chính dữ liệu mà API đã chấp thuận.
+K8S_SECRET_REF_RE = re.compile(
+    rf"\Ak8s://(?P<ns>{_K8S_NS})/(?P<name>{_K8S_NAME})#(?P<key>{_SECRET_KEY})\Z"
 )
 
 

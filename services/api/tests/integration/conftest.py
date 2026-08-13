@@ -620,14 +620,18 @@ async def api_world(
                     # app_user — thiếu dòng này thì lệnh xoá user vỡ vì khoá ngoại
                     # và fixture im lặng để lại dữ liệu, đúng lỗi Task 19 đã gặp.
                     await session.execute(delete(AuditLog).where(AuditLog.actor_user_id == user_id))
+                    # TRƯỚC mọi lệnh xoá `item`, và cho CẢ HAI workspace một
+                    # lượt: `ingest_run.lakehouse_id`/`connection_id` có khoá
+                    # ngoại tới `item.id` (migration 0005), và hai id đó KHÔNG
+                    # buộc phải cùng workspace với `ingest_run.workspace_id` —
+                    # một run hợp lệ có lakehouse ở ws_a và connection ở ws_b
+                    # (xem `test_ingest_api.py`). Xoá theo từng workspace bên
+                    # trong vòng lặp dưới đây sẽ đúng chỉ nhờ THỨ TỰ, không
+                    # nhờ lược đồ, và vỡ ngay khi ai đó đảo hai phần tử.
+                    await session.execute(
+                        delete(IngestRun).where(IngestRun.workspace_id.in_((ws_a, ws_b)))
+                    )
                     for ws_id in (ws_a, ws_b):
-                        # TRƯỚC `item`: `ingest_run.lakehouse_id`/`connection_id`
-                        # có khoá ngoại tới `item.id` (migration 0005), nên xoá
-                        # item trước sẽ vỡ và bỏ lại cả workspace lẫn user —
-                        # đúng lớp lỗi khoá ngoại mà audit đã gặp ở Task 19.
-                        await session.execute(
-                            delete(IngestRun).where(IngestRun.workspace_id == ws_id)
-                        )
                         await session.execute(delete(Item).where(Item.workspace_id == ws_id))
                         await session.execute(
                             delete(RoleAssignment).where(RoleAssignment.scope_id == ws_id)
