@@ -36,32 +36,15 @@ from psycopg import sql
 from psycopg.rows import dict_row
 
 from loom_connector.protocol import CheckResult, ColumnSchema, StreamSchema, StreamState
+from loom_core.cursor import CURSOR_TYPE_ALLOWLIST
 
-# Kiểu Postgres DÙNG ĐƯỢC làm watermark — nguyên (không tràn, so sánh số học)
-# và thời gian (tăng theo đồng hồ nguồn). Tên khớp CHÍNH XÁC giá trị
-# `information_schema.columns.data_type` trả về (chuỗi chuẩn SQL, có dấu
-# cách — không phải tên rút gọn kiểu `int4`/`timestamptz` của `pg_catalog`).
-#
-# NUMERIC và TEXT CỐ Ý bị loại, dù cả hai đều SO SÁNH ĐƯỢC ở Postgres:
-#   - TEXT so sánh theo từ điển ("10" < "9" dạng chuỗi) — thứ tự chuỗi không
-#     phải thứ tự thời gian chèn.
-#   - NUMERIC so sánh đúng theo giá trị số, nhưng KHÔNG CÓ GÌ đảm bảo một dòng
-#     mới hơn mang giá trị lớn hơn — một cột "amount" hoàn toàn có thể giảm
-#     dần mà vẫn là NUMERIC hợp lệ.
-# Một watermark có thể ĐI LÙI làm mất dữ liệu ÂM THẦM: khác với lỗi `>` so với
-# `>=` (sinh trùng lặp — đếm được, khử được), một watermark lùi bỏ sót những
-# dòng NẰM GIỮA giá trị cũ và giá trị mới thấp hơn, và không để lại dấu vết gì
-# để nhận ra thiếu.
-_CURSOR_ALLOWLIST = frozenset(
-    {
-        "smallint",
-        "integer",
-        "bigint",
-        "date",
-        "timestamp without time zone",
-        "timestamp with time zone",
-    }
-)
+# Kiểu Postgres DÙNG ĐƯỢC làm watermark. Danh sách và LÝ DO loại TEXT/NUMERIC
+# nằm ở `loom_core.cursor` — import ngược lên chứ KHÔNG giữ một bản chép ở đây:
+# `loom-api` kiểm cùng danh sách đó khi pod nạp báo `cursor_type` về
+# (`routers/internal_ingest.py`), và hai bản chép trôi khỏi nhau nghĩa là API
+# từ chối đúng cái cursor mà `discover()` ngay dưới đây vừa đề xuất. Đó là chỗ
+# DUY NHẤT `loom_connector` được phép chạm `loom_core` — xem allowlist trong
+# `tests/test_connector_no_io.py`.
 
 _ARROW_TYPE_MAP: dict[str, pa.DataType] = {
     "smallint": pa.int16(),
@@ -207,7 +190,7 @@ class PostgresConnector:
                 for name, pg_type, nullable in cols
             )
             candidate_cursors = tuple(
-                name for name, pg_type, _ in cols if pg_type in _CURSOR_ALLOWLIST
+                name for name, pg_type, _ in cols if pg_type in CURSOR_TYPE_ALLOWLIST
             )
             streams.append(
                 StreamSchema(

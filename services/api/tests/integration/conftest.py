@@ -31,7 +31,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, event
+from sqlalchemy import delete, event, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -53,6 +53,7 @@ from loom_api.models import (
     IngestRun,
     Item,
     RoleAssignment,
+    StreamState,
     Workspace,
 )
 from loom_core.config import get_settings
@@ -630,6 +631,23 @@ async def api_world(
                     # nhờ lược đồ, và vỡ ngay khi ai đó đảo hai phần tử.
                     await session.execute(
                         delete(IngestRun).where(IngestRun.workspace_id.in_((ws_a, ws_b)))
+                    )
+                    # `stream_state` cũng phải đi TRƯỚC `item`, cùng lý do khoá
+                    # ngoại — nhưng KHÔNG lọc được theo workspace: bảng này cố
+                    # ý không có cột `workspace_id` (watermark thuộc về một
+                    # STREAM, xem `models.py`). Lọc theo chính hai cột khoá
+                    # ngoại của nó, và cho CẢ HAI workspace một lượt: một
+                    # lakehouse ở ws_a với một connection ở ws_b là cấu hình
+                    # hợp lệ (xem `test_ingest_api.py`), nên một hàng
+                    # `stream_state` bắc qua hai workspace tồn tại được.
+                    lakehouse_or_connection_here = select(Item.id).where(
+                        Item.workspace_id.in_((ws_a, ws_b))
+                    )
+                    await session.execute(
+                        delete(StreamState).where(
+                            StreamState.lakehouse_id.in_(lakehouse_or_connection_here)
+                            | StreamState.connection_id.in_(lakehouse_or_connection_here)
+                        )
                     )
                     for ws_id in (ws_a, ws_b):
                         await session.execute(delete(Item).where(Item.workspace_id == ws_id))

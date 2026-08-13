@@ -102,6 +102,23 @@ spec:
             # còn hàng `ingest_run` kẹt ở `pending`.
             - name: LOOM_TASK_SHARED_SECRET_NAME
               value: {{ include "loom.appSecretName" . | quote }}
+            # GIÁ TRỊ của bí mật mà pod nạp gửi lên `/internal/ingest/*`, để
+            # loom-api KIỂM header (`loom_api.internal_security`). Cặp
+            # `LOOM_TASK_SHARED_SECRET_NAME` ngay trên + `Settings.
+            # task_shared_secret_key` (mặc định `ingest-shared-secret`) là ĐỊA
+            # CHỈ mà pod đọc; dòng này là NỘI DUNG mà API so. Hai bên PHẢI trỏ
+            # CÙNG một khoá — lệch nhau thì mọi lần nạp 401 và hàng
+            # `ingest_run` kẹt ở `running`.
+            #
+            # KHÔNG dùng lại `query-shared-secret` ở trên: xem `secret.yaml` và
+            # `loom_core.config.Settings.task_shared_secret_key`. Ở dev/prod
+            # (`oidc.existingSecret` có giá trị) khoá này phải được thêm TAY
+            # vào Secret đó — xem `values.yaml`, mục `app.ingestSharedSecret`.
+            - name: LOOM_INGEST_SHARED_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loom.appSecretName" . }}
+                  key: ingest-shared-secret
           # Cold start đo được 1.8s khi rảnh nhưng tới 35s khi CPU bị tranh chấp
           # (k3d + Dex + Tilt + docker build cùng chạy). Postgres không còn
           # chạy trong cụm (Aiven quản lý) nên không còn góp phần tranh chấp.

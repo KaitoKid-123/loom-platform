@@ -23,7 +23,9 @@ oidc:
   issuer: https://loom.internal/dex
   redirectUrl: https://loom.internal/api/v1/auth/callback
   # Production không bao giờ để secret trong values — ESO đồng bộ Secret này.
-  # PHẢI có đủ BA khoá — xem comment tương ứng ở values-dev.yaml.
+  # PHẢI có đủ BỐN khoá, kể cả `ingest-shared-secret` mới của Giai đoạn 3a —
+  # xem comment tương ứng ở values-dev.yaml, gồm cả lý do nó không được là bản
+  # sao của `query-shared-secret`.
   existingSecret: loom-app-secrets
 storage:
   # dev/prod KHÔNG chạy MinIO trong cụm — deploy/infra/minio.yaml chỉ dành cho

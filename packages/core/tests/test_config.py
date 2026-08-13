@@ -16,6 +16,7 @@ def test_settings_reads_prefixed_env(monkeypatch) -> None:
     monkeypatch.setenv("LOOM_SESSION_SECRET", "real-secret")
     monkeypatch.setenv("LOOM_OIDC_CLIENT_SECRET", "real-client-secret")
     monkeypatch.setenv("LOOM_QUERY_SHARED_SECRET", "real-query-secret")
+    monkeypatch.setenv("LOOM_INGEST_SHARED_SECRET", "real-ingest-secret")
     monkeypatch.setenv("LOOM_STORAGE_ROOT_SECRET_KEY", "real-storage-root-secret")
     monkeypatch.setenv("LOOM_DB_PASSWORD", "s3cr3t")
     monkeypatch.setenv("LOOM_DB_PORT", "6543")
@@ -43,6 +44,49 @@ def test_default_query_shared_secret_rejected_outside_local(monkeypatch) -> None
         Settings()
 
 
+def test_default_ingest_shared_secret_rejected_outside_local(monkeypatch) -> None:
+    """`ingest_shared_secret` (Giai đoạn 3a, Task 10) suit CÙNG khuôn
+    `query_shared_secret`. Nó là cổng DUY NHẤT của `/internal/ingest/*` (xem
+    `loom_api.internal_security`), nên chạy dev/prod với giá trị mặc định — một
+    chuỗi có trong repo công khai — nghĩa là bất kỳ ai cũng dời được watermark
+    và đánh dấu run của người khác là `failed`. Chặn ở lúc KHỞI ĐỘNG, không đợi
+    tới một 401 (hoặc tệ hơn, một 200) ở request đầu tiên."""
+    monkeypatch.setenv("LOOM_ENVIRONMENT", "prod")
+    monkeypatch.setenv("LOOM_SESSION_SECRET", "real-secret")
+    monkeypatch.setenv("LOOM_OIDC_CLIENT_SECRET", "real-client-secret")
+    monkeypatch.setenv("LOOM_QUERY_SHARED_SECRET", "real-query-secret")
+    monkeypatch.setenv("LOOM_STORAGE_ROOT_SECRET_KEY", "real-storage-root-secret")
+    with pytest.raises(ValidationError, match="ingest_shared_secret"):
+        Settings()
+
+
+def test_the_ingest_secret_is_not_the_query_secret(monkeypatch) -> None:
+    """Hai bí mật TÁCH RỜI, và phép kiểm này là thứ giữ chúng tách.
+
+    Task 9 tạm trỏ `task_shared_secret_key` vào `query-shared-secret` để pod
+    khởi động được. Đó là một món nợ có giá cụ thể: `loom-query` KHÔNG có OIDC —
+    nó nhận principal ngay trong thân request và tin nguyên, gác cửa duy nhất là
+    bí mật đó — nên một pod nạp bị chiếm (thành phần DUY NHẤT quay số ra một
+    host do người dùng nhập) sẽ giả được `loom-api` với `loom-query` dưới danh
+    nghĩa BẤT KỲ principal nào. Gộp lại là một dòng sửa, và không gì báo đỏ nếu
+    không có phép kiểm này.
+
+    Đặt CẢ HAI biến môi trường chứ không dựa vào mặc định: ở `local` cả hai
+    trường cùng mang một chuỗi placeholder không-an-toàn (điều kiện để
+    `_reject_default_secrets_outside_local` nhận ra cả hai), nên một phép so
+    "khác nhau" trên giá trị mặc định sẽ đỏ mà không nói lên điều gì. Thứ đang
+    được canh là hai trường đọc HAI biến môi trường KHÁC NHAU — tức là chúng
+    thật sự tách được, không phải hai cái tên cho cùng một giá trị.
+    """
+    monkeypatch.setenv("LOOM_QUERY_SHARED_SECRET", "value-of-the-query-secret")
+    monkeypatch.setenv("LOOM_INGEST_SHARED_SECRET", "value-of-the-ingest-secret")
+    settings = Settings()
+    # ĐỊA CHỈ: pod nạp đọc khoá này qua `secretKeyRef` (`JobLauncher.launch`).
+    assert settings.task_shared_secret_key == "ingest-shared-secret"
+    # GIÁ TRỊ: `loom-api` so header của pod với trường này, không với cái kia.
+    assert settings.ingest_shared_secret != settings.query_shared_secret
+
+
 def test_default_storage_root_secret_rejected_outside_local(monkeypatch) -> None:
     """Cùng khuôn `query_shared_secret` — `storage_root_secret_key` là credential
     GỐC của MinIO (xem docstring ở `Settings`), nên nó phải chặn khởi động y hệt
@@ -52,6 +96,7 @@ def test_default_storage_root_secret_rejected_outside_local(monkeypatch) -> None
     monkeypatch.setenv("LOOM_SESSION_SECRET", "real-secret")
     monkeypatch.setenv("LOOM_OIDC_CLIENT_SECRET", "real-client-secret")
     monkeypatch.setenv("LOOM_QUERY_SHARED_SECRET", "real-query-secret")
+    monkeypatch.setenv("LOOM_INGEST_SHARED_SECRET", "real-ingest-secret")
     with pytest.raises(ValidationError, match="storage_root_secret_key"):
         Settings()
 
@@ -60,6 +105,7 @@ def test_default_secrets_allowed_in_local() -> None:
     settings = Settings(environment="local")
     assert settings.session_secret == "dev-only-do-not-use-in-production"
     assert settings.query_shared_secret == "dev-only-do-not-use-in-production"
+    assert settings.ingest_shared_secret == "dev-only-do-not-use-in-production"
     assert settings.storage_root_secret_key == "dev-only-do-not-use-in-production"
 
 
@@ -123,6 +169,7 @@ def test_get_settings_is_cached(monkeypatch) -> None:
     monkeypatch.setenv("LOOM_SESSION_SECRET", "real-secret")
     monkeypatch.setenv("LOOM_OIDC_CLIENT_SECRET", "real-client-secret")
     monkeypatch.setenv("LOOM_QUERY_SHARED_SECRET", "real-query-secret")
+    monkeypatch.setenv("LOOM_INGEST_SHARED_SECRET", "real-ingest-secret")
     monkeypatch.setenv("LOOM_STORAGE_ROOT_SECRET_KEY", "real-storage-root-secret")
     monkeypatch.setenv("LOOM_ENVIRONMENT", "one")
     first = get_settings()

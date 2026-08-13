@@ -1168,12 +1168,14 @@ name = "loom-connector"
 version = "0.1.0"
 source = { editable = "packages/connectorkit" }
 dependencies = [
+    { name = "loom-core" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pyarrow" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "loom-core", editable = "packages/core" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pyarrow", specifier = ">=18.0" },
 ]

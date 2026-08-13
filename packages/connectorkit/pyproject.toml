@@ -4,9 +4,18 @@ version = "0.1.0"
 description = "Khung `Connector` — hợp đồng mà mọi nguồn dữ liệu phải tuân theo"
 requires-python = ">=3.12"
 dependencies = [
+    # ĐÚNG MỘT thứ được lấy từ đây: `loom_core.cursor.CURSOR_TYPE_ALLOWLIST`
+    # (xem comment tại chỗ import ở `postgres.py`). `loom-core` là package
+    # thuần Pydantic, không I/O — nó không kéo theo mạng, S3 hay catalog vào
+    # `loom_connector`, nên ranh giới mà `tests/test_connector_no_io.py` canh
+    # vẫn nguyên vẹn.
+    "loom-core",
     "pyarrow>=18.0",
     "psycopg[binary]>=3.2",
 ]
+
+[tool.uv.sources]
+loom-core = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

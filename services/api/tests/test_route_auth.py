@@ -141,6 +141,7 @@ async def test_api_docs_are_local_only(
         monkeypatch.setenv("LOOM_SESSION_SECRET", "x" * 48)
         monkeypatch.setenv("LOOM_OIDC_CLIENT_SECRET", "y" * 48)
         monkeypatch.setenv("LOOM_QUERY_SHARED_SECRET", "z" * 48)
+        monkeypatch.setenv("LOOM_INGEST_SHARED_SECRET", "v" * 48)
         monkeypatch.setenv("LOOM_STORAGE_ROOT_SECRET_KEY", "w" * 48)
     get_settings.cache_clear()
 

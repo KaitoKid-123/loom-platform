@@ -41,7 +41,20 @@ ALLOWED = {
     "__future__",
 }
 
+# Allowlist ở cấp MODULE ĐẦY ĐỦ, KHÔNG ở cấp package — và sự khác biệt đó là
+# cả điểm của nó. `loom_core.cursor` là một module thuần hằng số + hàm parse
+# (`CURSOR_TYPE_ALLOWLIST`, xem chỗ import ở `postgres.py`), nhưng `loom_core`
+# nói chung thì KHÔNG vô hại: `loom_core.config` dựng trên `pydantic-settings`,
+# tức là đọc biến môi trường và tệp `.env` — đúng thứ mà lệnh cấm `os` ngay
+# dưới đây tồn tại để chặn. Cho cả `loom_core` vào `ALLOWED` sẽ mở lại lỗ đó
+# qua một cửa sau, nên nó phải hẹp tới từng module.
+ALLOWED_MODULES = {"loom_core.cursor"}
+
 WHY_BANNED = {
+    "loom_core": (
+        "chỉ `loom_core.cursor` được phép — `loom_core.config` đọc biến môi "
+        "trường và `.env`, đúng thứ lệnh cấm `os` chặn"
+    ),
     "httpx": "gọi mạng — báo tiến độ là việc của loom-task, không phải connector",
     "requests": "gọi mạng",
     "boto3": "gọi S3 — connector đọc nguồn, không ghi storage",
@@ -61,16 +74,26 @@ def _modules() -> list[Path]:
 
 
 def _imports(path: Path) -> list[tuple[str, int]]:
-    """(tên gốc của module được import, số dòng) cho mọi câu import trong file."""
+    """(tên ĐẦY ĐỦ của module được import, số dòng) cho mọi câu import trong file.
+
+    Tên đầy đủ chứ không chỉ phần gốc: `ALLOWED_MODULES` cần phân biệt
+    `loom_core.cursor` với `loom_core.config`, và cắt về gốc ngay tại đây thì
+    hai cái đó không còn phân biệt được nữa. Phần gốc vẫn tính được từ giá trị
+    trả về (`_root`), nên không mất thông tin nào.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     out: list[tuple[str, int]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            out.extend((alias.name.split(".")[0], node.lineno) for alias in node.names)
+            out.extend((alias.name, node.lineno) for alias in node.names)
         # `from . import x` có module=None và level>0 — import nội bộ, luôn hợp lệ.
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            out.append((node.module.split(".")[0], node.lineno))
+            out.append((node.module, node.lineno))
     return out
+
+
+def _root(module_name: str) -> str:
+    return module_name.split(".")[0]
 
 
 @pytest.mark.parametrize("module", _modules(), ids=lambda p: p.name)
@@ -78,13 +101,40 @@ def test_module_imports_nothing_that_touches_the_outside_world(module: Path) -> 
     offenders = [
         (name, line)
         for name, line in _imports(module)
-        if name != "loom_connector" and name not in ALLOWED
+        if _root(name) != "loom_connector"
+        and _root(name) not in ALLOWED
+        and name not in ALLOWED_MODULES
     ]
     assert not offenders, "\n".join(
         f"{module.name}:{line} import `{name}`"
-        + (f" — {WHY_BANNED[name]}" if name in WHY_BANNED else " — ngoài allowlist")
+        + (f" — {WHY_BANNED[_root(name)]}" if _root(name) in WHY_BANNED else " — ngoài allowlist")
         for name, line in offenders
     )
+
+
+def test_only_the_named_loom_core_module_gets_through(tmp_path: Path) -> None:
+    """`ALLOWED_MODULES` phải hẹp tới từng MODULE, không nới thành cả package.
+
+    Không có phép kiểm này, đổi `ALLOWED_MODULES = {"loom_core.cursor"}` thành
+    `ALLOWED |= {"loom_core"}` là một dòng trông vô hại và không gì báo đỏ —
+    trong khi nó cho phép `from loom_core.config import get_settings`, tức là
+    connector đọc được biến môi trường và `.env` qua một cửa sau, đúng thứ lệnh
+    cấm `os` tồn tại để chặn.
+    """
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "from loom_core.cursor import CURSOR_TYPE_ALLOWLIST\n"
+        "from loom_core.config import get_settings\n",
+        encoding="utf-8",
+    )
+    offenders = [
+        name
+        for name, _line in _imports(probe)
+        if _root(name) != "loom_connector"
+        and _root(name) not in ALLOWED
+        and name not in ALLOWED_MODULES
+    ]
+    assert offenders == ["loom_core.config"]
 
 
 def test_the_guard_can_see_a_violation(tmp_path: Path) -> None:

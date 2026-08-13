@@ -103,6 +103,28 @@ app:
   # `loom-api` nếu giá trị này còn là mặc định khi `environment != "local"` —
   # `loom_query.config.Settings` có bản sao của CHÍNH NÓ của phép kiểm này.
   querySharedSecret: dev-only-do-not-use-in-production
+  # Bí mật chia sẻ của đường NẠP: pod nạp -> loom-api trên `/internal/ingest/*`
+  # (Giai đoạn 3a). Một KHOÁ riêng trong Secret, không phải `querySharedSecret`
+  # ở trên dùng lại — `loom-query` không có OIDC, nên bí mật của nó mở được cả
+  # mô hình RBAC dưới danh nghĩa bất kỳ ai, còn pod nạp là thành phần dễ bị
+  # chiếm nhất (nó quay số ra một host do người dùng nhập). Xem
+  # `loom_core.config.Settings.task_shared_secret_key`.
+  #
+  # Ở LOCAL hai khoá này cố tình mang CÙNG chuỗi placeholder: không có bí mật
+  # thật nào ở local, và một chuỗi "mặc định không an toàn" duy nhất là điều
+  # kiện để `Settings._reject_default_secrets_outside_local` nhận ra CẢ HAI.
+  # Việc tách chỉ có tác dụng khi hai GIÁ TRỊ khác nhau, tức là ở dev/prod —
+  # xem cảnh báo ngay dưới.
+  #
+  # ⚠️ dev/prod: `deploy/envs/values-{dev,prod}.yaml` đặt
+  # `oidc.existingSecret: loom-app-secrets`, và khi đó `secret.yaml` KHÔNG
+  # render chút nào — giá trị dưới đây bị bỏ qua hoàn toàn. Người vận hành PHẢI
+  # tự thêm khoá `ingest-shared-secret` vào Secret `loom-app-secrets` (qua
+  # External Secrets / Vault, cùng đường với `query-shared-secret`) TRƯỚC khi
+  # nâng cấp. Thiếu nó, pod api kẹt ở `CreateContainerConfigError` ngay khi
+  # khởi động vì `secretKeyRef` trỏ vào một khoá không tồn tại — hỏng ồn ào và
+  # tức thì, đúng như nó nên thế, nhưng chỉ hiểu được nếu đã đọc dòng này.
+  ingestSharedSecret: dev-only-do-not-use-in-production
 
 migration:
   enabled: true

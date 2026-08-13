@@ -428,11 +428,25 @@ class StreamState(Base):
     điểm chuyển đổi duy nhất nằm ở connector — nơi biết kiểu gốc — thay vì rải
     rác khắp nơi.
 
+    `cursor_type` (migration 0006) là thứ TRẢ LẠI kiểu đã mất đó, và nó không
+    phải siêu dữ liệu trang trí: không có nó, phép so "watermark chỉ được tiến"
+    chỉ so được CHUỖI, và trên một cursor `bigint` — trường hợp thường gặp
+    nhất — chuỗi làm watermark kẹt vĩnh viễn ở lần đầu vượt mốc đổi số chữ số
+    (`"1000" > "400"` là `False`), sinh trùng lặp không giới hạn mà không lỗi
+    nào báo ra. Xem `loom_core.cursor`.
+
+    `cursor_type` NULL ĐƯỢC, và null nghĩa là "hàng có từ trước 0006, không
+    biết kiểu". Nó không có mặc định đúng nào để điền: kiểu của một watermark
+    cũ không suy ra được từ bất cứ đâu trong bảng. Đường báo tiến độ vì vậy coi
+    null như một `cursor_type` KHÁC và ĐẶT LẠI watermark thay vì so sánh — cùng
+    lập luận với `cursor_column` đổi, ngay dưới đây.
+
     UNIQUE trên (lakehouse_id, connection_id, stream) — CỐ Ý KHÔNG có
     cursor_column trong khoá. Cho phép hai hàng tồn tại nghĩa là đổi
     cursor_column sẽ để lại một hàng cũ mà lần nạp sau chọn bừa, và giá trị nó
     mang là một con số thuộc về một thang đo khác hẳn — bỏ sót dữ liệu mà
     không có lỗi nào báo ra.
+
     """
 
     __tablename__ = "stream_state"
@@ -456,6 +470,9 @@ class StreamState(Base):
     )
     stream: Mapped[str] = mapped_column(String(255), nullable=False)
     cursor_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Một trong `loom_core.cursor.CURSOR_TYPE_ALLOWLIST`, hoặc NULL cho hàng có
+    # từ trước migration 0006 — xem docstring lớp.
+    cursor_type: Mapped[str | None] = mapped_column(String(64))
     cursor_value: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

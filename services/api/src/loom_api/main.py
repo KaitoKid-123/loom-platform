@@ -18,6 +18,7 @@ from loom_api.routers import (
     health,
     ingest,
     internal,
+    internal_ingest,
     items,
     query,
     roles,
@@ -132,4 +133,10 @@ def create_app(
     # này (xem `routers/internal.py`), nên `/internal` không có route nào để dò
     # từ bên ngoài cluster — bảo vệ nằm ở đó, không ở dependency xác thực.
     app.include_router(internal.router, prefix="/internal")
+    # Cũng KHÔNG `/api/v1`, cùng lý do ranh giới ingress như dòng trên — nhưng
+    # router NÀY còn có thêm một cổng bí mật chia sẻ ở cấp router
+    # (`internal_security.require_ingest_secret`), vì người gọi nó là một pod
+    # nạp trong cùng namespace chứ không phải `loom-query`. Xem docstring
+    # `routers/internal_ingest.py` cho lý do hai router không gộp làm một.
+    app.include_router(internal_ingest.router, prefix="/internal/ingest")
     return app

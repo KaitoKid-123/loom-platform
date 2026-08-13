@@ -468,6 +468,38 @@ def test_exactly_one_principal_and_principal_type_matches_it(
     )
 
 
+def test_stream_state_cursor_type_exists_and_stays_nullable(conn: sa.Connection) -> None:
+    """Migration 0006 thêm `cursor_type`, và nó phải NULLABLE trên schema THẬT.
+
+    Hai vế, cả hai đều là quyết định chứ không phải mặc định rơi ra:
+
+    - CÓ MẶT: không có cột này thì phép so "watermark chỉ tiến" chỉ so được
+      CHUỖI, và trên một cursor `bigint` chuỗi làm watermark kẹt vĩnh viễn ở lần
+      đầu vượt mốc đổi số chữ số (xem `loom_core.cursor`).
+    - NULLABLE: `ADD COLUMN ... NOT NULL` không kèm mặc định làm `alembic upgrade
+      head` HỎNG trên mọi database đã có dù chỉ một hàng, còn một mặc định điền
+      bừa (`'bigint'`) sẽ khiến lần báo tiến độ sau đọc một chuỗi ngày tháng như
+      một số nguyên. Null = "hàng có từ trước 0006, không biết kiểu", và đường
+      báo tiến độ ĐẶT LẠI watermark thay vì so sánh.
+
+    Đọc `information_schema` chứ không đọc model: điều đang được khẳng định là
+    migration đã chạy ra đúng schema đó, không phải là model khai đúng.
+    """
+    row = conn.execute(
+        sa.text(
+            "SELECT data_type, is_nullable, character_maximum_length"
+            " FROM information_schema.columns"
+            " WHERE table_name = 'stream_state' AND column_name = 'cursor_type'"
+        )
+    ).one_or_none()
+    assert row is not None, "migration 0006 chưa thêm `stream_state.cursor_type`"
+    assert (row[0], row[1]) == ("character varying", "YES")
+    # Giá trị dài nhất trong `CURSOR_TYPE_ALLOWLIST` là 'timestamp without time
+    # zone' (27 ký tự) — cột phải chứa nổi nó, nếu không một watermark hợp lệ bị
+    # Postgres từ chối ở đúng kiểu ÍT được kiểm nhất.
+    assert row[2] is not None and row[2] >= len("timestamp without time zone")
+
+
 def test_stream_state_allows_only_one_watermark_per_stream(
     conn: sa.Connection, actor: uuid.UUID
 ) -> None:

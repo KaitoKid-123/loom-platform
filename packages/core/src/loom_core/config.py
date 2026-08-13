@@ -9,6 +9,7 @@ _INSECURE_DEFAULTS = {
     "session_secret": "dev-only-do-not-use-in-production",
     "oidc_client_secret": "loom-dev-secret",
     "query_shared_secret": "dev-only-do-not-use-in-production",
+    "ingest_shared_secret": "dev-only-do-not-use-in-production",
     "storage_root_secret_key": "dev-only-do-not-use-in-production",
 }
 
@@ -110,8 +111,7 @@ class Settings(BaseSettings):
     task_api_base_url: str = "http://loom-api.loom.svc.cluster.local:8000"
     # ĐỊA CHỈ của bí mật chia sẻ trong cụm — TÊN Secret và KHOÁ, KHÔNG phải giá
     # trị. `loom-api` chỉ chuyển cặp này vào `secretKeyRef` của pod nạp (xem
-    # `JobLauncher.launch`); nó không đọc nội dung, và không có trường nào ở đây
-    # để nó đọc.
+    # `JobLauncher.launch`); nó không đọc nội dung ở ĐƯỜNG ĐÓ.
     #
     # Mặc định `loom-app` chỉ ĐÚNG cho một lần install chart với
     # `oidc.existingSecret` để trống (local) — đó là lúc `secret.yaml` được
@@ -122,18 +122,37 @@ class Settings(BaseSettings):
     # có truyền — cùng biểu thức với `LOOM_QUERY_SHARED_SECRET` ngay trên đó).
     # Thiếu dòng ấy, Job nạp hỏi một Secret không tồn tại: pod kẹt ở
     # `CreateContainerConfigError` còn hàng `ingest_run` kẹt ở `pending`.
-    #
-    # Khoá `query-shared-secret` là CÙNG bí mật Giai đoạn 2b đã cấp cho
-    # loom-query (xem `loom_core.internal_auth`). Dùng LẠI chứ không cấp thêm
-    # một bí mật thứ hai là một lựa chọn có giá, ghi ra chứ không giấu:
-    # `loom-api` đã biết giá trị đó dưới tên `query_shared_secret`, nên
-    # `/internal/ingest/*` (Task 10) so khớp được ngay mà không cần một Secret
-    # nữa phải tồn tại trước khi Job chạy được — nhưng đổi lại, một pod nạp bị
-    # chiếm cũng cầm đúng bí mật để giả làm `loom-api` khi gọi `loom-query`.
-    # Tách đôi khi cần là thêm một khoá vào `secret.yaml` và đổi
-    # `task_shared_secret_key`, không phải sửa mã.
     task_shared_secret_name: str = "loom-app"  # noqa: S105 — tên Secret, không phải giá trị
-    task_shared_secret_key: str = "query-shared-secret"  # noqa: S105 — tên khoá
+    # Khoá RIÊNG, KHÔNG dùng lại `query-shared-secret`. Task 9 tạm trỏ vào khoá
+    # đó để pod khởi động được và ghi món nợ lại ngay chỗ này; Task 10 trả nó,
+    # vì đây là lúc nó bắt đầu có giá.
+    #
+    # `loom-query` KHÔNG có OIDC: nó nhận principal của người dùng cuối ngay
+    # trong thân request và tin nguyên (xem `loom_query.security` và
+    # `loom_query.routers.query`), gác cửa DUY NHẤT là bí mật chia sẻ. Ai cầm
+    # giá trị đó thì giả được `loom-api` với `loom-query` DƯỚI DANH NGHĨA BẤT
+    # KỲ PRINCIPAL NÀO — vượt qua trọn vẹn mô hình RBAC. Mà pod nạp lại đúng là
+    # thành phần quay số ra một `ConnectionDefinition.host` do NGƯỜI DÙNG nhập,
+    # tức là bề mặt bị chiếm dễ nhất trong cả cụm. Cho nó một bí mật thứ hai,
+    # chỉ mở được `/internal/ingest/*`, giữ một pod nạp bị chiếm ở lại trong
+    # phạm vi nạp dữ liệu.
+    task_shared_secret_key: str = "ingest-shared-secret"  # noqa: S105 — tên khoá
+    # GIÁ TRỊ của cùng bí mật đó — cặp `task_shared_secret_name`/`_key` ở trên
+    # là ĐỊA CHỈ, cái này là NỘI DUNG, và `loom-api` cần cả hai vì nó đứng ở cả
+    # hai đầu: nó bảo pod đọc bí mật ở đâu (địa chỉ, vào `secretKeyRef`), rồi
+    # nó KIỂM header pod gửi lên (nội dung, xem `loom_api.internal_security`).
+    # `loom-query` có đúng một bản tương đương của trường này —
+    # `loom_query.config.Settings.shared_secret` — vì nó chỉ đứng ở đầu kiểm.
+    #
+    # Env var `LOOM_INGEST_SHARED_SECRET`, nạp từ CÙNG khoá Secret mà
+    # `task_shared_secret_key` trỏ tới (`api-deployment.yaml` giữ hai dòng đó
+    # cạnh nhau). Lệch nhau nghĩa là pod gửi một bí mật còn API kiểm một bí mật
+    # khác: mọi lần nạp 401 và hàng `ingest_run` kẹt ở `running`.
+    #
+    # Ở `_INSECURE_DEFAULTS`, cùng khuôn `session_secret`: dev/prod quên đặt nó
+    # thì `loom-api` TỪ CHỐI KHỞI ĐỘNG, chứ không chạy với một bí mật ai cũng
+    # đoán được.
+    ingest_shared_secret: str = "dev-only-do-not-use-in-production"  # noqa: S105
 
     @field_validator(
         "public_base_url",
