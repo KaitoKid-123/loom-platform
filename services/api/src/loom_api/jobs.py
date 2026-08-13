@@ -31,7 +31,7 @@ from kubernetes.client.rest import ApiException
 
 
 class JobLauncherLike(Protocol):
-    """Đúng phần bề mặt của `JobLauncher` mà đường nạp (Task 9) gọi tới.
+    """Đúng phần bề mặt của `JobLauncher` mà đường nạp gọi tới — HAI phương thức.
 
     Ở CẠNH lớp nó mô tả, không ở module người gọi: một Protocol đặt xa lớp thật
     là hai khai báo phải giữ khớp nhau bằng trí nhớ. `JobLauncher` khớp theo
@@ -46,6 +46,13 @@ class JobLauncherLike(Protocol):
     Tên tham số là một phần của hợp đồng, không phải trang trí: người gọi
     truyền `cpu`/`memory` bằng từ khoá để hai chuỗi tài nguyên không thể hoán
     vị cho nhau mà không ai thấy.
+
+    `status` có mặt từ Task 13: đường `GET /api/v1/ingest/{run_id}` đối chiếu
+    một run chưa kết thúc với Job của nó, và nó phải thay được bằng double y
+    như `launch` — cùng một lý do, cùng một chỗ tiêm (`app.state.job_launcher`).
+    Hai phương thức trên MỘT Protocol chứ không hai Protocol: chúng luôn được
+    lấy từ cùng một đối tượng (`JobLauncher` thật nắm một `BatchV1Api` duy
+    nhất), nên tách ra chỉ thêm một cái tên để giữ khớp.
     """
 
     def launch(
@@ -56,6 +63,10 @@ class JobLauncherLike(Protocol):
         cpu: str,
         memory: str,
     ) -> None: ...
+
+    # `JobStatus` khai BÊN DƯỚI: `from __future__ import annotations` làm mọi
+    # chú thích thành chuỗi, nên thứ tự khai báo trong file không ràng buộc gì.
+    def status(self, run_id: uuid.UUID) -> JobStatus: ...
 
 
 def job_name(run_id: uuid.UUID) -> str:

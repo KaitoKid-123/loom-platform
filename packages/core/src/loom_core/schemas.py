@@ -363,6 +363,39 @@ class IngestRunAccepted(BaseModel):
     run_id: uuid.UUID
 
 
+class IngestRunStatus(BaseModel):
+    """`GET /api/v1/ingest/{run_id}` — bản chụp một hàng `ingest_run`.
+
+    `status` và `mode` là `str` chứ KHÔNG `Literal`, dù cả hai chỉ có bốn/hai
+    giá trị hợp lệ. Đây là một phản hồi dựng từ DỮ LIỆU ĐÃ LƯU, nên một
+    `Literal` ở đây biến một hàng lạ (sửa tay, một migration cũ, một phiên bản
+    sau thêm trạng thái mà quên chỗ này) thành lỗi validate PHẢN HỒI — tức là
+    500 cho đúng người đang cố tìm hiểu run của họ bị gì. Chỗ từ chối một
+    `mode` lạ là BIÊN NHẬN (`IngestStartRequest.mode`, một `Literal`), không
+    phải biên trả về. Cùng lập luận `IngestSpec.connection_slug` đã ghi.
+
+    `error` là `None` cho một run chưa hỏng, và đó là trường mang nhiều thông
+    tin nhất ở đây: nó thường chứa tên host nguồn và tên bảng (xem
+    `IngestCompletionReport.error`). Vì vậy đường đọc phải qua cổng `item.read`
+    trên LAKEHOUSE của run — xem `routers/ingest.py::get_ingest_run`.
+
+    KHÔNG có `workspace_id`: người gọi đã phải thấy được lakehouse để đọc tới
+    đây, và `lakehouse_id` là thứ dẫn họ tới mọi thứ khác. Thêm một id nữa chỉ
+    để "đầy đủ" là mở thêm một trường phải giữ đúng.
+    """
+
+    run_id: uuid.UUID
+    lakehouse_id: uuid.UUID
+    connection_id: uuid.UUID
+    stream: str
+    mode: str
+    status: str
+    rows_written: int
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
 class IngestSourceSpec(BaseModel):
     """Cách TỚI nguồn, và KHÔNG BAO GIỜ cách MỞ nó.
 

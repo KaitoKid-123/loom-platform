@@ -1,18 +1,32 @@
-"""Phân giải `secret_ref` thành TÊN k8s Secret. Không biết HTTP, không biết k8s.
+"""Quyết định của đường nạp mà KHÔNG cần HTTP và KHÔNG gọi Kubernetes.
 
-Tách khỏi router để test được việc phân giải mà không dựng cả ứng dụng (xem
+Hai việc: phân giải `secret_ref` thành TÊN k8s Secret (Task 9), và đọc một
+`JobStatus` ra thành "run này còn đường sống hay đã chết" (Task 13). Tách khỏi
+router để test được cả hai mà không dựng cả ứng dụng (xem
 `tests/test_ingest_service.py`: không database, không Docker, chạy trong
-`make test`). Module này KHÔNG import `loom_api.jobs` — không vì phép canh AST
-ở `tests/test_k8s_client_guard.py` (phép canh đó chỉ chặn `import kubernetes`,
-và `routers/ingest.py` import `loom_api.jobs` một cách hợp lệ), mà vì nó không
-cần: ở đây không có gì phóng Job.
+`make test`).
+
+Module này CÓ import `loom_api.jobs`, và bản Task 9 thì không — nói ra vì
+docstring cũ khẳng định điều ngược lại. Nó nhập đúng MỘT thứ: dataclass
+`JobStatus`, tức là HÌNH DẠNG câu trả lời (bốn trường), không phải đường đi tới
+Kubernetes. Không có gì ở đây mở kết nối, dựng `JobLauncher`, hay đọc
+kubeconfig — `JobLauncher.__init__` là chỗ duy nhất làm việc đó. Phép canh AST ở
+`tests/test_k8s_client_guard.py` chỉ chặn `import kubernetes` (và nó vẫn xanh:
+import ở đây là `loom_api.jobs`), nên ràng buộc thật là ràng buộc ở trên: một
+lời gọi mạng KHÔNG được xuất hiện trong file này.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from loom_api.jobs import JobStatus
 from loom_core.item_definitions import K8S_SECRET_REF_RE
+
+# Hai trạng thái mà một run KHÔNG bao giờ rời khỏi nữa. Người gọi phải kiểm nó
+# TRƯỚC khi hỏi Kubernetes — xem `failure_from_job` cho lý do điều kiện đó nằm ở
+# chỗ gọi chứ không trong hàm.
+TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed"})
 
 
 class SecretRefUnusable(ValueError):
@@ -82,3 +96,63 @@ def secret_name_for(secret_ref: str, task_namespace: str) -> str:
             f"in {task_namespace!r}; envFrom cannot project a Secret across namespaces"
         )
     return location.name
+
+
+def failure_from_job(job: JobStatus) -> str | None:
+    """Lý do đánh run `failed`, hoặc `None` khi Job VẪN CÒN đường sống.
+
+    **Mặc định là ĐỂ NGUYÊN.** Chỉ ba hình dạng Job dưới đây trả về một lý do;
+    mọi hình dạng khác — kể cả những hình dạng chưa ai gặp — cho ra `None`. Đó
+    là hướng an toàn của hai hướng: để một run chết nằm lại thêm một lượt đọc là
+    một thanh tiến trình chạy lâu hơn cần thiết, còn đánh `failed` một run đang
+    sống là giết công việc của người dùng bằng một phỏng đoán.
+
+    HAI trạng thái LÀNH MẠNH mà mặc định đó phục vụ, và cả hai đều thường gặp:
+
+    - `exists=True, active=1` trên một run `pending` là khoảng giữa "Job vừa
+      được tạo" và "pod gọi `/spec` lần đầu". MỌI lần nạp đi qua nó.
+    - `exists=True, active=1` trên một run `running` là một pod đang chạy. Không
+      có heartbeat nào trong Giai đoạn 3a, nên `active` LÀ tín hiệu sống.
+
+    Vì cả hai chỉ cần mặc định, hàm này không nhận `run_status`: không có nhánh
+    nào phân biệt `pending` với `running` cả. Điều kiện "chỉ đối chiếu run CHƯA
+    kết thúc" (`TERMINAL_RUN_STATUSES`) nằm ở CHỖ GỌI chứ không ở đây, và cố ý:
+    nó phải chặn TRƯỚC lời gọi Kubernetes — một run đã xong thì Job của nó đã bị
+    TTL dọn (`ttl_seconds_after_finished=3600`), nên hỏi thêm vừa vô nghĩa vừa
+    trả về đúng `exists=False`, thứ sẽ biến `succeeded` thành `failed` sau một
+    giờ. Đặt điều kiện đó vào đây cũng được, nhưng khi ấy vẫn còn một round trip
+    tới cụm cho mỗi lần đọc một run đã đóng, và tính chất "không ai hỏi k8s về
+    một run đã kết thúc" không còn kiểm được từ ngoài.
+
+    **KHÔNG suy ra `succeeded`.** `succeeded=1` trên Job mà hàng chưa kết thúc là
+    một run `failed`, không phải một run thành công. `/complete` là nguồn sự thật
+    DUY NHẤT cho việc run kết thúc ĐÚNG, và `rows_written` chỉ tiến qua
+    `/progress` — nên một "thành công" không ai xác nhận là một con số ta không
+    có. Đây là hình dạng của một pod bị OOMKill ngay sau lô cuối: container thoát
+    0 ở lần thử duy nhất, nhưng lời báo cuối không bao giờ đi.
+
+    Thông báo trả về đi thẳng vào `ingest_run.error` và hiện lên cho người dùng,
+    nên nó phải tự đủ nghĩa: pod đã bị dọn từ lâu khi có người đọc tới, và hàng
+    này là thứ duy nhất còn lại.
+    """
+    if not job.exists:
+        return (
+            "the Kubernetes Job for this run no longer exists and the run was never closed by "
+            "its pod — either the Job was never created, or it finished long enough ago to be "
+            "cleaned up (Jobs are kept for one hour after they finish). Nothing further will "
+            "be reported for this run; start a new ingest."
+        )
+    if job.failed:
+        return (
+            "the Kubernetes Job for this run has a failed pod and the run was never closed by "
+            "that pod — a wrong Secret name keeps the pod from ever starting, and the ingest "
+            "is not retried automatically. Check the pod's logs (kept for one hour after the "
+            "Job finishes), then start a new ingest."
+        )
+    if job.succeeded:
+        return (
+            "the Kubernetes Job for this run finished but the pod never reported the outcome, "
+            "so how far it got is unknown — the rows counted here are only the ones it "
+            "reported. Treat the target table as incomplete and start a new ingest."
+        )
+    return None

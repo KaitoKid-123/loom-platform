@@ -1,4 +1,13 @@
-"""`POST /api/v1/lakehouses/{lakehouse_id}/ingest` — bắt đầu một lần nạp.
+"""HAI đường của người dùng cuối cho việc nạp dữ liệu:
+
+- `POST /api/v1/lakehouses/{lakehouse_id}/ingest` — bắt đầu một lần nạp.
+- `GET /api/v1/ingest/{run_id}` — đọc một run, và ĐỐI CHIẾU nó với Job của nó
+  trước khi trả lời (xem `get_ingest_run`).
+
+Cả docstring module này nói về đường THỨ NHẤT trừ chỗ nói rõ khác đi; đường thứ
+hai có docstring riêng ở chính handler của nó, vì cổng quyền của nó khác
+(`item.read`) và điều khó nhất ở nó không phải quyền mà là biết khi nào KHÔNG
+hỏi Kubernetes.
 
 **Cổng quyền hỏi `item.update` TRÊN LAKEHOUSE.** Nạp dữ liệu là GHI, và thứ bị
 ghi là lakehouse. Đây chính là lỗ mà Giai đoạn 2c phát hiện ở CTAS:
@@ -29,13 +38,13 @@ cho ra HAI Job cùng đọc nguồn và cùng ghi một bảng bronze. Task 10 �
 `_advance_watermark` an toàn với đua (xem `routers/internal_ingest.py`) nên
 không ai nhận 500 và watermark không lùi, nhưng đó chỉ chữa phần watermark:
 công việc vẫn bị làm hai lần. Cách chữa là một 409 Ở ĐÂY — lý do đầy đủ nằm ở
-docstring `IngestRun` (`models.py`), chỗ Task 13 sẽ đọc.
+docstring `IngestRun` (`models.py`).
 
 **Ghi Postgres TRƯỚC, phóng Job SAU, và không đảo lại được.** Hàng
 `ingest_run` là *ý định*; Job chỉ là cách ý định đó thành sự thật (xem
 docstring `jobs.job_name`). Commit trước nghĩa là một lần `launch()` hỏng để
-lại một run `pending` không có Job — đúng trạng thái mà vòng đối chiếu lười của
-Task 13 sinh ra để dọn, và một lần submit lại là vô hại vì tên Job tất định
+lại một run `pending` không có Job — đúng trạng thái mà `get_ingest_run` dọn khi
+có người đọc, và một lần submit lại là vô hại vì tên Job tất định
 theo `run_id`. Đảo thứ tự thì một commit hỏng để lại một pod ĐANG CHẠY đi hỏi
 spec của một run không tồn tại: không ai dọn được thứ không có hàng nào trong
 Postgres.
@@ -45,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request, status
@@ -54,14 +64,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
 from loom_api.deps import PrincipalDep, SessionDep
-from loom_api.ingest_service import SecretRefUnusable, secret_name_for
-from loom_api.jobs import JobLauncher, JobLauncherLike
+from loom_api.ingest_service import (
+    TERMINAL_RUN_STATUSES,
+    SecretRefUnusable,
+    failure_from_job,
+    secret_name_for,
+)
+from loom_api.jobs import JobLauncher, JobLauncherLike, JobStatus
 from loom_api.models import ACTIVE, IngestRun, Item
 from loom_api.permissions import PermissionService
 from loom_core.config import Settings
 from loom_core.item_definitions import ConnectionDefinition, ItemType
 from loom_core.roles import Action
-from loom_core.schemas import IngestRunAccepted, IngestStartRequest, Principal
+from loom_core.schemas import (
+    IngestRunAccepted,
+    IngestRunStatus,
+    IngestStartRequest,
+    Principal,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -88,17 +108,21 @@ async def _active_item(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-def _launch(app_state: State, settings: Settings, run_id: uuid.UUID, secret_name: str) -> None:
-    """Phóng Job cho `run_id`. ĐỒNG BỘ, và chỉ được gọi từ một thread.
+def _launcher(app_state: State, settings: Settings) -> JobLauncherLike:
+    """`JobLauncher` của tiến trình này, dựng LƯỜI ở lần đầu cần tới cụm.
 
-    Dựng `JobLauncher` LƯỜI, ở lần nạp đầu tiên, chứ không ở `create_app()`:
-    `JobLauncher.__init__` gọi `load_incluster_config()` rồi rơi về
-    `load_kube_config()` (xem `jobs.py`), nên dựng nó lúc tạo app sẽ giết MỌI
-    `create_app()` trên máy không có kubeconfig — CI, và mọi unit test hiện có,
-    không riêng test của đường nạp. Cái giá là một kubeconfig hỏng lộ ra ở
-    request nạp đầu tiên thay vì lúc khởi động; đổi lại, phần còn lại của
-    control plane vẫn phục vụ được khi cụm k8s không với tới, điều đúng cho một
-    API mà nạp dữ liệu chỉ là một đường trong nhiều đường.
+    Lười chứ không ở `create_app()`: `JobLauncher.__init__` gọi
+    `load_incluster_config()` rồi rơi về `load_kube_config()` (xem `jobs.py`),
+    nên dựng nó lúc tạo app sẽ giết MỌI `create_app()` trên máy không có
+    kubeconfig — CI, và mọi unit test hiện có, không riêng test của đường nạp.
+    Cái giá là một kubeconfig hỏng lộ ra ở request đầu tiên chạm cụm thay vì
+    lúc khởi động; đổi lại, phần còn lại của control plane vẫn phục vụ được khi
+    cụm k8s không với tới, điều đúng cho một API mà nạp dữ liệu chỉ là một
+    đường trong nhiều đường.
+
+    "Lần đầu cần tới cụm" là phóng một Job HOẶC đọc trạng thái một Job (Task
+    13): cả hai đường đi qua đây, nên cả hai cùng chia một launcher và cùng
+    được thay bằng một double ở `app.state.job_launcher`.
 
     Hai request đồng thời có thể cùng dựng một launcher và một cái ghi đè cái
     kia. Kết quả không phụ thuộc thứ tự, nhưng KHÔNG phải vì `load_*_config`
@@ -124,13 +148,25 @@ def _launch(app_state: State, settings: Settings, run_id: uuid.UUID, secret_name
             api_base_url=settings.task_api_base_url,
         )
         app_state.job_launcher = launcher
-    launcher.launch(
+    return launcher
+
+
+def _launch(app_state: State, settings: Settings, run_id: uuid.UUID, secret_name: str) -> None:
+    """Phóng Job cho `run_id`. ĐỒNG BỘ, và chỉ được gọi từ một thread."""
+    _launcher(app_state, settings).launch(
         run_id,
         secret_name,
         (settings.task_shared_secret_name, settings.task_shared_secret_key),
         cpu=settings.task_cpu,
         memory=settings.task_memory,
     )
+
+
+def _job_status(app_state: State, settings: Settings, run_id: uuid.UUID) -> JobStatus:
+    """Trạng thái Job của `run_id`. ĐỒNG BỘ, và chỉ được gọi từ một thread —
+    cùng lý do `_launch`: client `kubernetes` dùng urllib3, không có bản async.
+    """
+    return _launcher(app_state, settings).status(run_id)
 
 
 @router.post(
@@ -227,11 +263,103 @@ async def start_ingest(
     # trước khi có thứ TỰ SINH run.
     #
     # Một `ApiException` không phải 409 nổi lên thành 500 (xem `launch()`):
-    # hàng `ingest_run` đã commit ở trên nên ý định KHÔNG mất, và vòng đối
-    # chiếu lười của Task 13 sinh ra để dọn đúng trạng thái đó (nó CHƯA tồn
-    # tại — tới lúc đó, một run như vậy nằm lại ở `pending`). Nuốt lỗi ở đây để
-    # vẫn trả 202 mới là điều sai — 202 nghĩa là "đã nhận và đã yêu cầu Job",
+    # hàng `ingest_run` đã commit ở trên nên ý định KHÔNG mất, và `get_ingest_run`
+    # ở dưới dọn đúng trạng thái đó — một run `pending` không có Job nào đọc ra
+    # `exists=False` và thành `failed` ở lần ai đó mở nó lên xem. Nuốt lỗi ở đây
+    # để vẫn trả 202 mới là điều sai — 202 nghĩa là "đã nhận và đã yêu cầu Job",
     # và nói thế khi chưa yêu cầu được là một lời nói dối mà người dùng chỉ
     # phát hiện ra khi run treo mãi ở `pending`.
     await asyncio.to_thread(_launch, request.app.state, settings, run.id, secret_name)
     return IngestRunAccepted(run_id=run.id)
+
+
+@router.get("/ingest/{run_id}", response_model=IngestRunStatus)
+async def get_ingest_run(
+    run_id: uuid.UUID,
+    request: Request,
+    principal: Principal = PrincipalDep,
+    session: AsyncSession = SessionDep,
+) -> IngestRunStatus:
+    """Trạng thái một run, ĐỐI CHIẾU với Job của nó trước khi trả lời.
+
+    **Không có vòng lặp nền nào; đối chiếu xảy ra khi có người ĐỌC.** Đủ cho
+    Giai đoạn 3a vì chưa có gì tự sinh run, và không phải đường cụt: 3b gọi đúng
+    `failure_from_job` theo nhịp của nó (spec mục 3.4). Cái làm điều này khả thi
+    mà không cần thêm cột nào là `job_name` tất định theo `run_id` (xem
+    `jobs.py`): trạng thái Job của một run luôn tra được từ chính `run_id`.
+
+    **Vì sao KHÔNG tin cột `status` một mình.** `running` nghĩa là "pod đã lấy
+    spec ít nhất một lần", KHÔNG phải "pod còn sống" — không có heartbeat nào ở
+    3a (xem docstring `IngestRun.status`). Một pod bị OOMKill sau khi lấy spec
+    nằm ở `running` VĨNH VIỄN, và người dùng nhìn một thanh tiến trình không bao
+    giờ dừng. Câu trả lời chỉ có thể đến từ `JobLauncher.status()`.
+
+    **Cổng quyền: `item.read` trên LAKEHOUSE của run, lấy từ HÀNG `ingest_run`.**
+    Không bao giờ từ client — client chỉ đưa `run_id`, và `lakehouse_id` đọc ra
+    từ hàng là thứ duy nhất đã được kiểm. Không có cổng này, bất kỳ ai đã đăng
+    nhập cũng đọc được trạng thái nạp của MỌI workspace, kèm `error` — thứ
+    thường mang tên host nguồn và tên bảng. `item.read` chứ không `item.update`:
+    đọc trạng thái là ĐỌC, và đòi `contributor` sẽ khoá mất trường hợp bình
+    thường (một người được chia sẻ ở mức xem muốn biết dữ liệu đã tới chưa).
+
+    Cả "không có run nào" lẫn "có nhưng người gọi không thấy lakehouse của nó"
+    đều là 404 (`NotVisible`, xem `permissions.py`): phân biệt hai thứ đó là xác
+    nhận sự tồn tại của một run trong workspace người ta không được thấy.
+
+    **CHỈ đối chiếu run CHƯA kết thúc, và điều kiện đó phải chặn TRƯỚC lời gọi
+    Kubernetes.** Một run đã `succeeded`/`failed` thì Job của nó đã bị TTL dọn
+    (`ttl_seconds_after_finished=3600`), nên câu trả lời sẽ là `exists=False` —
+    tức là hỏi thêm không chỉ vô nghĩa mà còn biến một run thành công thành
+    `failed` sau một giờ. Với một run `failed`, nó còn ghi đè `error` do pod tự
+    báo (nguyên nhân thật) bằng một câu chung chung về Job.
+    Đây là phép canh dễ bỏ nhất của cả đường này; `test_a_succeeded_run_is_
+    never_re_examined` khẳng định nó bằng `status_calls == []`.
+
+    Ghi trạng thái mới xuống Postgres chứ không chỉ trả về: cột `status` phải tự
+    nói đúng sự thật cho MỌI người đọc bảng (một câu SQL tay, một lần điều tra
+    sự cố), và một run đã chết không được bắt lần đọc sau hỏi lại Kubernetes.
+    """
+    settings: Settings = request.app.state.settings
+
+    run = (
+        await session.execute(select(IngestRun).where(IngestRun.id == run_id))
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no ingest run with this id")
+    await PermissionService(session, principal).require_item(run.lakehouse_id, Action.item_read)
+
+    if run.status not in TERMINAL_RUN_STATUSES:
+        job = await asyncio.to_thread(_job_status, request.app.state, settings, run.id)
+        reason = failure_from_job(job)
+        if reason is not None:
+            logger.info(
+                "ingest.reconciled_to_failed",
+                run_id=str(run.id),
+                was=run.status,
+                job_exists=job.exists,
+                job_active=job.active,
+                job_succeeded=job.succeeded,
+                job_failed=job.failed,
+            )
+            run.status = "failed"
+            run.error = reason
+            # `finished_at` đặt Ở ĐÂY vì đây là thời điểm sớm nhất ta BIẾT run đã
+            # kết thúc — thời điểm nó thật sự chết thì không ai ghi lại được (pod
+            # đã chết mà không nói gì; đó là cả lý do đường này tồn tại). Để cột
+            # này NULL trên một run đã đóng thì mọi người đọc phải xử lý một
+            # trạng thái cuối không có mốc kết thúc, đúng thứ `/complete` tránh.
+            run.finished_at = datetime.now(UTC)
+            await session.commit()
+
+    return IngestRunStatus(
+        run_id=run.id,
+        lakehouse_id=run.lakehouse_id,
+        connection_id=run.connection_id,
+        stream=run.stream,
+        mode=run.mode,
+        status=run.status,
+        rows_written=run.rows_written,
+        error=run.error,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+    )
