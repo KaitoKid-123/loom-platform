@@ -532,15 +532,24 @@ probe-single-commit: check-context  ## Đo 2 GĐ3a (CỬA CHẶN) — PyIceberg 
 	@# chung chung thay vì tức thời.
 	@#
 	@# KHÔNG dùng `kubectl wait --for=condition=complete` như measure-ingest-pod:
-	@# script này CHỦ ĐỘNG thoát mã khác 0 khi verdict là KHÔNG ĐẠT (yêu cầu Đo
-	@# 2 GĐ3a — một phép đo chỉ báo hỏng qua chữ, không qua mã thoát, sớm muộn
-	@# sẽ bị một thứ chỉ đọc mã thoát chạy nhầm). Với `backoffLimit=0`, pod
-	@# thoát khác 0 đưa Job sang điều kiện Failed — KHÔNG BAO GIỜ đạt Complete,
-	@# dù phép đo đã chạy xong và in đủ kết quả. Chờ đúng "complete" ở đây là
-	@# chờ một điều kiện có thể không bao giờ tới. Vòng lặp dưới chờ TRẠNG THÁI
-	@# CUỐI CÙNG bất kể là Complete hay Failed, rồi mới đọc log/dọn Job — và
-	@# đúng đã ĐO thật (KHÔNG ĐẠT, xem chú thích cuối target): thiếu vòng lặp
-	@# này thì target luôn timeout 600s một cách vô ích dù Job đã xong từ lâu.
+	@# script này CHỦ ĐỘNG thoát mã khác 0 khi verdict KHÔNG ĐẠT (yêu cầu Đo 2
+	@# GĐ3a — một phép đo chỉ báo hỏng qua chữ, không qua mã thoát, sớm muộn sẽ
+	@# bị một thứ chỉ đọc mã thoát chạy nhầm). Với `backoffLimit=0`, pod thoát
+	@# khác 0 đưa Job sang điều kiện Failed — KHÔNG BAO GIỜ đạt Complete, dù
+	@# phép đo đã chạy xong và in đủ kết quả. Vòng lặp dưới chờ TRẠNG THÁI CUỐI
+	@# CÙNG bất kể Complete hay Failed, rồi mới đọc log/dọn Job.
+	@#
+	@# Đọc TRỰC TIẾP `.status.succeeded`/`.status.failed` (số đếm nguyên),
+	@# KHÔNG đọc `.status.conditions[?(@.status=="True")].type` như bản đầu —
+	@# ĐÃ VỠ THẬT trên k3s 1.32.13 (server của cụm này): một Job Complete có
+	@# HAI condition cùng `status: "True"` (`SuccessCriteriaMet` VÀ `Complete`
+	@# — `SuccessCriteriaMet` là condition mới từ tính năng JobSuccessPolicy),
+	@# nên jsonpath đó trả về CHUỖI "SuccessCriteriaMet Complete", không bao
+	@# giờ khớp `"Complete"` — vòng lặp chờ tới hết 600s một cách vô ích dù Job
+	@# đã xong từ ~150 giây, rồi báo "không kết thúc" SAI cho một lần chạy đã
+	@# ĐẠT. `.status.succeeded`/`.status.failed` là số đếm đơn giản, ổn định
+	@# qua các bản k8s, và với `backoffLimit=0` chỉ có đúng một lần thử nên
+	@# luôn là "0" hoặc "1" — không có điều kiện phụ nào cần khớp chuỗi.
 	@set -eo pipefail; \
 	img=$$(kubectl -n $(NS) get deploy loom-query -o jsonpath='{.spec.template.spec.containers[0].image}'); \
 	echo "image: $$img"; \
@@ -563,38 +572,84 @@ probe-single-commit: check-context  ## Đo 2 GĐ3a (CỬA CHẶN) — PyIceberg 
 	    exit 1; \
 	  fi; \
 	  sleep 5; elapsed=$$((elapsed + 5)); \
-	  phase=$$(kubectl -n $(NS) get job probe-single-commit \
-	    -o jsonpath='{.status.conditions[?(@.status=="True")].type}' 2>/dev/null || true); \
+	  succeeded=$$(kubectl -n $(NS) get job probe-single-commit \
+	    -o jsonpath='{.status.succeeded}' 2>/dev/null || true); \
+	  failed=$$(kubectl -n $(NS) get job probe-single-commit \
+	    -o jsonpath='{.status.failed}' 2>/dev/null || true); \
+	  if [ "$$succeeded" = "1" ]; then phase="Complete"; \
+	  elif [ "$$failed" = "1" ]; then phase="Failed"; \
+	  else phase=""; fi; \
 	done; \
 	kubectl -n $(NS) logs job/probe-single-commit; \
 	kubectl -n $(NS) delete job probe-single-commit --ignore-not-found; \
 	kubectl -n $(NS) delete configmap probe-single-commit-script --ignore-not-found; \
 	test "$$phase" = "Complete"
 	@#
-	@# ĐÃ ĐO thật (2026-08-11, cụm k3d-loom, --snapshot-probe-rows/--rows-per-batch/
-	@# --batches-c mặc định — 1 000 dòng cho A/B, 200 000 dòng x 20 lô cho C):
+	@# ĐÃ ĐO thật, hai vòng (cụm k3d-loom, mặc định --snapshot-probe-rows=1000,
+	@# --rows-per-batch=200000, --batches-c=20):
 	@#
+	@# VÒNG 1 — A/B/C (2026-08-11), câu hỏi "transaction gộp nhiều lô thành một
+	@# snapshot?": KHÔNG ĐẠT.
 	@#   A: hai append trong một transaction       -> 2 snapshot
 	@#   B: overwrite+append trong một transaction -> 3 snapshot
-	@#   C: RSS đỉnh với 20 lô trong một transaction: 496 MiB   (bò lên đều,
-	@#      324 -> 496 MiB, không có lô nào tụt — cùng hình dạng leo-không-phẳng
-	@#      đã thấy ở Đo 1, KHÔNG tệ hơn hẳn dù giữ transaction mở suốt 20 lô)
+	@#   C: RSS đỉnh với 20 lô trong một transaction: 499 MiB (bò lên đều,
+	@#      338 -> 499 MiB, không có lô nào tụt) — TỆ HƠN cách ghi-commit-từng-lô
+	@#      mà Đo 1 đã đo cho ĐÚNG hình dạng này: 406 MiB (mục measure-ingest-pod
+	@#      phía trên, dòng "rss_peak_mib=406"). Đọc mã nguồn
+	@#      `pyiceberg/table/update/snapshot.py` giải thích đúng con số: mỗi
+	@#      `tx.append`/`tx.overwrite` dựng một `_SnapshotProducer` riêng,
+	@#      `__exit__` của nó gọi `commit()` xếp một `AddSnapshotUpdate` (một
+	@#      `Snapshot` với `snapshot_id` MỚI) vào `Transaction._updates` NGAY,
+	@#      trước khi có request mạng nào — hai `tx.append` => 2
+	@#      `AddSnapshotUpdate` (khớp A); `tx.overwrite` tự nó là delete (bảng B
+	@#      có dữ liệu cũ nên `files_affected=True`, sinh 1 snapshot DELETE) +
+	@#      append dữ liệu mới (1 snapshot nữa) = 2, cộng `tx.append` thứ hai =
+	@#      3 (khớp B). `commit_transaction()` chỉ gửi MỘT request PUT mang
+	@#      TOÀN BỘ `AddSnapshotUpdate` đã xếp — "một transaction" ở PyIceberg
+	@#      0.11.1 đảm bảo MỘT request PUT/MỘT điều kiện tranh chấp lạc quan
+	@#      (đủ để bảng CŨ đứng nguyên nếu crash trước commit), NHƯNG KHÔNG đảm
+	@#      bảo MỘT snapshot Iceberg — đúng giả định mà thiết kế `full` một-
+	@#      transaction (Task 12 bản gốc) cần và không giữ được. Thiết kế đó bị
+	@#      BÁC BỎ; chủ dự án chọn hướng thay thế: bảng tạm rồi tráo tên qua
+	@#      `rename_table` — xem VÒNG 2.
 	@#
-	@# KHÔNG ĐẠT. Đọc mã nguồn `pyiceberg/table/update/snapshot.py` giải thích
-	@# đúng con số đo được: mỗi `tx.append`/`tx.overwrite` dựng một
-	@# `_SnapshotProducer` riêng, và `__exit__` của nó gọi `commit()` xếp một
-	@# `AddSnapshotUpdate` (một `Snapshot` với `snapshot_id` MỚI) vào
-	@# `Transaction._updates` NGAY LẬP TỨC — trước khi có request mạng nào. Hai
-	@# `tx.append` => 2 `AddSnapshotUpdate` (khớp con số đo A). `tx.overwrite`
-	@# tự nó đã là delete (bảng B có dữ liệu cũ nên `files_affected=True`, sinh
-	@# 1 snapshot DELETE) + append dữ liệu mới (1 snapshot nữa) = 2, cộng
-	@# `tx.append` thứ hai = 3 (khớp con số đo B). `commit_transaction()` chỉ
-	@# gửi MỘT request PUT mang TOÀN BỘ các `AddSnapshotUpdate` đã xếp — "một
-	@# transaction" ở PyIceberg 0.11.1 đảm bảo MỘT request PUT/MỘT điều kiện
-	@# tranh chấp lạc quan (đủ để bảng CŨ đứng nguyên nếu crash trước commit),
-	@# NHƯNG KHÔNG đảm bảo MỘT snapshot Iceberg — đúng giả định mà Task 12 cần
-	@# kiểm và không giữ được. `mode: full` phải đổi sang bảng tạm rồi tráo
-	@# tên, KHÔNG giữ thiết kế "N lô ghi trong một transaction -> 1 snapshot".
+	@# VÒNG 2 — D (2026-08-12/13), câu hỏi "rename_table dựng nổi một chuỗi
+	@# tráo bảng?": ĐẠT (có điều kiện) — ĐÂY LÀ CỬA CHẶN CÒN HIỆU LỰC, A/B/C ở
+	@# trên chỉ còn là hồ sơ.
+	@#   D1 rename chạy được   : True
+	@#   D2 dữ liệu nguyên vẹn : True  (1000/1000 dòng khớp CẢ id lẫn pad)
+	@#   D3 tên cũ biến mất    : True  (NoSuchTableError — đúng là MOVE)
+	@#   D4 rename đè tên cũ   : conflict  (TableAlreadyExistsError — TỪ CHỐI)
+	@#
+	@#   D1-D3 ĐẠT: `rename_table` là một nguyên liệu THẬT dùng được (chạy
+	@#   được qua Lakekeeper, giữ nguyên dữ liệu, và là MOVE thật — tên cũ mất
+	@#   hẳn). D4 (không quyết định mã thoát, nhưng quyết định CHUỖI THAO TÁC):
+	@#   rename TỪ CHỐI ghi đè lên một tên đã tồn tại. Cộng D3 (MOVE) với D4 (từ
+	@#   chối ghi đè): chuỗi tráo bảng của `full` KHÔNG THỂ là một lời gọi
+	@#   `rename` duy nhất — phải qua NHIỀU bước catalog: HOẶC `drop(target)`
+	@#   rồi `rename(staging -> target)` (cửa sổ: bảng KHÔNG TỒN TẠI), HOẶC ba
+	@#   bước `rename(target -> target_old)` + `rename(staging -> target)` +
+	@#   `drop(target_old)` (cửa sổ hẹp hơn: giữa hai lời gọi catalog nhanh).
+	@#   Dù chọn chuỗi nào, có một CỬA SỔ mà tên target KHÔNG PHÂN GIẢI được —
+	@#   **`full` chỉ GẦN nguyên tử, KHÔNG nguyên tử tuyệt đối**, và spec Giai
+	@#   đoạn 3a KHÔNG được hứa một đảm bảo mà nó không có. Chọn GIỮA hai chuỗi
+	@#   thay thế (2 bước hay 3 bước) là quyết định của chủ dự án, không phải
+	@#   của phép đo này.
+	@#
+	@# CẠM BẪY DỌN DẸP RIÊNG CỦA D (đã ăn thật, đã sửa): D1 đổi tên
+	@# `probe_d_src` thành `probe_d_dst`, nên dọn dẹp theo một danh sách TÊN ĐÃ
+	@# TẠO sẽ cố `drop_table` một tên KHÔNG CÒN TỒN TẠI. Lakekeeper trả 403
+	@# Forbidden (không phải 404) cho trường hợp đó — quản trị API của nó CỐ Ý
+	@# không phân biệt "không tìm thấy" với "không được phép" cho một principal
+	@# ẩn danh — nên PyIceberg ném `ForbiddenError`, KHÔNG phải
+	@# `NoSuchTableError`, và bản dọn dẹp cũ (chỉ suppress NoSuchTableError)
+	@# không bắt được nó: một lần chạy có VERDICT ĐÚNG (D in đủ bốn câu trả
+	@# lời) vẫn thoát mã khác 0 vì dọn dẹp ném lỗi SAU KHI verdict đã chốt —
+	@# một false negative. `scripts/probe_iceberg_single_commit.py` sửa bằng
+	@# liệt kê THẬT qua `catalog.list_tables` lúc dọn (không theo tên đã tạo)
+	@# và bọc MỌI bước dọn dẹp trong try/except riêng — dọn dẹp là best-effort
+	@# chạy SAU KHI verdict đã chốt, một lỗi dọn dẹp (dù là gì) không được phép
+	@# đổi mã thoát của một phép đo đã tính đúng.
 
 .PHONY: ram
 ram: check-context  ## Tổng RAM cụm đang dùng, so với NGÂN SÁCH tự đặt 4 GiB
