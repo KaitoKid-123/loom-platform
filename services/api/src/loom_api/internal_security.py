@@ -64,10 +64,30 @@ async def require_ingest_secret(request: Request) -> None:
     file sau), nên một hàm dùng chung sẽ phải nhận bí mật qua tham số và mất
     đúng thứ làm nó an toàn — việc nó tự lấy giá trị từ nguồn cấu hình của
     chính service, không phải từ tay người gọi.
+
+    **So trên BYTES, không trên `str`, và đó là một lỗi ĐÃ ĐO chứ không phải
+    một sự cẩn thận thừa.** `hmac.compare_digest` trên hai `str` NÉM
+    `TypeError: comparing strings with non-ASCII characters is not supported`.
+    Starlette giải mã header bằng latin-1, nên chỉ cần MỘT byte >127 trong
+    header là chuỗi nhận được có ký tự ngoài ASCII — đã dựng lại thật qua
+    ASGI: `X-Loom-Ingest-Secret: bi-mat\\xc3\\xa9` cho ra 500 kèm nguyên
+    traceback trong log, thay vì 401. Một request KHÔNG cần xác thực gì mà ép
+    được server 500 là bề mặt sai hoàn toàn cho một cổng bảo mật.
+
+    `latin-1` cho phía header và `utf-8` cho phía cấu hình là CẶP ĐÚNG, không
+    phải hai lựa chọn tuỳ tiện: `latin-1` khôi phục CHÍNH XÁC những byte đã
+    nằm trên dây (nó là phép giải mã mà Starlette vừa dùng), còn giá trị trong
+    `Settings` là một `str` Python mà mọi HTTP client sẽ đặt lên dây dưới dạng
+    utf-8. Với một bí mật ASCII — trường hợp thật — hai phép mã hoá cho cùng
+    một chuỗi byte. `errors="replace"` để hàm này KHÔNG THỂ ném: ký tự >U+00FF
+    không tới được từ một header HTTP thật, nên nhánh đó chỉ bảo vệ trường hợp
+    ai đó gọi dependency này với một `Request` tự dựng.
     """
     settings: Settings = request.app.state.settings
     provided = request.headers.get(INGEST_SHARED_SECRET_HEADER)
-    if provided is None or not hmac.compare_digest(provided, settings.ingest_shared_secret):
+    if provided is None or not hmac.compare_digest(
+        provided.encode("latin-1", "replace"), settings.ingest_shared_secret.encode("utf-8")
+    ):
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "missing or invalid internal shared secret"
         )

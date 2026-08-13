@@ -183,6 +183,29 @@ async def test_a_wrong_secret_is_401_not_403_or_500(api_world: ApiWorld) -> None
     assert response.status_code == 401, response.text
 
 
+async def test_a_header_with_non_ascii_bytes_is_401_not_500(api_world: ApiWorld) -> None:
+    """Lỗi THẬT, đã dựng lại trước khi sửa — không phải một khả năng lý thuyết.
+
+    `hmac.compare_digest` trên hai `str` ném `TypeError: comparing strings with
+    non-ASCII characters is not supported`, và Starlette giải mã header bằng
+    latin-1, nên đúng MỘT byte >127 là đủ. Trước khi đổi sang so trên bytes,
+    request dưới đây trả 500 kèm nguyên traceback trong log — một request KHÔNG
+    cần xác thực gì mà ép được server 500.
+
+    Header truyền dưới dạng BYTES THÔ, không phải `str`: httpx từ chối mã hoá
+    một `str` ngoài ASCII vào header (`UnicodeEncodeError` ở phía client), nên
+    một phép kiểm viết bằng `str` sẽ đỏ ở CLIENT và không bao giờ chạm tới
+    server — tức là canh nhầm chỗ. `b"\\xc3\\xa9"` là những gì một client bất kỳ
+    (curl, một pod tự viết) đặt lên dây được.
+    """
+    run = await _run(api_world)
+    response = await api_world.client.get(
+        f"/internal/ingest/{run.id}/spec",
+        headers={INGEST_SHARED_SECRET_HEADER.encode(): b"bi-mat\xc3\xa9"},
+    )
+    assert response.status_code == 401, response.text
+
+
 async def test_the_right_secret_passes_the_gate(api_world: ApiWorld) -> None:
     """Chốt chống-xanh-rỗng cho ba phép kiểm trên: nếu MỌI request đều 401 vì
     một lý do khác hẳn (route gắn nhầm prefix, chẳng hạn), cả ba xanh mà không

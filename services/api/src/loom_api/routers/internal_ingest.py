@@ -115,10 +115,17 @@ async def ingest_spec(run_id: uuid.UUID, session: AsyncSession = SessionDep) -> 
         )
     ).scalar_one_or_none()
     if connection is None:
-        # Chỉ với tới được khi hàng `item` đã bị XOÁ CỨNG khỏi database — khoá
-        # ngoại `ingest_run.connection_id -> item.id` chặn mọi đường khác. 409
-        # chứ không 404: `run_id` TỒN TẠI, và trả 404 ở đây sẽ khiến pod (và
-        # người đọc log) đi tìm một run không có thật.
+        # KHÔNG với tới được qua đường bình thường, và cả HAI vế của điều kiện
+        # tra ở trên đều có lý do: khoá ngoại `ingest_run.connection_id ->
+        # item.id` khiến hàng `item` không xoá cứng được chừng nào run còn
+        # sống (xoá MỀM chỉ đổi `state`, và câu tra này cố ý không lọc theo
+        # `state` — xem docstring), còn lọc `type = 'connection'` bắt trường
+        # hợp một hàng `ingest_run` trỏ vào một item KHÁC loại: `routers/
+        # ingest.py` không tạo ra được hàng như thế, nhưng một lần sửa tay hay
+        # một thành phần sau này thì có.
+        #
+        # 409 chứ không 404: `run_id` TỒN TẠI, và trả 404 ở đây sẽ khiến pod
+        # (và người đọc log) đi tìm một run không có thật.
         logger.error("ingest.spec_connection_missing", run_id=str(run_id))
         raise HTTPException(
             status.HTTP_409_CONFLICT, "the connection this run was created from no longer exists"
