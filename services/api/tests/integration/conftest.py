@@ -50,6 +50,7 @@ from loom_api.models import (
     AppUser,
     AuditLog,
     Domain,
+    IngestRun,
     Item,
     RoleAssignment,
     Workspace,
@@ -620,6 +621,13 @@ async def api_world(
                     # và fixture im lặng để lại dữ liệu, đúng lỗi Task 19 đã gặp.
                     await session.execute(delete(AuditLog).where(AuditLog.actor_user_id == user_id))
                     for ws_id in (ws_a, ws_b):
+                        # TRƯỚC `item`: `ingest_run.lakehouse_id`/`connection_id`
+                        # có khoá ngoại tới `item.id` (migration 0005), nên xoá
+                        # item trước sẽ vỡ và bỏ lại cả workspace lẫn user —
+                        # đúng lớp lỗi khoá ngoại mà audit đã gặp ở Task 19.
+                        await session.execute(
+                            delete(IngestRun).where(IngestRun.workspace_id == ws_id)
+                        )
                         await session.execute(delete(Item).where(Item.workspace_id == ws_id))
                         await session.execute(
                             delete(RoleAssignment).where(RoleAssignment.scope_id == ws_id)

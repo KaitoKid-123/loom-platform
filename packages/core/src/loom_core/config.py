@@ -108,6 +108,23 @@ class Settings(BaseSettings):
     # suy ra được từ con số này.
     task_memory: str = "512Mi"
     task_api_base_url: str = "http://loom-api.loom.svc.cluster.local:8000"
+    # ĐỊA CHỈ của bí mật chia sẻ trong cụm — TÊN Secret và KHOÁ, KHÔNG phải giá
+    # trị. `loom-api` chỉ chuyển cặp này vào `secretKeyRef` của pod nạp (xem
+    # `JobLauncher.launch`); nó không đọc nội dung, và không có trường nào ở đây
+    # để nó đọc.
+    #
+    # Mặc định trỏ vào Secret `loom-app` khoá `query-shared-secret` — CÙNG bí
+    # mật mà Giai đoạn 2b đã cấp phát cho loom-query (xem `secret.yaml` và
+    # `loom_core.internal_auth`). Dùng LẠI chứ không cấp thêm một bí mật thứ
+    # hai là một lựa chọn có giá, ghi ra chứ không giấu: `loom-api` đã biết
+    # giá trị đó dưới tên `query_shared_secret`, nên `/internal/ingest/*`
+    # (Task 10) so khớp được ngay mà không cần một Secret nữa phải tồn tại
+    # trước khi Job chạy được — nhưng đổi lại, một pod nạp bị chiếm cũng cầm
+    # đúng bí mật để giả làm `loom-api` khi gọi `loom-query`. Tách đôi khi cần
+    # là đổi hai trường này (và thêm một khoá vào `secret.yaml`), không phải
+    # sửa mã.
+    task_shared_secret_name: str = "loom-app"  # noqa: S105 — tên Secret, không phải giá trị
+    task_shared_secret_key: str = "query-shared-secret"  # noqa: S105 — tên khoá
 
     @field_validator(
         "public_base_url",

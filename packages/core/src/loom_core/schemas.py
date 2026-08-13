@@ -323,6 +323,45 @@ class QuerySubmitRequest(BaseModel):
     workspace_id: uuid.UUID | None = None
 
 
+class IngestStartRequest(BaseModel):
+    """Body của `POST /api/v1/lakehouses/{lakehouse_id}/ingest` (Giai đoạn 3a).
+
+    `lakehouse_id` CỐ Ý không có mặt ở đây: nó nằm trên đường dẫn, và cổng
+    quyền (`item.update`) hỏi đúng giá trị đó. Nhận thêm một bản sao trong thân
+    request là mở đường cho hai giá trị lệch nhau — và khi chúng lệch, một bên
+    đã đi qua cổng quyền còn bên kia thì chưa. Cùng lớp lỗi mà
+    `QuerySubmitRequest.workspace_id` mô tả ở trên, chỉ khác là ở đây tránh
+    được hẳn bằng cách không khai trường nào.
+
+    `mode` là `Literal` chứ không `str`: một mode lạ phải là 422 ở BIÊN, trước
+    khi có hàng `ingest_run` nào được tạo và trước khi có Job nào được phóng.
+    Một `if mode not in (...)` trong handler cho cùng kết quả hôm nay và lặng
+    lẽ thôi bảo vệ vào ngày ai đó thêm mode thứ ba ở một chỗ mà quên chỗ kia.
+
+    `stream` giới hạn 255 ký tự để khớp cột `ingest_run.stream` — dài hơn thì
+    hỏng ở Postgres dưới dạng một 500, còn ở đây nó là một 422 chỉ đúng ô sai.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: uuid.UUID
+    stream: str = Field(min_length=1, max_length=255)
+    mode: Literal["full", "incremental"]
+
+
+class IngestRunAccepted(BaseModel):
+    """202 của `POST .../ingest` — chỉ `run_id`, và đó là đủ.
+
+    202 chứ không 201: hàng `ingest_run` đã tồn tại thật, nhưng việc nó mô tả
+    thì chưa xong — Job vừa mới được yêu cầu. Mọi thứ khác (trạng thái, số
+    dòng, lỗi) đọc qua `GET /ingest/{run_id}` ở Task 13; trả một bản chụp
+    trạng thái ngay tại đây chỉ là trả lại chuỗi `"pending"` mà người gọi đã
+    biết trước.
+    """
+
+    run_id: uuid.UUID
+
+
 class LakehouseResolveResponse(BaseModel):
     """`ids[ten]` là `None` cho tên không tồn tại HOẶC chỉ tồn tại ở trạng thái
     khác `active` — endpoint này không phân biệt hai lý do đó với nhau, cùng
