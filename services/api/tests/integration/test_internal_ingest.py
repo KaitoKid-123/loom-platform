@@ -19,6 +19,7 @@ riêng. Điều đang kiểm ở file này bắt đầu TỪ một run đã tồ
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any
@@ -28,6 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from loom_api.models import DEFAULT_TENANT_ID, IngestRun, Item, StreamState
+from loom_api.routers.internal_ingest import _advance_watermark
 from loom_core.internal_auth import INGEST_SHARED_SECRET_HEADER
 from loom_core.item_definitions import ItemType
 
@@ -114,6 +116,28 @@ async def _run(world: ApiWorld, *, mode: str = "incremental", status: str = "pen
     return run
 
 
+async def _sibling_run(
+    world: ApiWorld, run: IngestRun, *, mode: str = "incremental", status: str = "pending"
+) -> IngestRun:
+    """Một run THỨ HAI trên CÙNG (lakehouse, connection, stream) — cấu hình mà
+    `start_ingest` cho phép tồn tại vì nó KHÔNG có cổng chống trùng, và
+    `job_name` tất định theo `run_id` chứ không theo stream (xem `jobs.py`), nên
+    hai lần bấm Nạp cho ra hai Job cùng ghi một stream."""
+    sibling = IngestRun(
+        id=uuid.uuid4(),
+        lakehouse_id=run.lakehouse_id,
+        connection_id=run.connection_id,
+        workspace_id=world.ws_a,
+        stream=run.stream,
+        mode=mode,
+        status=status,
+    )
+    async with _maker(world)() as session:
+        session.add(sibling)
+        await session.commit()
+    return sibling
+
+
 async def _run_row(world: ApiWorld, run_id: uuid.UUID) -> IngestRun:
     async with _maker(world)() as session:
         return (await session.execute(select(IngestRun).where(IngestRun.id == run_id))).scalar_one()
@@ -130,6 +154,40 @@ async def _watermark(world: ApiWorld, run: IngestRun) -> StreamState | None:
                 )
             )
         ).scalar_one_or_none()
+
+
+async def _assert_parked_in_postgres(task: asyncio.Task[None]) -> None:
+    """Khẳng định `task` đang bị Postgres KHOÁ — không phải chỉ "chưa được lập lịch".
+
+    Phiên bản đầu của phép kiểm này dùng `for _ in range(50): await
+    asyncio.sleep(0)` rồi `assert not task.done()`. Nó SAI, và đã tự chứng minh
+    là sai: dưới bản cài đặt `SELECT`-rồi-`INSERT` (không an toàn với đua), câu
+    khẳng định đó vẫn XANH khi chạy cả file, vì `sleep(0)` chỉ nhường vòng lặp
+    và không cho asyncpg đủ lượt để hoàn thành một round trip — "chưa xong" khi
+    đó chỉ có nghĩa "chưa kịp bắt đầu". Đúng kiểu xanh-nhờ-may-mắn.
+
+    `asyncio.wait({task}, timeout=...)` chờ THỜI GIAN THẬT và KHÔNG huỷ task
+    (khác `wait_for`, thứ huỷ khi hết hạn). Sau hai giây thật, một câu SELECT
+    hay INSERT trên container Postgres nội bộ đã phải xong từ lâu — nên "vẫn
+    còn pending" chỉ còn một cách giải thích: nó đang chờ một khoá.
+
+    Sai theo hướng nào cũng ĐỎ, không bao giờ xanh oan: nếu máy tải nặng tới
+    mức một round trip mất hơn hai giây, câu này vẫn đúng nhưng vì lý do sai —
+    nên phép chứng minh đỏ (đổi `_advance_watermark` về `SELECT`-rồi-`INSERT`)
+    là thứ xác nhận nó thật sự canh đúng cửa sổ, và nó đã được chạy.
+    """
+    done, _pending = await asyncio.wait({task}, timeout=2.0)
+    if done:
+        # `task.exception()` để một ngoại lệ bên trong hiện ra thay vì bị nuốt
+        # sau lưng một `AssertionError` chung chung.
+        outcome = task.exception() if not task.cancelled() else "bị huỷ"
+        raise AssertionError(
+            "`second` chạy xong dù `first` chưa commit, nên cửa sổ đua KHÔNG được "
+            "đi vào và phép kiểm này không chứng minh điều nó nêu tên. "
+            f"Kết quả của task: {outcome!r}. `_advance_watermark` phải hiện-thực-hoá "
+            "hàng (INSERT ... ON CONFLICT DO NOTHING) rồi khoá nó (SELECT ... FOR "
+            "UPDATE), chứ không SELECT rồi mới INSERT."
+        )
 
 
 def _progress(cursor_value: str, cursor_type: str = "bigint", **extra: Any) -> dict[str, Any]:
@@ -204,6 +262,60 @@ async def test_a_header_with_non_ascii_bytes_is_401_not_500(api_world: ApiWorld)
         headers={INGEST_SHARED_SECRET_HEADER.encode(): b"bi-mat\xc3\xa9"},
     )
     assert response.status_code == 401, response.text
+
+
+async def test_the_gate_compares_the_ingest_secret_not_the_query_secret(
+    api_world: ApiWorld,
+) -> None:
+    """Phép kiểm DUY NHẤT ghim được việc TÁCH hai bí mật, và nó phải ở đây.
+
+    `packages/core/tests/test_config.py::test_the_ingest_secret_is_not_the_query_secret`
+    KHÔNG ghim được: nó chỉ khẳng định hai TRƯỜNG `Settings` đọc hai biến môi
+    trường khác nhau, không bao giờ chạm tới cái cổng. Đã chứng minh: đổi
+    `settings.ingest_shared_secret` -> `settings.query_shared_secret` ở
+    `internal_security.py` để lại TOÀN BỘ bộ test xanh, vì trong test cả hai
+    trường cùng mang một chuỗi placeholder. Tức là tính chất an ninh mà việc
+    tách bí mật tồn tại để tạo ra đúng trong mã và KHÔNG được canh bởi bất cứ
+    gì — cách một lần tái cấu trúc là lặng lẽ mất.
+
+    Vá `app.state.settings` bằng `model_copy` chứ không `monkeypatch.setenv`:
+    `get_settings()` là `lru_cache` và `create_app()` đã gọi nó xong từ lúc
+    `api_world` dựng app, nên đặt biến môi trường ở đây là vô tác dụng.
+    `model_copy` trả về một đối tượng MỚI (đã kiểm: `Settings` là `frozen`,
+    và bản gốc trong cache không bị sửa), nên nó không rò sang test khác dùng
+    cùng `Settings` đã cache.
+
+    Câu khẳng định thứ HAI là câu chịu lực: bí mật của `loom-query` phải bị TỪ
+    CHỐI. Chỉ khẳng định bí mật đúng đi qua thì một bản cài đặt so với
+    `query_shared_secret` vẫn xanh, vì ở đó hai giá trị bằng nhau.
+    """
+    ingest_secret = "value-of-the-ingest-secret"
+    query_secret = "value-of-the-query-secret"
+    api_world.app.state.settings = api_world.app.state.settings.model_copy(
+        update={"ingest_shared_secret": ingest_secret, "query_shared_secret": query_secret}
+    )
+    run = await _run(api_world)
+    spec = f"/internal/ingest/{run.id}/spec"
+
+    with_ingest = await api_world.client.get(
+        spec, headers={INGEST_SHARED_SECRET_HEADER: ingest_secret}
+    )
+    with_query = await api_world.client.get(
+        spec, headers={INGEST_SHARED_SECRET_HEADER: query_secret}
+    )
+
+    # MỘT câu khẳng định trên CẢ HAI mã trạng thái, không phải hai câu nối tiếp:
+    # dưới bản cài đặt sai thì cả hai vế đều lệch, và hai `assert` rời nhau chỉ
+    # báo được vế nào chạy trước — che mất đúng nửa thông tin cần để chẩn đoán.
+    assert (with_ingest.status_code, with_query.status_code) == (200, 401), (
+        f"ingest secret -> {with_ingest.status_code} (phải 200), "
+        f"query secret -> {with_query.status_code} (phải 401). "
+        "Cổng đang so với `settings.query_shared_secret` thay vì "
+        "`settings.ingest_shared_secret`: việc tách bí mật (xem "
+        "`Settings.task_shared_secret_key`) chỉ còn trên giấy, và một pod nạp bị "
+        "chiếm lại giả được loom-api với loom-query dưới danh nghĩa bất kỳ "
+        "principal nào."
+    )
 
 
 async def test_the_right_secret_passes_the_gate(api_world: ApiWorld) -> None:
@@ -316,19 +428,7 @@ async def test_a_full_run_is_not_handed_the_stored_watermark(api_world: ApiWorld
     await api_world.client.post(
         f"/internal/ingest/{run.id}/progress", json=_progress("400"), headers=_headers(api_world)
     )
-    # Một run THỨ HAI, chế độ full, trên CÙNG lakehouse+connection+stream.
-    full = IngestRun(
-        id=uuid.uuid4(),
-        lakehouse_id=run.lakehouse_id,
-        connection_id=run.connection_id,
-        workspace_id=api_world.ws_a,
-        stream=STREAM,
-        mode="full",
-        status="pending",
-    )
-    async with _maker(api_world)() as session:
-        session.add(full)
-        await session.commit()
+    full = await _sibling_run(api_world, run, mode="full")
 
     body = (
         await api_world.client.get(f"/internal/ingest/{full.id}/spec", headers=_headers(api_world))
@@ -479,6 +579,125 @@ async def test_a_watermark_written_before_this_migration_is_reset_not_compared(
     state = await _watermark(api_world, run)
     assert state is not None
     assert (state.cursor_type, state.cursor_value) == ("bigint", "400")
+
+
+async def test_two_runs_reporting_one_stream_at_once_never_500(api_world: ApiWorld) -> None:
+    """Đường HTTP THẬT, hai lần báo tiến độ ĐẦU TIÊN chạy đồng thời.
+
+    Đây là hình dạng mà một người dùng tạo ra bằng cách bấm Nạp hai lần:
+    `start_ingest` không chống trùng, nên hai `ingest_run` cùng sống và hai Job
+    cùng ghi một stream. Trước khi `_advance_watermark` chuyển sang
+    hiện-thực-hoá-rồi-khoá, cả hai đều thấy `None` rồi cùng `INSERT`, và một
+    cái vỡ ở `uq_stream_state_lakehouse_connection_stream` -> `IntegrityError`
+    -> 500.
+
+    **Phép kiểm này KHÔNG bảo đảm cửa sổ đua bị đi vào** — nó phụ thuộc hai
+    request đan nhau đúng chỗ, và `asyncio.gather` không hứa điều đó. Nó ở đây
+    để chứng minh phần NỐI DÂY (router -> handler -> hàm) đúng đầu-cuối. Phép
+    kiểm ngay dưới mới là cái ép cửa sổ đó mở ra một cách xác định.
+
+    `pool_size=2, max_overflow=0` ở `api_world` (xem `conftest.py`) là vừa đủ
+    cho hai request đồng thời; nhiều hơn hai sẽ chặn ở pool chứ không ở
+    Postgres, và khi đó phép kiểm đo hàng đợi của SQLAlchemy thay vì đo khoá.
+    """
+    run_a = await _run(api_world)
+    run_b = await _sibling_run(api_world, run_a)
+    headers = _headers(api_world)
+
+    first, second = await asyncio.gather(
+        api_world.client.post(
+            f"/internal/ingest/{run_a.id}/progress", json=_progress("400"), headers=headers
+        ),
+        api_world.client.post(
+            f"/internal/ingest/{run_b.id}/progress", json=_progress("1000"), headers=headers
+        ),
+    )
+
+    assert (first.status_code, second.status_code) == (204, 204), f"{first.text}\n{second.text}"
+    state = await _watermark(api_world, run_a)
+    assert state is not None
+    # MỘT hàng duy nhất, và nó mang mốc CAO NHẤT — bất kể ai chạy trước.
+    assert state.cursor_value == "1000"
+
+
+async def test_the_first_write_race_window_is_actually_closed(api_world: ApiWorld) -> None:
+    """Cửa sổ đua ép mở XÁC ĐỊNH, không nhờ may mắn về thời điểm.
+
+    Gọi thẳng `_advance_watermark` với HAI session thật, thay vì hai request
+    HTTP: session của một request được commit bên trong handler, nên không có
+    cách nào tạm dừng nó ở giữa. Đây là cái giá phải trả — phép kiểm này chạm
+    vào một hàm nội bộ — và nó đáng, vì phép kiểm HTTP ở trên không thể chứng
+    minh cửa sổ đã được đi vào.
+
+    Trình tự, và vì sao nó xác định:
+
+    1. `first` chạy xong `INSERT ... ON CONFLICT DO NOTHING` nhưng CHƯA commit.
+       Hàng đã tồn tại nhưng chưa hiện ra với bất kỳ transaction nào khác.
+    2. `second` bắt đầu, và `_assert_parked_in_postgres` khẳng định nó KHÔNG
+       chạy xong được — xem docstring hàm đó cho lý do đây là một quan sát chắc
+       chắn về việc bị KHOÁ, không phải một phỏng đoán về thứ tự lập lịch.
+    3. `first` commit. `second` tỉnh lại, thấy hàng đã có, và đi tiếp bằng
+       `SELECT ... FOR UPDATE` + `moves_forward`.
+
+    `wait_for` ở bước 3 có timeout để một deadlock đỏ trong mười giây thay vì
+    treo cả bộ test.
+    """
+    run_a = await _run(api_world)
+    run_b = await _sibling_run(api_world, run_a)
+
+    maker = _maker(api_world)
+    async with maker() as first, maker() as second:
+        row_a = await first.get(IngestRun, run_a.id)
+        row_b = await second.get(IngestRun, run_b.id)
+        assert row_a is not None and row_b is not None
+
+        await _advance_watermark(first, row_a, "id", "bigint", "400")
+
+        blocked = asyncio.create_task(_advance_watermark(second, row_b, "id", "bigint", "1000"))
+        await _assert_parked_in_postgres(blocked)
+
+        await first.commit()
+        await asyncio.wait_for(blocked, timeout=10)
+        await second.commit()
+
+    state = await _watermark(api_world, run_a)
+    assert state is not None
+    assert state.cursor_value == "1000"
+
+
+async def test_a_concurrent_report_cannot_drag_the_watermark_backwards(
+    api_world: ApiWorld,
+) -> None:
+    """Cùng cửa sổ, thứ tự NGƯỢC: người vào sau mang mốc THẤP HƠN.
+
+    `ON CONFLICT DO NOTHING` một mình không đủ cho điều này — nó chỉ chặn được
+    va chạm ở `INSERT`. Thứ giữ được luật "chỉ tiến" ở đây là `FOR UPDATE`:
+    không có nó, `second` đọc watermark rồi ghi đè bằng một mốc thấp hơn dựa
+    trên một giá trị đã cũ.
+    """
+    run_a = await _run(api_world)
+    run_b = await _sibling_run(api_world, run_a)
+
+    maker = _maker(api_world)
+    async with maker() as first, maker() as second:
+        row_a = await first.get(IngestRun, run_a.id)
+        row_b = await second.get(IngestRun, run_b.id)
+        assert row_a is not None and row_b is not None
+
+        await _advance_watermark(first, row_a, "id", "bigint", "1000")
+        blocked = asyncio.create_task(_advance_watermark(second, row_b, "id", "bigint", "400"))
+        await _assert_parked_in_postgres(blocked)
+
+        await first.commit()
+        await asyncio.wait_for(blocked, timeout=10)
+        await second.commit()
+
+    state = await _watermark(api_world, run_a)
+    assert state is not None
+    assert state.cursor_value == "1000", (
+        "Một lô đồng thời mang mốc thấp hơn đã kéo watermark lùi — đúng lớp mất "
+        "dữ liệu âm thầm mà luật 'chỉ tiến' tồn tại để chặn."
+    )
 
 
 @pytest.mark.parametrize("cursor_type", ["text", "numeric", "character varying", "BIGINT", "int4"])

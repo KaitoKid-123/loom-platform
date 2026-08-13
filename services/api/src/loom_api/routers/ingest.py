@@ -21,6 +21,16 @@ biệt được từ ngoài — xem `NotVisible` ở `permissions.py`. Vì cả 
 trả 404 nên thứ tự này không rò rỉ gì, và nó tiết kiệm một lượt hỏi quyền cho
 một id vô nghĩa.
 
+**KHÔNG có cổng chống trùng, và đó là một khoảng trống đã biết chứ không phải
+một quyết định.** Không gì ở đây ngăn hàng `ingest_run` thứ hai cho cùng
+`(lakehouse_id, connection_id, stream)` khi lần trước còn `pending`/`running`,
+và `job_name` tất định theo `run_id` chứ không theo stream — nên hai lần bấm Nạp
+cho ra HAI Job cùng đọc nguồn và cùng ghi một bảng bronze. Task 10 đã làm
+`_advance_watermark` an toàn với đua (xem `routers/internal_ingest.py`) nên
+không ai nhận 500 và watermark không lùi, nhưng đó chỉ chữa phần watermark:
+công việc vẫn bị làm hai lần. Cách chữa là một 409 Ở ĐÂY — lý do đầy đủ nằm ở
+docstring `IngestRun` (`models.py`), chỗ Task 13 sẽ đọc.
+
 **Ghi Postgres TRƯỚC, phóng Job SAU, và không đảo lại được.** Hàng
 `ingest_run` là *ý định*; Job chỉ là cách ý định đó thành sự thật (xem
 docstring `jobs.job_name`). Commit trước nghĩa là một lần `launch()` hỏng để

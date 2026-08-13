@@ -387,6 +387,30 @@ class IngestRun(Base):
     được — thường do sai tên Secret — và vòng reconcile lười của Task 13 PHẢI
     chuyển nó thành `failed`, không được để nó nằm mãi ở đây.
 
+    **`running` nghĩa là "pod ĐÃ LẤY spec ít nhất một lần", KHÔNG phải "pod còn
+    sống".** Task 10 đặt chuyển tiếp `pending -> running` ở `GET
+    /internal/ingest/{run_id}/spec` (xem `routers/internal_ingest.py`), và đó là
+    tín hiệu DUY NHẤT trong bảng này về việc pod đã chạy. Hệ quả mà Task 13 phải
+    xử lý: một pod bị OOMKill (hoặc node chết, hoặc pod bị xoá) SAU khi lấy spec
+    nằm ở `running` VĨNH VIỄN — không có heartbeat, và `/complete` sẽ không bao
+    giờ tới. Vòng reconcile vì vậy KHÔNG được tin cột này một mình; nó phải đối
+    chiếu với `JobLauncher.status(run_id)` (`jobs.py`), thứ trả về
+    `exists`/`active`/`succeeded`/`failed` đọc từ chính Kubernetes. Điều đó khả
+    thi mà không cần thêm cột nào: `job_name` tất định theo `run_id`, nên trạng
+    thái Job của một run luôn tra được. "`running` + Job không còn tồn tại" là
+    một run đã chết và phải thành `failed`.
+
+    **KHOẢNG TRỐNG ĐÃ BIẾT, ghi tên chứ không xây ở 3a: `start_ingest` không
+    chống trùng.** Không gì ngăn hai hàng `ingest_run` cùng sống cho cùng
+    `(lakehouse_id, connection_id, stream)`, và `job_name` tất định theo
+    `run_id` chứ không theo stream — nên hai lần bấm Nạp cho ra HAI Job cùng
+    đọc nguồn và cùng ghi vào một bảng bronze. `_advance_watermark` đã được làm
+    an toàn với đua nên không ai 500 và watermark không lùi (xem docstring của
+    nó), nhưng đó chỉ chữa phần watermark: CÔNG VIỆC vẫn bị làm hai lần và dữ
+    liệu trùng vẫn vào bronze bất kể ai thắng. Cách chữa đúng chỗ là một 409 ở
+    `start_ingest` khi stream đó đã có run `pending`/`running` — giá trị cao
+    hơn hẳn cái khoá, và nó thuộc đường TẠO run, không thuộc đường callback.
+
     Pod nạp KHÔNG có credential Postgres nào: nó chỉ lấy spec và báo tiến độ
     qua `/internal/ingest/*` (khuôn shared-secret đã dùng ở Giai đoạn 2b), nên
     bảng này chỉ được `loom-api` đọc và ghi — pod không bao giờ đụng tới nó

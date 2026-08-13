@@ -35,7 +35,8 @@ from datetime import UTC, datetime
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import Select, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_api.deps import SessionDep
@@ -64,7 +65,7 @@ async def _run_or_404(session: AsyncSession, run_id: uuid.UUID) -> IngestRun:
     return run
 
 
-async def _stream_state(session: AsyncSession, run: IngestRun) -> StreamState | None:
+def _stream_state_query(run: IngestRun) -> Select[tuple[StreamState]]:
     """Watermark của stream này, tra bằng ĐÚNG ba cột của ràng buộc UNIQUE.
 
     `lakehouse_id` + `connection_id` + `stream`, không phải `run_id`: watermark
@@ -72,13 +73,22 @@ async def _stream_state(session: AsyncSession, run: IngestRun) -> StreamState | 
     lý do `stream_state` không có cột `run_id` nào (xem `models.py`). Tra theo
     ba cột này cũng có nghĩa là chỉ có tối đa một hàng khớp, do chính
     `uq_stream_state_lakehouse_connection_stream` bảo đảm.
+
+    Trả về CÂU TRUY VẤN chứ không kết quả, vì hai chỗ gọi cần hai thứ khác nhau
+    từ cùng một điều kiện lọc: `ingest_spec` chỉ ĐỌC, còn `_advance_watermark`
+    cần `.with_for_update()`. Dựng điều kiện ở một chỗ là cách để chúng không
+    trôi khỏi nhau — lệch một cột ở đây nghĩa là một trong hai đường đọc
+    watermark của một stream KHÁC.
     """
-    stmt = select(StreamState).where(
+    return select(StreamState).where(
         StreamState.lakehouse_id == run.lakehouse_id,
         StreamState.connection_id == run.connection_id,
         StreamState.stream == run.stream,
     )
-    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _stream_state(session: AsyncSession, run: IngestRun) -> StreamState | None:
+    return (await session.execute(_stream_state_query(run))).scalar_one_or_none()
 
 
 @router.get("/{run_id}/spec", response_model=IngestSpec)
@@ -86,15 +96,28 @@ async def ingest_spec(run_id: uuid.UUID, session: AsyncSession = SessionDep) -> 
     """Cái gì cần nạp, từ đâu, và tiếp tục từ mốc nào.
 
     **Lời gọi này chuyển run từ `pending` sang `running`, và đó là một GET CÓ
-    TÁC DỤNG PHỤ — một sự đánh đổi có chủ ý, không phải một sơ suất.**
-    `pending` mang một nghĩa CỤ THỂ mà `IngestRun` ghi rõ: "Job chưa bao giờ
-    khởi động được", và vòng đối chiếu của Task 13 tồn tại để chuyển đúng những
-    hàng đó thành `failed`. Lấy spec là hành động ĐẦU TIÊN của pod, và là bằng
-    chứng duy nhất mà control plane có rằng pod đã chạy thật. Nếu chỉ
-    `/progress` mới chuyển trạng thái thì một lần quét toàn bảng mất mười phút
-    sẽ nằm ở `pending` suốt mười phút đó — tức là control plane báo "Job chưa
-    khởi động" về một pod đang chạy, và một vòng đối chiếu tin lời báo đó sẽ
-    đánh `failed` một run hoàn toàn khoẻ mạnh.
+    TÁC DỤNG PHỤ — một sự đánh đổi có chủ ý, không phải một sơ suất.** Lấy spec
+    là hành động ĐẦU TIÊN của pod, nên nó là thời điểm sớm nhất mà control plane
+    biết được pod đã chạy thật.
+
+    Nói cho đúng: đây KHÔNG phải tín hiệu duy nhất tồn tại. `job_name` tất định
+    theo `run_id` và `JobLauncher.status()` trả về `exists`/`active`/`succeeded`/
+    `failed` (xem `jobs.py`), nên một vòng đối chiếu phân biệt được "pending +
+    Job đang chạy" với "pending + không có Job nào" mà KHÔNG cần ai ghi vào
+    database. Lập luận giữ chuyển tiếp này vì vậy hẹp hơn: nó làm cột `status`
+    tự nói đúng sự thật cho MỌI người đọc bảng `ingest_run` (giao diện Task 13,
+    một câu SQL tay, một lần điều tra sự cố) chứ không chỉ cho một vòng đối
+    chiếu có với tới được Kubernetes, và nó không tốn thêm round trip nào.
+
+    Hai phương án còn lại đều tệ hơn. Để `/progress` chuyển trạng thái: một lô
+    đầu tiên lớn nghĩa là nhiều phút im lặng, và suốt thời gian đó bảng nói
+    "Job chưa bao giờ khởi động" về một pod đang chạy khoẻ. Thêm một endpoint
+    `/start` thứ tư: một round trip nữa để nói đúng cái điều mà request lấy spec
+    đã chứng minh.
+
+    Giới hạn kèm theo — `running` nghĩa là "đã lấy spec ít nhất một lần", KHÔNG
+    phải "pod còn sống" — ghi ở docstring `IngestRun` (`models.py`), cạnh đoạn
+    về `pending`, vì đó là chỗ người làm Task 13 sẽ đọc.
 
     Chỉ `pending` -> `running`, không đụng tới `succeeded`/`failed`: gọi lại
     spec sau khi đã kết thúc (một lần thử lại, một lần gọi nhầm) không được
@@ -241,29 +264,57 @@ async def _advance_watermark(
     chứ không theo chuỗi — xem `loom_core.cursor` cho lý do khác biệt đó là
     toàn bộ vấn đề.
 
-    **KHÔNG an toàn với hai run song song trên CÙNG một stream**, và nói ra chứ
-    không ngụ ý ngược lại: `SELECT` rồi `INSERT` ở dưới không nguyên tử, nên hai
-    run đồng thời chưa có watermark sẽ có một cái vỡ ở
-    `uq_stream_state_lakehouse_connection_stream` (một 500 cho pod đó). Chấp
-    nhận được ở 3a vì nạp là một hành động CHỦ ĐỘNG của con người và chưa có gì
-    tự sinh run; cái đúng khi có lịch chạy tự động là `INSERT ... ON CONFLICT
-    DO UPDATE` với điều kiện "chỉ tiến" viết bằng SQL, để Postgres phân xử thay
-    vì tiến trình này.
+    **HAI run song song trên cùng một stream là chuyện XẢY RA ĐƯỢC, nên hàm này
+    hiện thực-hoá-rồi-khoá thay vì `SELECT` rồi `INSERT`.** `start_ingest` không
+    có cổng chống trùng, và `job_name` tất định theo `run_id` chứ không theo
+    stream, nên hai lần bấm Nạp cho cùng `(lakehouse, connection, stream)` cho
+    ra hai Job cùng ghi một stream. Với `SELECT`-rồi-`INSERT`, hai lần báo tiến
+    độ ĐẦU TIÊN chạy đan nhau đều thấy `None` và cùng `INSERT`: một cái vỡ ở
+    `uq_stream_state_lakehouse_connection_stream` -> `IntegrityError` -> 500
+    (đã dựng lại thật qua ASGI, không phải suy luận).
+
+    `INSERT ... ON CONFLICT DO NOTHING` rồi `SELECT ... FOR UPDATE`: sau câu
+    đầu, hàng CHẮC CHẮN tồn tại (ta vừa tạo, hoặc nó đã có); câu thứ hai khoá
+    đúng hàng đó tới hết transaction, nên hai lời gọi đồng thời được Postgres
+    xếp thành tuần tự và phép so "chỉ tiến" đọc một giá trị không ai đang sửa.
+    Khi câu `INSERT` thắng, `moves_forward` so giá trị với CHÍNH NÓ (`<` nên
+    `False`) và không có `UPDATE` nào phát sinh — hàng đã đúng rồi.
+
+    **Vì sao KHÔNG viết luật "chỉ tiến" vào SQL** (`ON CONFLICT DO UPDATE ...
+    WHERE excluded.cursor_value > stream_state.cursor_value`), dù nó gọn hơn:
+    `cursor_value` là `Text`, nên một phép so trong SQL trên cột đó là ĐÚNG con
+    so-sánh-chuỗi mà cả nhiệm vụ này tồn tại để diệt — `'1000' > '400'` là
+    `false` ở Postgres y như ở Python. Viết đúng đòi `CAST` theo từng
+    `cursor_type` ngay trong câu lệnh, tức là chuyển bảng phân nhánh của
+    `parse_cursor_value` vào SQL và nhân đôi nó. Khoá bi quan đắt hơn một chút
+    và giữ phép so ở đúng một chỗ, có kiểu, kiểm được không cần database.
+
+    Cái này KHÔNG chữa việc trùng lặp: hai Job vẫn cùng đọc và cùng ghi bronze
+    bất kể ai thắng watermark, và cổng chống trùng ở `start_ingest` đáng giá
+    hơn hẳn cái khoá này — khoảng trống đã ghi tên ở docstring `IngestRun`, chỗ
+    Task 13 sẽ đọc.
     """
-    state = await _stream_state(session, run)
-    if state is None:
-        session.add(
-            StreamState(
-                id=uuid.uuid4(),
-                lakehouse_id=run.lakehouse_id,
-                connection_id=run.connection_id,
-                stream=run.stream,
-                cursor_column=cursor_column,
-                cursor_type=cursor_type,
-                cursor_value=cursor_value,
-            )
+    # `id` sinh ở client chứ không dựa `default=uuid.uuid4` của model: đây là
+    # một câu INSERT Core, không đi qua ORM instrumentation nên default của
+    # `mapped_column` không được áp. `updated_at` thì KHÔNG cần — nó có
+    # `server_default=func.now()`, do Postgres điền.
+    await session.execute(
+        pg_insert(StreamState)
+        .values(
+            id=uuid.uuid4(),
+            lakehouse_id=run.lakehouse_id,
+            connection_id=run.connection_id,
+            stream=run.stream,
+            cursor_column=cursor_column,
+            cursor_type=cursor_type,
+            cursor_value=cursor_value,
         )
-        return
+        .on_conflict_do_nothing(constraint="uq_stream_state_lakehouse_connection_stream")
+    )
+    # `scalar_one`, KHÔNG `scalar_one_or_none`: câu trên vừa bảo đảm hàng tồn
+    # tại, nên "không có hàng" ở đây là một giả định đã vỡ, không phải một
+    # trạng thái hợp lệ để đi tiếp bằng một nhánh `None` im lặng.
+    state = (await session.execute(_stream_state_query(run).with_for_update())).scalar_one()
 
     rescaled = state.cursor_column != cursor_column or state.cursor_type != cursor_type
     if rescaled:
