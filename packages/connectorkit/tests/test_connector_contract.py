@@ -8,17 +8,30 @@ phải HỢP ĐỒNG của `Connector`, và vẫn xanh. Đó là kiểu "phép k
 tồn tại CHỈ để giữ bộ này trung thực: nếu bộ chỉ `PostgresConnector` qua được,
 nó đang mô tả Postgres, không phải `Connector`.
 
-`params=` trên fixture `connector_factory` là điểm nối duy nhất. Task 5 thêm
-`postgres` vào danh sách `_IMPLEMENTATIONS` — không đổi gì khác trong file này.
+`params=` trên fixture `connector_factory` là điểm nối theo NGHĨA "mỗi
+implementation tự đăng ký một dòng ở `_IMPLEMENTATIONS`". Task 5 thêm
+`postgres` vào danh sách đó, nhưng — khác với dự tính ban đầu của đoạn này —
+không CHỈ thêm một dòng: `postgres` cần một fixture thật (`source_dsn`, một
+container Postgres), mà một hàm module-level thuần tuý như `_fake_builder` cũ
+không có cách nào xin được, nên `_register`/`connector_factory` bên dưới nhận
+thêm `request: pytest.FixtureRequest` để `_postgres_builder` gọi
+`request.getfixturevalue("source_dsn")`; và `postgres` cần đánh dấu
+`pytest.mark.integration` (nó đòi Docker, `fake` thì không) để `make test`
+mặc định (`-m 'not integration'`) không đột nhiên cần Docker. Cả hai là độ
+rộng tối thiểu cần thêm để giữ đúng phần quan trọng của lời hứa gốc: KHÔNG
+một bài test nào bên dưới (`test_check_...` trở xuống) bị sửa.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+import psycopg
 import pyarrow as pa  # type: ignore[import-untyped]
 import pytest
+from psycopg import sql
 
 from loom_connector.protocol import Connector, StreamState
 
@@ -31,32 +44,114 @@ class ConnectorFactory(Protocol):
     def __call__(self, n_rows: int) -> Connector: ...
 
 
-# Task 5 thêm dòng thứ hai vào đây, ví dụ:
-#   ("postgres", lambda n_rows: PostgresConnector(seed(n_rows), batch_size=100)),
-# và không phải sửa gì khác trong file — đó là toàn bộ lý do tồn tại của danh
-# sách này thay vì gọi FakeConnector thẳng trong từng test.
-_IMPLEMENTATIONS: list[tuple[str, ConnectorFactory]] = []
+# FactoryBuilder: (request của CHÍNH test đang chạy) -> ConnectorFactory.
+# `FakeConnector` không cần gì từ bên ngoài nên hàm dựng của nó bỏ qua
+# `request`. `PostgresConnector` cần `source_dsn` — một fixture — và
+# `request.getfixturevalue` là cách DUY NHẤT một hàm module-level thuần tuý
+# (không tự là fixture) xin được giá trị của một fixture khác.
+class FactoryBuilder(Protocol):
+    def __call__(self, request: pytest.FixtureRequest) -> ConnectorFactory: ...
 
 
-def _register(name: str, factory: ConnectorFactory) -> None:
-    _IMPLEMENTATIONS.append((name, factory))
+_IMPLEMENTATIONS: list[tuple[str, FactoryBuilder, tuple[pytest.MarkDecorator, ...]]] = []
 
 
-def _fake_factory(n_rows: int) -> Connector:
+def _register(
+    name: str, builder: FactoryBuilder, marks: tuple[pytest.MarkDecorator, ...] = ()
+) -> None:
+    _IMPLEMENTATIONS.append((name, builder, marks))
+
+
+def _fake_builder(request: pytest.FixtureRequest) -> ConnectorFactory:
     from loom_connector.fake import FakeConnector
 
-    return FakeConnector(n_rows=n_rows, batch_size=7)
+    def make(n_rows: int) -> Connector:
+        return FakeConnector(n_rows=n_rows, batch_size=7)
+
+    return make
 
 
-_register("fake", _fake_factory)
+_register("fake", _fake_builder)
+
+
+# Schema RIÊNG cho bộ hợp đồng, tách khỏi schema mà
+# `tests/integration/test_postgres_connector.py` dùng — cả hai đứng trên
+# CÙNG một container (`source_dsn`, session-scoped, xem `tests/conftest.py`)
+# mà không giẫm lên bảng của nhau, nhờ `PostgresConnector(schema=...)` giới
+# hạn `discover()` vào đúng một namespace.
+_CONTRACT_SCHEMA = "loom_contract"
+_CONTRACT_TABLE = "seed"
+
+
+def _reset_contract_table(dsn: str, n_rows: int) -> None:
+    """Dọn và dựng lại MỘT bảng CỐ ĐỊNH TÊN trong schema riêng của bộ hợp đồng.
+
+    Tên cố định, KHÔNG một tên mới mỗi lần gọi: `PostgresConnector.discover()`
+    trả MỌI bảng trong schema nó được cấu hình, và các bài trong bộ hợp đồng
+    (`test_read_yields_record_batches` và các bài sau) gọi
+    `connector.discover()[0]` — giả định đúng MỘT stream nhìn thấy được. Một
+    tên mới mỗi lần factory được gọi sẽ để lại bảng cũ từ lần gọi trước, biến
+    giả định "đúng một stream" thành sai kể từ lần gọi thứ hai của CHÍNH bộ
+    test này (không phải do đụng bộ test khác — schema riêng đã cách ly việc
+    đó).
+
+    Cột khớp hình dạng `FakeConnector` (`id`, `updated_at` cùng tăng dần,
+    `payload` nullable) để cùng một `cursor = stream.candidate_cursors[0]`
+    chạy đúng logic `>=` trên cả hai implementation.
+    """
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(_CONTRACT_SCHEMA))
+        )
+        cur.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(_CONTRACT_SCHEMA)))
+        cur.execute(
+            sql.SQL(
+                "CREATE TABLE {}.{} ("
+                "id integer NOT NULL, "
+                "updated_at timestamptz NOT NULL, "
+                "payload text)"
+            ).format(sql.Identifier(_CONTRACT_SCHEMA), sql.Identifier(_CONTRACT_TABLE))
+        )
+        base = datetime(2024, 1, 1, tzinfo=UTC)
+        cur.executemany(
+            sql.SQL("INSERT INTO {}.{} (id, updated_at, payload) VALUES (%s, %s, %s)").format(
+                sql.Identifier(_CONTRACT_SCHEMA), sql.Identifier(_CONTRACT_TABLE)
+            ),
+            [
+                (i, base + timedelta(seconds=i), None if i % 5 == 0 else f"payload-{i}")
+                for i in range(n_rows)
+            ],
+        )
+
+
+def _postgres_builder(request: pytest.FixtureRequest) -> ConnectorFactory:
+    from loom_connector.postgres import PostgresConnector
+
+    dsn: str = request.getfixturevalue("source_dsn")
+
+    def make(n_rows: int) -> Connector:
+        _reset_contract_table(dsn, n_rows)
+        return PostgresConnector(dsn=dsn, schema=_CONTRACT_SCHEMA, batch_rows=7)
+
+    return make
+
+
+# Cần Docker (testcontainers) nên đánh dấu integration: `make test` mặc định
+# (`-m 'not integration'`) chạy bộ này chỉ với `fake`; `make test-int` (đè
+# addopts) chạy với CẢ HAI — đúng lời hứa của bộ hợp đồng là chứng minh cho
+# nhiều hơn một implementation, không chỉ ở một CI riêng của integration mà
+# `make test` không bao giờ chạy tới.
+_register("postgres", _postgres_builder, marks=(pytest.mark.integration,))
 
 
 @pytest.fixture(
-    params=[factory for _, factory in _IMPLEMENTATIONS],
-    ids=[name for name, _ in _IMPLEMENTATIONS],
+    params=[
+        pytest.param(builder, marks=marks, id=name) for name, builder, marks in _IMPLEMENTATIONS
+    ],
 )
 def connector_factory(request: pytest.FixtureRequest) -> ConnectorFactory:
-    return request.param  # type: ignore[no-any-return]
+    builder: FactoryBuilder = request.param
+    return builder(request)
 
 
 # Dữ liệu mặc định vừa đủ để có midpoint rõ ràng cho bài cursor `>=` (bài 6),
