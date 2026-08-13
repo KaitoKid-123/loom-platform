@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mười ba phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
+# Mười bốn phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
 # kubectl, nên chạy được với bất kỳ môi trường nào:
 #
 #     make smoke                              # local
@@ -18,12 +18,40 @@ BASE="${BASE:-http://loom.localhost}"
 USER_LOGIN="${SMOKE_USER:-long@loom.local}"
 USER_PASS="${SMOKE_PASS:-password}"
 
+# NGUỒN của phép 14 — một Postgres THẬT mà cụm với tới được.
+#
+# Không có mặc định cho host/dbname, và đó là bắt buộc: địa chỉ nguồn ở local
+# nằm trong `deploy/local/aiven.env`, một file GITIGNORE chứa credential thật.
+# Viết cứng nó vào đây là đưa một phần credential vào một repo công khai. Target
+# `make smoke` đọc file đó rồi truyền ba biến này vào (xem Makefile); chạy
+# `./scripts/smoke.sh` tay thì tự đặt chúng.
+#
+# Thiếu chúng, phép 14 báo HỎNG kèm cách sửa — KHÔNG bỏ qua. Một phép kiểm không
+# chạy được thì chưa đạt; đó là luật ở đầu file này.
+SMOKE_SOURCE_HOST="${SMOKE_SOURCE_HOST:-}"
+SMOKE_SOURCE_PORT="${SMOKE_SOURCE_PORT:-5432}"
+SMOKE_SOURCE_DB="${SMOKE_SOURCE_DB:-}"
+# ĐỊA CHỈ của k8s Secret mang credential nguồn, không phải credential. Khoá bên
+# trong Secret phải tên `LOOM_TASK_SOURCE_USER`/`LOOM_TASK_SOURCE_PASSWORD`:
+# `JobLauncher.launch` chiếu CẢ Secret vào pod nạp bằng `envFrom`, nên tên khoá
+# LÀ tên biến môi trường mà `loom_task.config.SourceCredentials` đọc. Ở local
+# Secret này do `make infra-local-source-secret` tạo. `#<key>` chỉ là chú thích
+# cho người đọc — `envFrom` không chọn khoá nào (xem `secret_name_for`).
+SMOKE_SOURCE_SECRET_REF="${SMOKE_SOURCE_SECRET_REF:-k8s://loom/loom-source-local#LOOM_TASK_SOURCE_PASSWORD}"
+# `alembic_version` chứ không một bảng nghiệp vụ nào: nó CHẮC CHẮN tồn tại trong
+# database mà migration vừa chạy lên, chỉ có một cột `character varying`, và giữ
+# ĐÚNG MỘT dòng (một head duy nhất — `alembic heads` xác nhận). Ba tính chất đó
+# làm số dòng khẳng định được mà không cần smoke đụng tới nguồn bằng SQL —
+# và smoke KHÔNG có đường nào để đụng: nó chỉ nói HTTP với loom-api.
+SMOKE_SOURCE_STREAM="${SMOKE_SOURCE_STREAM:-public.alembic_version}"
+SMOKE_SOURCE_ROWS="${SMOKE_SOURCE_ROWS:-1}"
+
 JAR="$(mktemp -d)/cookies"
 trap 'rm -rf "$(dirname "$JAR")"' EXIT
 
 # Số phép kiểm MONG ĐỢI, khẳng định ở cuối file. Không có nó, xoá một phép kiểm
 # vẫn cho "7/7 đạt" và bản báo cáo trông y như trước.
-EXPECTED=13
+EXPECTED=14
 
 pass=0; fail=0; skipped=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; pass=$((pass+1)); }
@@ -67,6 +95,52 @@ wait_for_query() {   # $1 = query_id, $2 = file hứng phản hồi
     status=$(jq -r '.status // empty' < "$out" 2>/dev/null)
     case "$status" in
       succeeded|failed|cancelled) break ;;
+    esac
+    sleep 0.5
+  done
+  printf '%s %s' "${status:-không-đọc-được}" "$((SECONDS - started))"
+}
+
+# Trần thời gian chờ MỘT LẦN NẠP chạy xong. Một hằng số RIÊNG, không dùng lại
+# `QUERY_TIMEOUT_S`, và lý do là chính bài học đã sinh ra `QUERY_TIMEOUT_S`: trần
+# phải đến từ số đo của THAO TÁC ĐANG CHỜ. Một lần nạp không phải một câu truy
+# vấn — nó còn phải xếp lịch một pod, kéo ảnh (nếu node chưa có), quay số tới
+# một Postgres NGOÀI cụm, rồi commit catalog NHIỀU lần (`full` ghi staging, đổi
+# tên đích đi, đưa staging lên, bỏ đích cũ).
+#
+# Đo thật trên cụm này ngày 2026-08-13, bảng một dòng, ảnh đã có sẵn trong node:
+# bốn lần chạy cho `DURATION` của Job là 12s, 13s, 14s, 14s, và từ lúc POST tới
+# lúc `status=succeeded` là 10,4s. Phần lớn thời gian đó KHÔNG phải đọc dữ liệu —
+# một dòng thì đọc gần như tức thì — mà là xếp lịch pod cộng các lần commit
+# catalog, thứ mà phép đo 50 GB ở Giai đoạn 2c đo được trung bình 6,7s và max
+# 15,7s MỖI LẦN vì Lakekeeper nói chuyện với Postgres trên Aiven qua internet.
+#
+# 120s là ~8 lần con số đo được, và nó phải rộng thế: một node CHƯA có ảnh
+# `loom/task` phải kéo ảnh trước, và bốn lần commit ở đuôi p95 đã là ~45s. Đây
+# chỉ là TRẦN — vòng lặp thoát ngay khi run kết thúc, nên rộng không làm bài
+# kiểm chậm đi khi mọi thứ ổn.
+INGEST_TIMEOUT_S="${INGEST_TIMEOUT_S:-120}"
+
+# Chờ một lần nạp tới trạng thái CUỐI. In ra "<trạng thái> <số giây đã chờ>".
+#
+# CÙNG hình dạng với `wait_for_query` ở trên, và cố ý cùng: in cả hai thứ qua
+# stdout (chỗ gọi đọc bằng `read -r ... < <(...)`, vì `$(...)` chạy ở subshell
+# nên mọi phép gán bên trong biến mất), và danh sách trạng thái cuối là
+# ALLOWLIST chứ không "khác pending/running thì thôi" — một chuỗi RỖNG (curl
+# trượt, Traefik trả HTML 502) cũng "khác running", và bản đầu của `wait_for_
+# query` đã vì thế thoát ngay vòng đầu rồi vứt cả ngân sách chờ.
+#
+# HAI trạng thái cuối, không ba: `ingest_run.status` KHÔNG có `cancelled` (xem
+# docstring `IngestRun` ở `models.py` — chưa có gì tự sinh run nên chưa có gì để
+# huỷ). Chép thêm `cancelled` vào đây sẽ là một nhánh canh một trạng thái không
+# tồn tại.
+wait_for_ingest() {   # $1 = run_id, $2 = file hứng phản hồi
+  local id="$1" out="$2" started="$SECONDS" status=""
+  while [ $((SECONDS - started)) -lt "$INGEST_TIMEOUT_S" ]; do
+    curl -s -b "$JAR" --max-time 10 -o "$out" "$BASE/api/v1/ingest/$id"
+    status=$(jq -r '.status // empty' < "$out" 2>/dev/null)
+    case "$status" in
+      succeeded|failed) break ;;
     esac
     sleep 0.5
   done
@@ -408,6 +482,118 @@ else
   fi
 fi
 
+# 14 — NẠP đi hết đường, và đây là phép kiểm duy nhất chạm cả BA mặt phẳng:
+#      trình duyệt -> loom-api -> Kubernetes (một `Job` thật) -> pod nạp -> Postgres
+#      NGUỒN -> Iceberg/Lakekeeper -> ngược về `/internal/ingest/*` -> Postgres control
+#      plane, rồi đọc lại qua loom-query. Không một integration test nào dựng nổi
+#      chuỗi đó: mọi bài test của Giai đoạn 3a hoặc thay Kubernetes bằng một double
+#      (`tests/integration/test_ingest_api.py`) hoặc gọi thẳng `run_full` mà bỏ qua
+#      cả `loom-api` lẫn Job (`services/loom-task/tests/integration`).
+#
+#      Bốn thứ CHỈ phép này chứng minh được, và cả bốn đã hỏng thật ít nhất một lần
+#      trong lúc dựng nó: (1) `LOOM_TASK_IMAGE` trỏ vào một tag CÓ trong node;
+#      (2) Secret nguồn tồn tại và mang đúng tên khoá mà `SourceCredentials` đọc;
+#      (3) Role của `loom-api` đủ quyền cho CẢ `launch` lẫn `status` — thiếu
+#      `jobs/status` từng làm `GET /ingest/{id}` trả 500 suốt lúc run đang chạy;
+#      (4) bí mật chia sẻ của đường nạp khớp hai đầu, nếu không mọi `/progress`
+#      401 và run kẹt ở `running`.
+#
+#      `mode=full` chứ không `incremental`: `full` không cần cột cursor nào, nên
+#      nó chạy được trên MỌI bảng — kể cả `alembic_version`, bảng một cột kiểu
+#      `character varying` mà `CURSOR_TYPE_ALLOWLIST` cố ý không nhận. Đổi sang
+#      `incremental` ở đây sẽ đỏ với `CursorNotAvailable`, và đó là hành vi đúng.
+#
+#      Dùng CHUNG workspace và lakehouse với phép 10/12. KHÔNG dọn bảng bronze —
+#      cùng món nợ mà phép 13 đã ghi ở khối dọn dẹp bên dưới.
+if [ -z "$smoke_lakehouse_id" ]; then
+  bad "nạp qua /ingest — Job chạy rồi đọc lại bronze" "không có lakehouse từ phép 12 để nạp vào"
+elif [ -z "$SMOKE_SOURCE_HOST" ] || [ -z "$SMOKE_SOURCE_DB" ]; then
+  bad "nạp qua /ingest — Job chạy rồi đọc lại bronze" \
+      "chưa khai nguồn: cần SMOKE_SOURCE_HOST và SMOKE_SOURCE_DB ('make smoke' tự lấy từ deploy/local/aiven.env)"
+else
+  # Tên connection đi thẳng vào TÊN BẢNG bronze (`bronze.<slug>__<schema>_<bảng>`,
+  # xem `loom_task.runner.bronze_table_name`), nên nó phải khớp `ItemCreate.name`
+  # (`^[a-z0-9][a-z0-9-]*$`) và KHÔNG được sinh ra hai gạch dưới liền nhau sau khi
+  # `-` đổi thành `_` — `$$` là PID nên chỉ gồm chữ số, an toàn với cả hai luật.
+  smoke_conn_name="smoke-src-$$"
+  conn_payload=$(jq -nc \
+    --arg name "$smoke_conn_name" \
+    --arg host "$SMOKE_SOURCE_HOST" \
+    --argjson port "$SMOKE_SOURCE_PORT" \
+    --arg db "$SMOKE_SOURCE_DB" \
+    --arg ref "$SMOKE_SOURCE_SECRET_REF" \
+    '{type:"connection", name:$name, display_name:"Smoke source",
+      definition:{schema_version:1, kind:"postgres", host:$host, port:$port,
+                  database:$db, secret_ref:$ref}}')
+  conn_code=$(curl -s -b "$JAR" -o "$tmpdir/conn.json" -w '%{http_code}' --max-time 15 \
+              -X POST -H 'Content-Type: application/json' -d "$conn_payload" \
+              "$BASE/api/v1/workspaces/$smoke_ws_id/items")
+  if [ "$conn_code" != 201 ]; then
+    bad "nạp qua /ingest — Job chạy rồi đọc lại bronze" "tạo item type=connection trả $conn_code"
+  else
+    smoke_conn_id=$(jq -r '.id' < "$tmpdir/conn.json")
+    ing_payload=$(jq -nc --arg c "$smoke_conn_id" --arg s "$SMOKE_SOURCE_STREAM" \
+                  '{connection_id:$c, stream:$s, mode:"full"}')
+    ing_code=$(curl -s -b "$JAR" -o "$tmpdir/ingest.json" -w '%{http_code}' --max-time 15 \
+               -X POST -H 'Content-Type: application/json' -d "$ing_payload" \
+               "$BASE/api/v1/lakehouses/$smoke_lakehouse_id/ingest")
+    if [ "$ing_code" != 202 ]; then
+      # 400 ở đây gần như luôn là `secret_ref` trỏ sang namespace khác namespace
+      # của Job (`envFrom` không vượt được namespace) — nói ra vì thân phản hồi
+      # có câu giải thích và người đọc nên nhìn vào nó.
+      bad "nạp qua /ingest — Job chạy rồi đọc lại bronze" \
+          "POST .../ingest trả $ing_code (mong 202): $(cat "$tmpdir/ingest.json")"
+    else
+      ing_run_id=$(jq -r '.run_id' < "$tmpdir/ingest.json")
+      read -r ing_status ing_waited_s < <(wait_for_ingest "$ing_run_id" "$tmpdir/ingest_status.json")
+      if [ "$ing_status" != succeeded ]; then
+        # In cả `error` của hàng run: pod đã bị dọn khi có người đọc tới đây, và
+        # cột đó là thứ duy nhất còn lại nói được vì sao (xem `failure_from_job`).
+        bad "nạp qua /ingest — Job chạy rồi đọc lại bronze" \
+            "sau ${ing_waited_s}s (trần ${INGEST_TIMEOUT_S}s) run ở: $(cat "$tmpdir/ingest_status.json")"
+      else
+        # Tên bảng bronze dựng lại TỪ CÙNG hai mảnh mà pod nạp dùng
+        # (`bronze_table_name`): slug connection với `-` thành `_`, hai gạch dưới
+        # ngăn cách, rồi `schema.table` với `.` thành `_`. Viết lại quy ước ở đây
+        # là chấp nhận được vì nó KHÔNG trôi được trong im lặng: lệch một ký tự
+        # thì câu SELECT dưới đây hỏng với "table not found" và phép kiểm đỏ.
+        bronze_table="bronze.${smoke_conn_name//-/_}__${SMOKE_SOURCE_STREAM//./_}"
+        sel2_payload=$(jq -nc --arg lh "$smoke_lakehouse_id" --arg t "$bronze_table" \
+                       '{lakehouse_id:$lh, sql:("SELECT count(*) AS n FROM " + $t)}')
+        sel2_code=$(curl -s -b "$JAR" -o "$tmpdir/bronze.json" -w '%{http_code}' --max-time 15 \
+                    -X POST -H 'Content-Type: application/json' -d "$sel2_payload" \
+                    "$BASE/api/v1/query")
+        if [ "$sel2_code" != 202 ]; then
+          bad "nạp qua /ingest — Job chạy rồi đọc lại bronze" \
+              "SELECT từ $bronze_table trả $sel2_code (mong 202)"
+        else
+          sel2_query_id=$(jq -r '.query_id' < "$tmpdir/bronze.json")
+          read -r sel2_status sel2_waited_s < <(wait_for_query "$sel2_query_id" "$tmpdir/bronze_status.json")
+          # HAI khẳng định, không một. Số dòng ĐỌC LẠI ĐƯỢC chứng minh dữ liệu
+          # thật sự nằm trong Iceberg; `rows_written` của hàng run chứng minh
+          # đường `/progress` đã chạy. Chỉ kiểm cái đầu thì một pod ghi được
+          # nhưng không báo về nổi (mọi `/progress` 401) vẫn cho xanh — và đó
+          # đúng là hình dạng của một bí mật chia sẻ lệch hai đầu.
+          reported=$(jq -r '.rows_written // empty' < "$tmpdir/ingest_status.json")
+          if [ "$sel2_status" != succeeded ]; then
+            bad "nạp qua /ingest — Job chạy rồi đọc lại bronze" \
+                "SELECT lại sau ${sel2_waited_s}s (trần ${QUERY_TIMEOUT_S}s): $(cat "$tmpdir/bronze_status.json")"
+          elif ! jq -e --argjson n "$SMOKE_SOURCE_ROWS" '.rows == [[$n]]' \
+                 >/dev/null 2>&1 < "$tmpdir/bronze_status.json"; then
+            bad "nạp qua /ingest — Job chạy rồi đọc lại bronze" \
+                "mong $SMOKE_SOURCE_ROWS dòng trong $bronze_table, đọc lại: $(cat "$tmpdir/bronze_status.json")"
+          elif [ "$reported" != "$SMOKE_SOURCE_ROWS" ]; then
+            bad "nạp qua /ingest — Job chạy rồi đọc lại bronze" \
+                "bảng bronze đúng $SMOKE_SOURCE_ROWS dòng nhưng run báo rows_written=${reported:-KHÔNG CÓ} — đường /progress hỏng?"
+          else
+            ok "nạp qua /ingest — Job nạp $SMOKE_SOURCE_ROWS dòng vào $bronze_table sau ${ing_waited_s}s, đọc lại đúng"
+          fi
+        fi
+      fi
+    fi
+  fi
+fi
+
 # Dọn: xoá mềm workspace do smoke tạo. Phép 10 tạo một workspace THẬT trên Aiven mỗi
 # lần chạy, nên không dọn thì hai mươi lần chạy để lại hai mươi workspace rác. Phép
 # 12 thêm một item lakehouse vào CÙNG workspace này — xoá mềm workspace kéo theo cả
@@ -416,8 +602,11 @@ fi
 # Xoá mềm nên lịch sử audit còn nguyên — và audit của một lần smoke là bằng chứng nó
 # đã chạy thật.
 #
+# Phép 14 thêm một item `connection` vào CÙNG workspace đó — cũng biến mất theo nó.
+#
 # CÁI KHÔNG ĐƯỢC DỌN, và hãy đọc kỹ trước khi tin rằng nó tự hết: phép 13 tạo bảng
-# Iceberg THẬT (`smoke_ns.ctas_result`) với file Parquet thật trong MinIO. Xoá mềm
+# Iceberg THẬT (`smoke_ns.ctas_result`), phép 14 thêm một bảng bronze THẬT
+# (`bronze.smoke_src_<pid>__...`), cả hai với file Parquet thật trong MinIO. Xoá mềm
 # workspace KHÔNG chạm tới chúng — nó chỉ đặt một cột `deleted_at` trong Postgres.
 # Warehouse Lakekeeper cũng ở lại (nợ đã ghi ở Giai đoạn 2b), và đo thật ở Giai đoạn
 # 2c cho thấy xoá warehouse qua API quản trị của Lakekeeper CŨNG KHÔNG xoá object

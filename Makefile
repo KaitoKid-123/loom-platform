@@ -454,8 +454,31 @@ lint-workflows:  ## actionlint + shellcheck cho .github/workflows
 	actionlint -shellcheck "$$(command -v shellcheck)"
 
 .PHONY: smoke
-smoke:  ## Bảy phép kiểm chấp nhận qua HTTP (BASE=... để chạy với môi trường khác)
-	@./scripts/smoke.sh
+smoke:  ## Mười bốn phép kiểm chấp nhận qua HTTP (BASE=... để chạy với môi trường khác)
+	@# Phép 14 nạp từ một Postgres NGUỒN thật, nên nó cần host/port/dbname của
+	@# nguồn đó. Ở local nguồn duy nhất cụm với tới được là chính Aiven (không có
+	@# Postgres nào trong cụm — xem `database` ở values.yaml), và địa chỉ của nó
+	@# nằm trong `deploy/local/aiven.env`, file GITIGNORE. Đọc ở ĐÂY rồi truyền
+	@# vào môi trường của script, thay vì viết cứng trong `scripts/smoke.sh`: file
+	@# đó nằm trong một repo công khai.
+	@#
+	@# Chỉ ba khoá không phải bí mật (host/port/dbname) được lấy ra — `password`
+	@# KHÔNG đi vào môi trường của smoke, vì smoke không mở kết nối nào tới nguồn
+	@# (pod nạp mới mở, và nó lấy credential từ Secret `loom-source-local`).
+	@#
+	@# `:-` giữ quyền ưu tiên cho biến người dùng đặt sẵn: `make smoke
+	@# BASE=https://loom-dev.internal SMOKE_SOURCE_HOST=...` không bị file local
+	@# ghi đè.
+	@f=deploy/local/aiven.env; \
+	if [ -f "$$f" ]; then \
+		h=$$(sed -n 's/^host=//p' "$$f" | head -1); \
+		p=$$(sed -n 's/^port=//p' "$$f" | head -1); \
+		d=$$(sed -n 's/^dbname=//p' "$$f" | head -1); \
+	fi; \
+	SMOKE_SOURCE_HOST="$${SMOKE_SOURCE_HOST:-$$h}" \
+	SMOKE_SOURCE_PORT="$${SMOKE_SOURCE_PORT:-$$p}" \
+	SMOKE_SOURCE_DB="$${SMOKE_SOURCE_DB:-$$d}" \
+	./scripts/smoke.sh
 
 .PHONY: lint-shell
 lint-shell:  ## shellcheck cho mọi script shell trong repo

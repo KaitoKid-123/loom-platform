@@ -10,7 +10,13 @@ Không dùng `main.ingest`: nó dựng `PostgresConnector` từ một `IngestSpe
 Secret của pod, tức là kéo cả `SourceCredentials` + `LakehouseSettings` (biến môi
 trường) vào bộ test này để kiểm một tính chất không dính gì tới cấu hình. Bộ này
 gọi `run_full` với đúng ba thứ nó cần — connector thật, `IcebergSink` thật,
-lakehouse thật — còn phần chọn mode của `main.ingest` đã có test riêng.
+lakehouse thật — còn phần chọn mode của `main.ingest` được canh ở
+`tests/test_main_ingest_mode.py`.
+
+Câu cuối đó KHÔNG đúng khi nó được viết ra (Task 12): không có bài test nào cho
+nhánh chọn mode cho tới Task 15, và một chú thích khẳng định "đã có test riêng"
+là cách chắc chắn nhất để không ai đi viết nó. Ghi lại ở đây thay vì lặng lẽ sửa
+— chính lớp sai này là thứ repo canh.
 """
 
 from __future__ import annotations

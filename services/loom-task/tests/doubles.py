@@ -56,9 +56,16 @@ class RecordingSink:
     có gì để đổi tên đi, không có gì để xoá).
     """
 
-    def __init__(self, events: list[tuple[str, int]], *, has_target: bool = True) -> None:
+    def __init__(
+        self,
+        events: list[tuple[str, int]],
+        *,
+        has_target: bool = True,
+        columns: list[str] | None = None,
+    ) -> None:
         self.events = events
         self.has_target = has_target
+        self.columns = columns
 
     def append(self, batch: pa.RecordBatch) -> None:
         self.events.append(("write", batch.num_rows))
@@ -75,6 +82,18 @@ class RecordingSink:
         # tuỳ theo bản cài đặt hỏi lúc nào, tức là biến một phép canh về THỨ TỰ
         # TRÁO thành một phép canh về thứ tự đặt câu hỏi.
         return self.has_target
+
+    def target_columns(self) -> list[str] | None:
+        """Cột của bảng đích, hoặc `None` khi bảng chưa tồn tại.
+
+        KHÔNG thuộc Protocol `Sink` (xem docstring `IcebergSink.target_columns`)
+        — chỉ `main.ingest` gọi, và chỉ ở đường `incremental`. Cũng KHÔNG ghi sự
+        kiện, cùng lý do với `target_exists`: một câu hỏi, không phải thao tác.
+
+        `None` mặc định vì đó là câu trả lời cho lần nạp ĐẦU của một stream, và
+        là hình dạng mà mọi bài dùng double này trước Task 15 ngầm giả định.
+        """
+        return self.columns
 
     def rename_target_away(self) -> None:
         self.events.append(("rename_target_away", 0))
