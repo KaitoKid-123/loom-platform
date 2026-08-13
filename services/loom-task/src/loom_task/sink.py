@@ -208,6 +208,28 @@ class IcebergSink:
         """Lần nạp `full` đầu tiên của một lakehouse trả về `False` ở đây."""
         return self._lakehouse.exists(self._target)
 
+    def target_columns(self) -> list[str] | None:
+        """Tên cột của bảng ĐÍCH, hoặc `None` khi bảng chưa tồn tại.
+
+        `None` chứ không `[]`, và khác biệt đó là cả điểm của hàm: `[]` đọc được
+        là "bảng đích không có cột nào", thứ `check_schema` sẽ báo là drift cho
+        MỌI cột của nguồn — tức là lần nạp ĐẦU TIÊN của một stream không bao giờ
+        chạy được. `None` nói đúng điều đang xảy ra: chưa có gì để so.
+
+        KHÔNG thuộc Protocol `Sink`: hai vòng lặp nạp không gọi nó, và
+        `RecordingSink`/`CollectingSink` không có việc gì với nó (xem docstring
+        `Sink` — Protocol đó cố ý chỉ khai bề mặt mà `run_incremental`/`run_full`
+        cần). Người gọi duy nhất là `main.ingest`, chỗ nắm một `IcebergSink` thật.
+
+        Ba cột `BRONZE_COLUMNS` NẰM TRONG danh sách trả về, không bị lọc ở đây:
+        đây là hàm nói bảng đích có gì, và việc loại trừ chúng là luật của
+        `check_schema` (chỗ duy nhất biết vì sao). Lọc ở cả hai chỗ nghĩa là một
+        ngày nào đó chỉ một trong hai được cập nhật.
+        """
+        if not self._lakehouse.exists(self._target):
+            return None
+        return list(self._lakehouse.schema(self._target).names)
+
     def rename_target_away(self) -> None:
         self._lakehouse.rename_table(self._target, self._old_target)
 

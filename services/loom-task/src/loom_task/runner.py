@@ -29,8 +29,8 @@ from loom_connector import Connector, CursorCandidate, StreamSchema, StreamState
 from loom_core.cursor import format_cursor_value
 from loom_task.client import IngestClientLike
 
-# Ba cột metadata của bronze (spec v1 mục 5.5). `check_schema` ở Task 14 phải
-# loại trừ đúng ba tên này, nếu không MỌI lần nạp thứ hai đều báo schema drift.
+# Ba cột metadata của bronze (spec v1 mục 5.5). `check_schema` loại trừ đúng ba
+# tên này, nếu không MỌI lần nạp thứ hai đều báo schema drift.
 BRONZE_COLUMNS = ("_ingested_at", "_source", "_batch_id")
 
 
@@ -52,6 +52,10 @@ class StreamNotDiscovered(RuntimeError):
 class CursorNotAvailable(RuntimeError):
     """Không có cột nào của stream này dùng được làm watermark, hoặc cột mà
     watermark đang đứng trên không còn dùng được ở nguồn."""
+
+
+class SchemaDrift(RuntimeError):
+    """Nguồn và bảng bronze không khớp. 3a KHÔNG tiến hoá schema — spec mục 7."""
 
 
 class Sink(Protocol):
@@ -200,6 +204,75 @@ def add_bronze_columns(batch: pa.RecordBatch, source: str, batch_id: uuid.UUID) 
     )
 
 
+def _schema_for(streams: Sequence[StreamSchema], stream: str) -> StreamSchema:
+    """Stream mà run này nói tên, hoặc `StreamNotDiscovered`.
+
+    Dùng CHUNG bởi `source_columns` và `resolve_cursor`: hai câu hỏi khác nhau
+    trên cùng MỘT lượt `discover()`, nhưng cùng một câu trả lời cho "nguồn không
+    có bảng đó". Viết phép tra hai lần là mở đường cho hai thông báo lệch nhau
+    mô tả cùng một sự cố.
+    """
+    schema = next((s for s in streams if s.name == stream), None)
+    if schema is None:
+        raise StreamNotDiscovered(
+            f"nguồn không có stream {stream!r} — discover() thấy {sorted(s.name for s in streams)}"
+        )
+    return schema
+
+
+def source_columns(streams: Sequence[StreamSchema], stream: str) -> list[str]:
+    """Tên MỌI cột của stream ở nguồn — đầu vào `source` của `check_schema`.
+
+    MỌI cột, không chỉ `candidate_cursors`: drift là chuyện của cả bảng, còn
+    `candidate_cursors` chỉ là những cột dùng được làm watermark (một tập con
+    lọc theo kiểu, xem `CursorCandidate`). Lấy nhầm tập con đó thì một cột `text`
+    mới thêm ở nguồn không bao giờ bị coi là drift.
+    """
+    return [column.name for column in _schema_for(streams, stream).columns]
+
+
+def check_schema(source: list[str], target: list[str]) -> None:
+    """So TÊN cột theo TẬP HỢP, và ném `SchemaDrift` khi hai bên lệch.
+
+    **Chỉ so TÊN, KHÔNG so KIỂU — đây là giới hạn thật của phép canh này, không
+    phải một chi tiết cài đặt.** Một cột `id` đổi từ `integer` sang `text` ở
+    nguồn đi qua đây mà không một lời nào. Nó không lặng lẽ làm hỏng dữ liệu
+    (lần `append` vào Iceberg sẽ hỏng vì lệch schema), nhưng nó hỏng ở một chỗ
+    XA nguyên nhân và với một thông báo không nhắc gì tới việc nguồn đã đổi
+    kiểu. Nói ra ở đây vì một phép canh tự nhận là canh "schema" trong khi chỉ
+    canh tên cột là đúng loại nhầm lẫn đắt tiền.
+
+    **Theo TẬP HỢP, không theo thứ tự.** Thứ tự cột ở nguồn đổi được mà không
+    đổi ý nghĩa gì (thêm một cột ở giữa, `SELECT *` trả thứ tự khác sau một
+    `ALTER`), nên so theo thứ tự sẽ báo drift cho một thay đổi vô hại — và một
+    phép canh báo động giả là một phép canh sắp bị tắt đi.
+
+    **Loại trừ ba cột `BRONZE_COLUMNS` khỏi phía đích.** CHÚNG TA thêm chúng
+    (`add_bronze_columns`), nguồn không bao giờ có. Không loại trừ thì MỌI lần
+    nạp thứ hai đều báo drift.
+
+    Trừ ở phía ĐÍCH chứ không thêm vào phía nguồn: nếu một ngày nguồn thật sự có
+    một cột tên `_source`, phép trừ này cho ra "nguồn có thêm: _source" — một
+    thông báo đúng và đọc được — thay vì âm thầm coi hai cột khác nhau là một.
+    """
+    target_real = set(target) - set(BRONZE_COLUMNS)
+    source_set = set(source)
+    if target_real == source_set:
+        return
+
+    added = sorted(source_set - target_real)
+    removed = sorted(target_real - source_set)
+    parts = []
+    if added:
+        parts.append(f"nguồn có thêm: {', '.join(added)}")
+    if removed:
+        parts.append(f"nguồn không còn: {', '.join(removed)}")
+    raise SchemaDrift(
+        "schema nguồn khác bảng bronze — " + "; ".join(parts) + ". "
+        "Giai đoạn 3a không tiến hoá schema; sửa tay hoặc chờ 3b."
+    )
+
+
 def resolve_cursor(
     streams: Sequence[StreamSchema], stream: str, remembered_column: str | None
 ) -> CursorCandidate:
@@ -231,11 +304,7 @@ def resolve_cursor(
     watermark cũ có thể không còn đọc được dưới kiểu mới, và tự chọn một cột khác
     sẽ lặng lẽ nạp lại toàn bộ bảng dưới cái tên "incremental".
     """
-    schema = next((s for s in streams if s.name == stream), None)
-    if schema is None:
-        raise StreamNotDiscovered(
-            f"nguồn không có stream {stream!r} — discover() thấy {sorted(s.name for s in streams)}"
-        )
+    schema = _schema_for(streams, stream)
     if not schema.candidate_cursors:
         raise CursorNotAvailable(
             f"stream {stream!r} không có cột nào dùng được làm watermark "

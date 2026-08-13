@@ -44,11 +44,12 @@ from loom_iceberg import Lakehouse, build_catalog
 from loom_task.client import IngestClient, IngestClientLike
 from loom_task.config import LakehouseSettings, Settings, SourceCredentials
 from loom_task.runner import (
-    Sink,
     bronze_table_name,
+    check_schema,
     resolve_cursor,
     run_full,
     run_incremental,
+    source_columns,
 )
 from loom_task.sink import IcebergSink
 
@@ -117,8 +118,13 @@ def target_table(spec: IngestSpec) -> str:
     return bronze_table_name(spec.connection_slug, spec.stream)
 
 
-def _build_sink(spec: IngestSpec) -> Sink:
+def _build_sink(spec: IngestSpec) -> IcebergSink:
     """Đường ghi bronze THẬT: một `Lakehouse` trên warehouse của lakehouse này.
+
+    Kiểu trả về là `IcebergSink` chứ không Protocol `Sink`: `ingest` dưới đây còn
+    gọi `target_columns()` cho phép đối chiếu schema, và phương thức đó CỐ Ý
+    không thuộc `Sink` (xem docstring của nó). `IcebergSink` khớp `Sink` theo cấu
+    trúc nên hai vòng lặp nạp vẫn nhận nó y nguyên.
 
     `warehouse=str(spec.lakehouse_id)` là quy ước đã có từ Giai đoạn 2b
     (`loom_query.runner`, và `loom_api.warehouse_provisioning` là bên tạo):
@@ -164,6 +170,22 @@ def ingest(client: IngestClientLike, spec: IngestSpec) -> int:
     một tối ưu: một bảng không có cột nào dùng được làm cursor vẫn nạp `full`
     được (xem `CursorNotAvailable`), nên hỏi cursor ở đường `full` sẽ TỪ CHỐI
     đúng những bảng mà `full` tồn tại để phục vụ.
+
+    **`check_schema` cũng chỉ chạy cho `incremental`, và đây là một quyết định,
+    không phải một chỗ bỏ sót.** Hai lý do, theo thứ tự quan trọng:
+
+    1. `full` KHÔNG nối lô vào bảng cũ: nó ghi vào staging rồi TRÁO tên (xem
+       `run_full`), và bảng staging sinh schema từ chính dữ liệu mới. Nên một cột
+       thêm/mất ở nguồn không làm `full` hỏng — nó thay cả bảng, đúng như tên gọi.
+    2. Một lần nạp `full` CHÍNH LÀ cách sửa tay mà thông báo của `SchemaDrift`
+       chỉ tới. Canh cả `full` nghĩa là 3a từ chối luôn con đường thoát duy nhất
+       nó có, và người dùng bị kẹt không còn cách nào đi tiếp.
+
+    Cái giá, nói thẳng: một lần `full` sau khi nguồn đổi cột sẽ ĐỔI schema bảng
+    bronze mà không hỏi ai. Đó là hành vi của "thay cả bảng", không phải tiến hoá
+    schema (không có `ALTER` nào chạy, không có dữ liệu cũ nào được đọc dưới
+    schema mới) — nhưng người đọc bảng vẫn thấy một cột mới xuất hiện sau một lần
+    nạp, và 3a không có gì cảnh báo họ về điều đó.
     """
     connector = _build_connector(spec)
     if spec.mode == "full":
@@ -175,10 +197,26 @@ def ingest(client: IngestClientLike, spec: IngestSpec) -> int:
             stream=spec.stream,
         )
 
-    # `discover()` một lần, dùng cho việc chọn cursor (và cho phép đối chiếu
-    # schema của Task 14 — cùng một lượt đọc `information_schema`, không phải
-    # hai).
-    cursor = resolve_cursor(connector.discover(), spec.stream, spec.cursor_column)
+    # `discover()` MỘT lần, dùng cho cả hai việc: đối chiếu schema và chọn cursor
+    # — cùng một lượt đọc `information_schema`, không phải hai.
+    streams = connector.discover()
+    sink = _build_sink(spec)
+
+    # Đối chiếu schema TRƯỚC lô đầu tiên, và trước cả `resolve_cursor`: một cột
+    # thêm/mất ở nguồn giải thích được nhiều hơn hẳn một `CursorNotAvailable`
+    # (thứ mà chính việc đổi cột có thể gây ra), nên nói ra sự lệch lớn trước là
+    # nói ra nguyên nhân thay vì một hệ quả của nó.
+    #
+    # `None` nghĩa là bảng bronze CHƯA tồn tại — lần nạp đầu tiên của stream này,
+    # và không có gì để so: schema đích sẽ được sinh ra TỪ lô đầu (xem
+    # `IcebergSink._write`), nên định nghĩa của "lệch" chưa tồn tại ở thời điểm
+    # đó. Đây là đường mà MỌI stream đi qua đúng một lần, nên nó phải là một
+    # nhánh tường minh chứ không một tập rỗng tình cờ khớp.
+    target = sink.target_columns()
+    if target is not None:
+        check_schema(source=source_columns(streams, spec.stream), target=target)
+
+    cursor = resolve_cursor(streams, spec.stream, spec.cursor_column)
     logger.info(
         "ingest.starting",
         stream=spec.stream,
@@ -189,7 +227,7 @@ def ingest(client: IngestClientLike, spec: IngestSpec) -> int:
     )
     return run_incremental(
         connector=connector,
-        sink=_build_sink(spec),
+        sink=sink,
         client=client,
         stream=spec.stream,
         cursor=cursor,
