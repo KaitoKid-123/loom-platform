@@ -21,6 +21,15 @@
 # dựng nên. Không có lý do nghiệp vụ nào ở Giai đoạn 3a cần một workload dài
 # hạn do `loom-api` tự tạo.
 #
+# KHÔNG cấp `jobs/status`, và đó là một quyết định chứ không phải một chỗ quên.
+# RBAC coi subresource `jobs/status` là một resource RIÊNG: `get` trên `jobs`
+# KHÔNG cho `get` trên `jobs/status`. `JobLauncher.status` vì vậy gọi
+# `read_namespaced_job` chứ không phải `read_namespaced_job_status` — hai lời
+# gọi trả về CÙNG một `V1Job` với cùng `.status`, nên thêm một resource vào Role
+# ở đây sẽ mua đúng số không. Task 15 đã gặp chiều ngược lại trên cụm thật: khi
+# `jobs.py` còn gọi bản `_status`, `GET /api/v1/ingest/{run_id}` trả 500 kèm
+# "cannot get resource \"jobs/status\"" mỗi lần run chưa kết thúc.
+#
 # KHÔNG cấp `pods/exec`. `exec` là một shell vào bên trong pod của người khác —
 # không phải thứ `JobLauncher.status` (chỉ đọc `.status.active/succeeded/
 # failed`, xem docstring hàm đó) hay việc đọc `pods/log` để hiển thị log khi

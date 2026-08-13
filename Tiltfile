@@ -180,9 +180,12 @@ k8s_resource('loom-query', labels=['app'])
 # KHÔNG có `auto_init=False` ở đây, khác `migrate` phía dưới.
 #
 # Tag viết tường minh vì local_resource không có `$EXPECTED_REF`, và nó phải khớp
-# `loom_core.config.Settings.task_image` — lệch nhau thì Job hỏi một ảnh không có
-# trong node. Việc truyền `task.image` xuống env của `loom-api` (để dev/prod đổi
-# được) là Task 15.
+# ảnh mà `loom-api` yêu cầu — lệch nhau thì Job hỏi một ảnh không có trong node.
+# Từ Task 15 chuỗi đó KHÔNG còn đến từ mặc định của `loom_core.config.Settings.
+# task_image` nữa: chart truyền `LOOM_TASK_IMAGE = task.image:task.tag` xuống env
+# của `loom-api` (xem `api-deployment.yaml`), nên bản sao phải giữ khớp ở đây là
+# `task.image`/`task.tag` trong `deploy/helm/loom/values.yaml` — hôm nay cả hai
+# đường đều cho ra `loom/task:dev`.
 local_resource(
     'loom-task-image',
     cmd=build_and_import('services/loom-task/Dockerfile', ref='loom/task:dev'),

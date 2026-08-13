@@ -7,6 +7,12 @@ query:
 web:
   tag: dev
   replicas: 2
+task:
+  # Không có `replicas`: ảnh này chạy dưới dạng Job một-lần do `loom-api` phóng,
+  # không phải một Deployment (xem values.yaml, mục `task`). Chỉ `tag` cần đè —
+  # thiếu dòng này thì dev phóng pod nạp bằng ảnh `:dev` của values.yaml, tình cờ
+  # đúng ở đây và SAI ở prod, đúng loại lỗi chỉ lộ ra ở một môi trường.
+  tag: dev
 ingress:
   host: loom-dev.internal
   # https:// ở dưới giả định TLS được chấm dứt phía trước Ingress này

@@ -3,10 +3,17 @@
 `MagicMock` chấp nhận MỌI lệnh gọi, kể cả gọi sai tên phương thức hay sai thứ
 tự tham số — nó không giữ được hợp đồng nào, chỉ ghi nhận "có gì đó được gọi".
 `_FakeBatchV1Api` dưới đây chỉ hiểu ĐÚNG hai phương thức mà `JobLauncher` thật
-sự gọi (`create_namespaced_job`, `read_namespaced_job_status`), với đúng chữ ký
-của `BatchV1Api` thật (`kubernetes` 36.x) — gọi sai tên hay sai thứ tự tham số
-sẽ ném `TypeError` ngay, đúng như dùng nhầm client thật, thay vì âm thầm "thành
-công" như một `MagicMock` sẽ làm.
+sự gọi (`create_namespaced_job`, `read_namespaced_job`), với đúng chữ ký của
+`BatchV1Api` thật (`kubernetes` 36.x) — gọi sai tên hay sai thứ tự tham số sẽ
+ném `TypeError`/`AttributeError` ngay, đúng như dùng nhầm client thật, thay vì
+âm thầm "thành công" như một `MagicMock` sẽ làm.
+
+Việc double CỐ Ý không có `read_namespaced_job_status` là một phép canh, không
+phải một chỗ chưa viết tới: hai phương thức đó trả về cùng một `V1Job`, nhưng
+phương thức có hậu tố `_status` gọi vào subresource `jobs/status` — một resource
+RBAC KHÁC mà Role của `loom-api` không cấp. Quay lại dùng nó thì mọi bài dưới
+đây ném `AttributeError` ở đây, thay vì xanh hết rồi trả 500 trên cụm thật. Xem
+docstring `JobLauncher.status` cho thông báo 403 thật đã gặp.
 
 Không có `JobLauncher` nào ở đây từng chạm mạng hay cụm thật: fixture
 `fake_batch_api` monkeypatch `loom_api.jobs.client.BatchV1Api` thành double này,
@@ -63,7 +70,7 @@ class _FakeBatchV1Api:
         self._jobs[name] = body
         self.created.append(body)
 
-    def read_namespaced_job_status(self, name: str, namespace: str, **_: object) -> client.V1Job:
+    def read_namespaced_job(self, name: str, namespace: str, **_: object) -> client.V1Job:
         if self._next_error is not None:
             err, self._next_error = self._next_error, None
             raise err

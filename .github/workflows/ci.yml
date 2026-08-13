@@ -187,15 +187,24 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Cố tình KHÔNG dùng docker/build-push-action + cache gha ở Giai đoạn 0:
-      # `make build` gọi đúng hai lệnh `docker build` mà Tiltfile và máy dev gọi,
-      # nên không có đường nào để CI và local build khác nhau. Đổi lại là mất
+      # `make build` gọi đúng những lệnh `docker build` mà Tiltfile và máy dev
+      # gọi, nên không có đường nào để CI và local build khác nhau. Đổi lại là mất
       # cache giữa các lần chạy (~vài phút cho image api). Khi Giai đoạn 6 có
       # registry thì đây là chỗ thêm buildx, cache và `push: true`.
-      - name: Build loom/api và loom/web
+      - name: Build cả bốn image
         run: make build IMAGE_TAG="${{ github.sha }}"
-      - name: Xác nhận hai image thật sự tồn tại
+      - name: Xác nhận cả bốn image thật sự tồn tại
         # `docker build` xanh mà không tạo ra tag nào là chuyện đã xảy ra ở dự án
         # này (xem ghi chú (1) trong Tiltfile). Hỏi daemon cho chắc.
+        #
+        # BỐN dòng, không hai. `make build` đã build cả `loom/query` (Giai đoạn
+        # 2b) lẫn `loom/task` (Giai đoạn 3a) từ trước, nhưng bước xác nhận chỉ
+        # hỏi hai ảnh đầu — nên đúng cái hỏng mà bước này tồn tại để bắt (build
+        # xanh, tag không ra đời) vẫn lọt được với hai ảnh mới nhất. `loom/task`
+        # là ảnh mà `loom-api` phóng Job bằng, nên một tag không ra đời ở đây
+        # thành `ImagePullBackOff` ở lần nạp đầu tiên sau khi triển khai.
         run: |
           docker image inspect "loom/api:${{ github.sha }}" > /dev/null
           docker image inspect "loom/web:${{ github.sha }}" > /dev/null
+          docker image inspect "loom/query:${{ github.sha }}" > /dev/null
+          docker image inspect "loom/task:${{ github.sha }}" > /dev/null

@@ -224,9 +224,31 @@ class JobLauncher:
         sẽ vỡ ngay khi hai chuỗi đó nối lại thành một giá trị không khớp gì cả.
         Ba số đếm nguyên ổn định qua các bản k8s và không có điều kiện phụ nào
         cần so khớp.
+
+        **`read_namespaced_job`, KHÔNG `read_namespaced_job_status`** — và đó là
+        một ràng buộc RBAC, không phải sở thích. Hai phương thức trả về CÙNG một
+        `V1Job` với cùng `.status`, nhưng cái thứ hai gọi vào subresource
+        `jobs/status`, mà RBAC coi `jobs` và `jobs/status` là HAI resource khác
+        nhau: `get` trên `jobs` không cho `get` trên `jobs/status`. Đã hỏng thật
+        trên cụm ở Task 15, và triệu chứng của nó là loại tệ nhất — mọi test đơn
+        vị xanh (double không có khái niệm RBAC), rồi `GET /api/v1/ingest/
+        {run_id}` trả 500 với `ForbiddenException` ĐÚNG lúc run chưa kết thúc,
+        tức là đúng lúc người dùng đang nhìn thanh tiến trình:
+
+            jobs.batch "ingest-<run_id>" is forbidden: User "system:
+            serviceaccount:loom:loom-api" cannot get resource "jobs/status"
+            in API group "batch" in the namespace "loom"
+
+        Cách sửa kia — thêm `jobs/status` vào Role — cũng chạy, nhưng nó nới
+        quyền của `loom-api` để mua một thứ mà `read_namespaced_job` đã cho sẵn
+        trong phạm vi `get` đang có. Role ở `api-rbac.yaml` là ranh giới thực
+        thi của lời hứa "hẹp nhất có thể" (xem docstring module), và
+        `make helm-validate` canh danh sách resource của nó theo CẢ HAI chiều —
+        nên nới nó ra phải là một quyết định, không phải một hệ quả phụ của việc
+        chọn nhầm một trong hai phương thức tương đương.
         """
         try:
-            job = self._batch.read_namespaced_job_status(job_name(run_id), self._namespace)
+            job = self._batch.read_namespaced_job(job_name(run_id), self._namespace)
         except ApiException as exc:
             if exc.status == 404:
                 return JobStatus(exists=False)

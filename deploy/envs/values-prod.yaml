@@ -10,6 +10,11 @@ query:
 web:
   tag: prod
   replicas: 2
+task:
+  # Xem values-dev.yaml: chỉ `tag`, vì ảnh nạp không phải một Deployment. Không
+  # đè `memory` — 512Mi của values.yaml đến từ ĐO 1 và chưa có phép đo nào KHÁC
+  # cho prod; đặt một con số khác ở đây là đoán.
+  tag: prod
 ingress:
   host: loom.internal
   # https:// ở dưới giả định TLS được chấm dứt phía trước Ingress này

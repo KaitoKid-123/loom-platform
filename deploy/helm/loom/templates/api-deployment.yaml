@@ -70,6 +70,32 @@ spec:
             - name: LOOM_QUERY_BASE_URL
               value: "http://{{ include "loom.fullname" . }}-query.{{ .Release.Namespace }}.svc.cluster.local:8000/api/v1"
             {{- include "loom.storageRootEnv" (dict "root" . "prefix" "LOOM_") | nindent 12 }}
+            # Pod NẠP (Giai đoạn 3a): cái gì được phóng, ở đâu, với bao nhiêu
+            # RAM. Ba giá trị này KHÔNG mô tả container `api` — chúng là tham số
+            # mà `JobLauncher` đọc ra để dựng Job (xem `loom_api.jobs`), nên
+            # `resources` của Deployment này không liên quan gì tới chúng.
+            #
+            # GHI TƯỜNG MINH thay vì để mặc định của `loom_core.config.Settings`
+            # đứng ra, cùng lý do `LOOM_QUERY_BASE_URL` ở trên: mặc định là chỗ
+            # dựa cho test chạy NGOÀI cụm, không phải hợp đồng triển khai. Cụ
+            # thể ở đây, `Settings.task_image` mặc định `loom/task:dev` — một
+            # tag `dev` chạy ở prod là đúng loại lỗi im lặng nhất có thể.
+            - name: LOOM_TASK_IMAGE
+              value: "{{ .Values.task.image }}:{{ .Values.task.tag }}"
+            # `default .Release.Namespace` khi values để rỗng — xem values.yaml,
+            # mục `task.namespace`: Role của `loom-api` là Role namespace-scoped
+            # ở namespace này, nên đây là namespace DUY NHẤT nó phóng Job được.
+            - name: LOOM_TASK_NAMESPACE
+              value: {{ .Values.task.namespace | default .Release.Namespace | quote }}
+            - name: LOOM_TASK_MEMORY
+              value: {{ .Values.task.memory | quote }}
+            # Địa chỉ mà POD NẠP gọi ngược về (`/internal/ingest/*`) — `loom-api`
+            # chỉ chuyển tiếp chuỗi này vào env của Job, nó không tự gọi mình.
+            # Mặc định của `Settings.task_api_base_url` viết cứng namespace
+            # `loom`; dòng này lấy namespace THẬT của release, đúng cách
+            # `LOOM_QUERY_BASE_URL` ngay trên làm.
+            - name: LOOM_TASK_API_BASE_URL
+              value: "http://{{ include "loom.fullname" . }}-api.{{ .Release.Namespace }}.svc.cluster.local:8000"
             - name: LOOM_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:

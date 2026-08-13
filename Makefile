@@ -397,13 +397,47 @@ infra-local-secret: check-context  ## CHỈ LOCAL: nạp Secret Aiven từ deplo
 	| jq --rawfile ca deploy/local/aiven-ca.pem '.data["ca.pem"] = ($$ca | @base64)' \
 	| kubectl apply -f -
 
+.PHONY: infra-local-source-secret
+infra-local-source-secret: check-context  ## CHỈ LOCAL: Secret NGUỒN cho pod nạp (Giai đoạn 3a)
+	@# Secret mà `ConnectionDefinition.secret_ref` của một connection LOCAL trỏ
+	@# tới, và là thứ `JobLauncher.launch` chiếu NGUYÊN KHỐI vào pod nạp bằng
+	@# `envFrom`. Vì `envFrom` biến MỌI khoá thành một biến môi trường, tên khoá
+	@# ở đây LÀ tên biến mà `loom_task.config.SourceCredentials` đọc
+	@# (`env_prefix="LOOM_TASK_"` + `source_user`/`source_password`). Đó là cả
+	@# quy ước, và nó không có chỗ nào khác để được khai báo — không có template
+	@# Helm nào sinh Secret này, vì mỗi connection có Secret RIÊNG do người vận
+	@# hành tạo.
+	@#
+	@# KHÔNG dùng lại `loom-db-app`: nó mang khoá `ca.pem`, một cái tên KHÔNG
+	@# hợp lệ cho biến môi trường, nên kubelet bỏ qua khoá đó và ghi một
+	@# `InvalidVariableNames` vào event của pod — còn `username`/`password` thì
+	@# sai tên với `SourceCredentials` nên pod vẫn chết vì thiếu credential.
+	@#
+	@# Credential ở đây là credential Aiven THẬT, và điều đó là bắt buộc chứ
+	@# không tiện tay: cụm local không có Postgres nào khác để nạp TỪ (database
+	@# của Loom là dịch vụ ngoài ở cả ba môi trường — xem `database` trong
+	@# values.yaml), nên một credential giả sẽ chỉ chứng minh được đường báo
+	@# lỗi. Nó đọc từ `deploy/local/aiven.env` (gitignore) đúng cách
+	@# `infra-local-secret` đọc, và KHÔNG BAO GIỜ đi qua dòng lệnh: `jq` đổi tên
+	@# khoá trên JSON mà `kubectl --dry-run` sinh ra, nên giá trị không lộ qua
+	@# `ps`.
+	@test -f deploy/local/aiven.env || { \
+		echo "Thiếu deploy/local/aiven.env — copy từ aiven.env.example rồi điền"; exit 1; }
+	kubectl -n $(NS) create secret generic loom-source-local \
+	  --from-env-file=deploy/local/aiven.env \
+	  --dry-run=client -o json \
+	| jq '.data |= {LOOM_TASK_SOURCE_USER: .username, LOOM_TASK_SOURCE_PASSWORD: .password}' \
+	| kubectl apply -f -
+
 .PHONY: dev
-dev: cluster-up infra infra-local-secret  ## Dựng mọi thứ rồi chạy Tilt
-	@# `infra-local-secret` nằm ở đây chứ không nằm trong `infra`, đúng như ghi
-	@# chú của target đó: Dex phải dựng được kể cả khi chưa có credential Aiven,
-	@# còn `make dev` thì cần cả hai. Đặt nó là prerequisite cũng để lỗi "thiếu
-	@# deploy/local/*" hiện ra ngay dưới dạng một câu tiếng người, thay vì thành
-	@# một pod loom-api treo ở ContainerCreating trong giao diện Tilt.
+dev: cluster-up infra infra-local-secret infra-local-source-secret  ## Dựng mọi thứ rồi chạy Tilt
+	@# Hai target `infra-local-*` nằm ở đây chứ không nằm trong `infra`, đúng như
+	@# ghi chú của chúng: Dex phải dựng được kể cả khi chưa có credential Aiven,
+	@# còn `make dev` thì cần cả hai. Đặt chúng là prerequisite cũng để lỗi
+	@# "thiếu deploy/local/*" hiện ra ngay dưới dạng một câu tiếng người, thay vì
+	@# thành một pod loom-api treo ở ContainerCreating trong giao diện Tilt —
+	@# hoặc, với Secret nguồn, một pod NẠP treo ở CreateContainerConfigError ở
+	@# lần nạp đầu tiên, xa hẳn nguyên nhân.
 	tilt up
 
 .PHONY: dev-down

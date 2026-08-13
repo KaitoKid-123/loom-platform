@@ -54,6 +54,37 @@ web:
     requests: { cpu: 10m, memory: 32Mi }
     limits: { memory: 128Mi }
 
+# Pod NẠP (Giai đoạn 3a). KHÔNG có Deployment nào ở đây và sẽ không bao giờ có:
+# `loom-api` phóng một `Job` cho MỖI lần nạp (xem `loom_api.jobs.JobLauncher`),
+# nên chart không triển khai ảnh này — nó chỉ NÓI cho `loom-api` biết phóng cái
+# gì, ở đâu, với bao nhiêu RAM. Ba giá trị dưới đây đi thẳng vào env của
+# `loom-api` (xem `api-deployment.yaml`), không vào một pod nào của chart.
+task:
+  # `image` + `tag` tách đôi, cùng khuôn `api`/`query`/`web`: values-dev/prod chỉ
+  # đè `tag` (`deploy/envs/values-{dev,prod}.yaml`), và một chuỗi `loom/task:dev`
+  # liền khối sẽ bắt hai file đó lặp lại cả tên kho ảnh chỉ để đổi bốn ký tự.
+  # `loom_core.config.Settings.task_image` ghép sẵn thành `loom/task:dev` — CÙNG
+  # chuỗi mà `local_resource('loom-task-image')` trong Tiltfile nạp vào node.
+  # Lệch nhau thì pod nạp `ImagePullBackOff` đi hỏi docker.io và hàng
+  # `ingest_run` kẹt ở `pending`.
+  image: loom/task
+  tag: dev
+  # Namespace Job chạy trong đó. RỖNG nghĩa là namespace của release — giá trị
+  # DUY NHẤT chạy được hôm nay, và đó là một ràng buộc của RBAC chứ không phải
+  # một mặc định lười: Role trong `api-rbac.yaml` là Role (namespace-scoped) đặt
+  # ở `.Release.Namespace`, nên phóng Job sang namespace khác nhận 403 và run
+  # kẹt ở `pending`. `envFrom` cũng không chiếu được Secret qua namespace (xem
+  # `loom_api.ingest_service.secret_name_for`). Đặt giá trị khác ở đây đòi một
+  # Role + RoleBinding trong namespace đó trước, và chart chưa render cái nào.
+  namespace: ""
+  # `limits.memory` của pod nạp — 512Mi, TRÊN đỉnh RSS 421 MiB đã ĐO THẬT ở ĐO 1
+  # (spec 3a mục 8) cho hình dạng lô 200k dòng/lô, 20 lô, và RSS còn đang bò lên
+  # ở lô cuối. ĐỪNG hạ: con số chỉ đúng cho hình dạng lô ĐÃ đo — lô lớn hơn hoặc
+  # dòng rộng hơn đòi đo lại chứ không suy ra được. Cùng số với mặc định của
+  # `Settings.task_memory`; ghi lại ở đây để dev/prod đổi được mà không phải
+  # build lại ảnh.
+  memory: 512Mi
+
 ingress:
   enabled: true
   className: traefik
