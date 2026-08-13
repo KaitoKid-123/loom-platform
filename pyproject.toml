@@ -32,6 +32,7 @@ src = [
     "packages/storagekit/src",
     "packages/icebergkit/src",
     "packages/sqlkit/src",
+    "packages/connectorkit/src",
     "services/api/src",
     "services/loom-query/src",
 ]
@@ -54,6 +55,7 @@ files = [
     "packages/storagekit/src",
     "packages/icebergkit/src",
     "packages/sqlkit/src",
+    "packages/connectorkit/src",
     "services/api/src",
     "services/api/migrations",
     "services/loom-query/src",
