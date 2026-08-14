@@ -36,14 +36,21 @@ import pyarrow as pa  # type: ignore[import-untyped]
 from loom_connector import StreamState
 from loom_core.cursor import moves_forward
 from loom_core.schemas import IngestCompletionReport
+from loom_task.runner import Boom
 
 
 class RecordingSink:
     """Ghi lại `(tên sự kiện, số dòng)` theo đúng thứ tự, vào list dùng chung.
 
-    Tên sự kiện TRÙNG tên phương thức của `Sink` cho cả năm bước của đường
-    `full` — xem docstring `Sink`. Riêng `append` ghi `"write"` (di sản Task 11,
-    ba bài test đang canh chuỗi đó).
+    Tên sự kiện TRÙNG tên phương thức của `Sink` cho cả bảy bước — xem docstring
+    `Sink`.
+
+    **`commit` là một sự kiện RIÊNG, và đó là chỗ hợp đồng của Giai đoạn 3d được
+    canh.** `write` chỉ ghi file Parquet; dữ liệu chỉ bền sau `commit`. Nếu hai
+    việc đó cùng để lại một tên sự kiện thì chuỗi của bản ĐÚNG ("ghi, commit,
+    báo") và bản SAI ("ghi, báo, commit" — watermark tiến qua dữ liệu chưa bền,
+    tức mất dòng im lặng) không phân biệt được, và bài canh thứ tự xanh cho cả
+    hai.
 
     **`stage` ghi `"stage"`, KHÔNG `"write"`, và khác biệt đó là cả điểm của
     double này.** Đột biến nguy hiểm nhất của Task 12 là "bỏ staging, ghi thẳng
@@ -67,8 +74,11 @@ class RecordingSink:
         self.has_target = has_target
         self.columns = columns
 
-    def append(self, batch: pa.RecordBatch) -> None:
+    def write(self, batch: pa.RecordBatch) -> None:
         self.events.append(("write", batch.num_rows))
+
+    def commit(self) -> None:
+        self.events.append(("commit", 0))
 
     def stage(self, batch: pa.RecordBatch) -> None:
         self.events.append(("stage", batch.num_rows))
@@ -106,18 +116,46 @@ class RecordingSink:
 
 
 class CollectingSink:
-    """Giữ lại các `id` đã ghi, để khẳng định TẬP HỢP dòng sau khi nạp lại.
+    """Giữ lại các `id` đã COMMIT, để khẳng định TẬP HỢP dòng sau khi nạp lại.
 
     Giữ `list` chứ không `set`: câu hỏi "có mất dòng nào không" cần tập hợp,
     nhưng câu hỏi "at-least-once có thật sinh trùng không" cần số lần xuất hiện,
-    và bài `test_a_crash_mid_run_loses_no_rows` khẳng định cả hai.
+    và hai bài crash trong `test_runner_incremental` khẳng định cả hai.
+
+    **`write` KHÔNG đưa dòng vào `ids`; chỉ `commit` mới.** Đây là điểm quan trọng
+    nhất của double này từ Giai đoạn 3d, và nó là mô hình đúng của đường thật: một
+    file Parquet đã ghi mà chưa `add_files` nằm trên S3 và KHÔNG người đọc nào của
+    bảng bronze thấy nó. Một double gom ngay lúc `write` sẽ đếm những dòng vô hình
+    đó là "đã hạ cánh", nên nó sẽ báo XANH cho đúng lỗi mà bài crash tồn tại để
+    bắt — một nhóm không bao giờ được commit.
+
+    `die_at_commit` mô phỏng pod chết ĐÚNG LÚC commit — chỗ đứt duy nhất phân biệt
+    được "commit rồi báo" với "báo rồi commit" bằng DỮ LIỆU thay vì bằng thứ tự sự
+    kiện. `crash_after_batch` của `run_incremental` không tới được chỗ đó: nó ném
+    sau khi cả lô (kể cả cả nhóm) đã xong, nên với nó hai thứ tự cho ra cùng một
+    kết quả.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, die_at_commit: int | None = None) -> None:
         self.ids: list[int] = []
+        self.die_at_commit = die_at_commit
+        self.commits = 0
+        self._pending: list[int] = []
 
-    def append(self, batch: pa.RecordBatch) -> None:
-        self.ids.extend(batch.column("id").to_pylist())
+    def write(self, batch: pa.RecordBatch) -> None:
+        self._pending.extend(batch.column("id").to_pylist())
+
+    def commit(self) -> None:
+        self.commits += 1
+        if self.commits == self.die_at_commit:
+            # Bỏ luôn phần chưa commit: tiến trình vừa chết, nên những file Parquet
+            # đó thành object mồ côi trên S3 mà không lần chạy nào sau đó nhìn tới.
+            # Giữ chúng lại để một `commit()` sau cứu là mô phỏng một thế giới nơi
+            # pod sống lại cùng bộ đệm của nó — không phải thế giới này.
+            self._pending.clear()
+            raise Boom("pod chết đúng lúc commit")
+        self.ids.extend(self._pending)
+        self._pending.clear()
 
 
 @dataclass

@@ -23,10 +23,11 @@ khối `try` dưới đây. Cái `try` này chỉ mua một thứ, và mua thậ
 tiến trình CÒN SỐNG để kể lại thì được kể lại ngay, kèm lý do.
 
 **Đường ghi bronze (Iceberg) được nối Ở ĐÂY từ Task 12** — xem `_build_sink` và
-`loom_task.sink`. Cả hai mode đã có đường ghi thật: `incremental` (Task 11) ghi
-và commit từng lô vào bảng đích, `full` (Task 12) ghi vào bảng tạm rồi tráo tên
-ba bước. Tên bảng đích đến từ `target_table` — một hàm riêng, vì nó là quyết định
-không được đổi sau khi có dữ liệu thật và vì vậy phải có phép canh rẻ.
+`loom_task.sink`. Cả hai mode đã có đường ghi thật: `incremental` ghi từng lô rồi
+commit theo NHÓM `WriteTuning.commit_every_batches` lô vào bảng đích (Giai đoạn
+3d; 3a commit từng lô), `full` (Task 12) ghi vào bảng tạm rồi tráo tên ba bước.
+Tên bảng đích đến từ `target_table` — một hàm riêng, vì nó là quyết định không
+được đổi sau khi có dữ liệu thật và vì vậy phải có phép canh rẻ.
 """
 
 from __future__ import annotations
@@ -42,7 +43,13 @@ from loom_connector.postgres import PostgresConnector
 from loom_core.schemas import IngestSourceSpec, IngestSpec
 from loom_iceberg import Lakehouse, build_catalog
 from loom_task.client import IngestClient, IngestClientLike
-from loom_task.config import LakehouseSettings, ReadTuning, Settings, SourceCredentials
+from loom_task.config import (
+    LakehouseSettings,
+    ReadTuning,
+    Settings,
+    SourceCredentials,
+    WriteTuning,
+)
 from loom_task.runner import (
     bronze_table_name,
     check_schema,
@@ -244,6 +251,12 @@ def ingest(client: IngestClientLike, spec: IngestSpec) -> int:
         client=client,
         stream=spec.stream,
         cursor=cursor,
+        # TRUYỀN TƯỜNG MINH, cùng lý do đã ghi ở `_build_connector` cho
+        # `batch_rows`: `run_incremental` có mặc định RIÊNG (1 — hành vi của 3a),
+        # nên bỏ tham số này ra không phải "không cấu hình" mà là "cấu hình bằng
+        # một con số khác, im lặng". Đúng lỗi đó đã chạy thật một lần với
+        # `batch_rows` và ĐO 3 định giá nó ở hơn một nửa thông lượng.
+        commit_every_batches=WriteTuning().commit_every_batches,
     )
 
 

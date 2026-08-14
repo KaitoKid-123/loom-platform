@@ -49,6 +49,35 @@ lý do:
    chắc chắn đã tồn tại lúc đó (chính `stage()` vừa tạo nó). Nếu staging nằm ở
    namespace khác, lần nạp đầu tiên sẽ hỏi `exists()` về một bảng trong một
    namespace chưa hề tồn tại — một trường hợp không ai cần phải dò.
+
+## GHI rồi COMMIT là HAI bước, từ Giai đoạn 3d
+
+Cho tới 3a, `append`/`stage` ghi VÀ commit trong một lời gọi — một commit
+catalog cho mỗi lô, và ĐO 3 định giá nó ở 44,0% đồng hồ tường (42,1 s trên
+97,0 s). `scripts/probe_iceberg_add_files.py` đã mở lối ra bằng số đo:
+`Table.add_files()` hạ N file Parquet vào ĐÚNG MỘT snapshot với N = 1, 5, 20, và
+thời gian commit PHẲNG theo N. Nên file này giờ tách hai bước — `write`/`stage`
+ghi một file Parquet, `commit`/`staging_done` đăng ký cả nhóm bằng một commit.
+
+Điều đó KHÔNG bác bỏ ĐO 2. ĐO 2 đo `table.transaction()` và kết luận đúng cho
+API đó: hai `tx.append` cho hai snapshot, và giữ transaction mở còn tốn RAM hơn.
+`add_files` là một API KHÁC, và nó gộp được. Hai kết quả không mâu thuẫn nhau;
+cái sai là câu "PyIceberg 0.11.1 không gộp được commit" nếu ai đó đã đọc ĐO 2
+thành như vậy.
+
+## TÊN file Parquet mang `run_id`, và đó là chống ĐỤNG NHAU, không phải trang trí
+
+File của đường `incremental` nằm trong location của BẢNG ĐÍCH — cùng một thư mục
+cho mọi lần chạy của cùng một stream, vì `add_files` chỉ đăng ký được file nằm
+trong location của chính bảng (thăm dò Q4b, và Lakekeeper vend credential STS hẹp
+theo từng bảng nên không có chỗ nào khác ghi được). `start_ingest` CHƯA có cổng
+chống trùng, nên hai lần chạy song song trên cùng một stream là chuyện xảy ra
+được — và với một cái tên chỉ mang số thứ tự lô, lần chạy thứ hai sẽ ghi ĐÈ lên
+file mà lần chạy thứ nhất đã đăng ký (`create(overwrite=True)`), tức là đổi nội
+dung của những dòng đã nằm trong bảng. Không lỗi, không dấu vết.
+
+`run_id.hex` + số thứ tự trong lần chạy giải đúng chuyện đó, cùng quy ước với
+`job_name` (`loom_api.jobs`) và với hai cái tên bảng phái sinh ở trên.
 """
 
 from __future__ import annotations
@@ -57,7 +86,7 @@ import uuid
 
 import pyarrow as pa  # type: ignore[import-untyped]
 
-from loom_iceberg import Lakehouse
+from loom_iceberg import DataFileWriter, Lakehouse
 
 
 class NothingStaged(RuntimeError):
@@ -149,6 +178,7 @@ class IcebergSink:
     ) -> None:
         self._lakehouse = lakehouse
         self._target = target
+        self._run_id = run_id
         # `stream` KHÔNG dùng để ghi gì — nó chỉ đi vào thông báo của
         # `NothingStaged`, và có mặt vì thông báo đó là artifact duy nhất còn lại
         # sau khi pod bị dọn (xem `NothingStaged`). Tên bảng đích mang `<schema>_
@@ -162,22 +192,44 @@ class IcebergSink:
         # nó), nên hỏi lại catalog mỗi lô là một round trip cho một sự thật
         # không đổi được.
         self._existing: set[str] = set()
+        # File Parquet ĐÃ GHI XONG nhưng CHƯA đăng ký vào bảng. Một file trong
+        # danh sách này tồn tại trên S3 và KHÔNG người đọc nào thấy nó — đó chính
+        # là tính chất làm nhóm-rồi-commit an toàn được: mất một nhóm chưa commit
+        # là mất công đọc lại, không phải một bảng có dữ liệu nửa vời.
+        self._pending: list[str] = []
+        # Số file đã ghi trong lần chạy này — phần thứ tự của tên file. Đếm CHUNG
+        # cho cả hai bảng (một lần chạy chỉ đi một trong hai đường) nên không có
+        # cách nào hai file mang cùng tên.
+        self._files_written = 0
+        # Writer mở theo NHÓM: bỏ đi ở mỗi commit, dựng lại ở lô kế tiếp. Xem
+        # `commit` cho lý do (tuổi credential STS) và cho cái giá của nó.
+        self._writer: DataFileWriter | None = None
 
-    def append(self, batch: pa.RecordBatch) -> None:
-        """`incremental`: ghi VÀ commit vào bảng ĐÍCH."""
+    def write(self, batch: pa.RecordBatch) -> None:
+        """`incremental`: ghi một file Parquet vào location bảng ĐÍCH. KHÔNG commit.
+
+        Sau lời gọi này, dữ liệu của lô nằm trên S3 nhưng KHÔNG ai đọc được nó —
+        chỉ `commit()` mới đưa nó vào bảng. Đó là lý do `run_incremental` báo
+        watermark sau `commit()` chứ không sau lời gọi này.
+        """
         self._write(self._target, batch)
 
     def stage(self, batch: pa.RecordBatch) -> None:
-        """`full`: ghi VÀ commit vào bảng STAGING. Đích không bị chạm."""
+        """`full`: ghi một file Parquet vào location bảng STAGING. Đích không bị chạm."""
         self._write(self._staging, batch)
 
     def _write(self, qualified: str, batch: pa.RecordBatch) -> None:
-        """Tạo bảng ở lô đầu, nối thêm ở các lô sau — MỘT commit mỗi lô.
+        """Tạo bảng RỖNG ở lô đầu, rồi ghi một file Parquet cho mỗi lô.
 
-        `create_from` cho lô đầu vì bảng bronze CHƯA TỒN TẠI ở lần nạp đầu tiên
+        `create_empty` cho lô đầu vì bảng bronze CHƯA TỒN TẠI ở lần nạp đầu tiên
         của một stream, và schema Iceberg của nó phải sinh ra từ schema Arrow
         của chính dữ liệu (kèm ba cột `BRONZE_COLUMNS` mà `add_bronze_columns`
         vừa thêm) — không có nguồn schema nào khác đúng hơn.
+
+        RỖNG chứ không `create_from`: `DataFileWriter` dựng đường dẫn file từ
+        `table.location()`, nên bảng phải có mặt TRƯỚC file đầu tiên. Lô đầu vì
+        vậy đi đúng cùng một đường với mọi lô sau (ghi file, chờ commit), thay vì
+        là một trường hợp riêng đã-commit-sẵn.
 
         `create_namespace_if_not_exists` TRƯỚC `exists()`: hỏi một catalog xem
         một bảng có tồn tại trong một namespace chưa hề tồn tại là một trường
@@ -189,12 +241,62 @@ class IcebergSink:
             self._lakehouse.create_namespace_if_not_exists(_namespace_of(qualified))
             self._existing.add(qualified)
             if not self._lakehouse.exists(qualified):
-                self._lakehouse.create_from(qualified, data)
-                return
-        self._lakehouse.append(qualified, data)
+                self._lakehouse.create_empty(qualified, data.schema)
+        if self._writer is None:
+            self._writer = self._lakehouse.data_file_writer(qualified)
+        self._pending.append(self._writer.write(data, name=self._next_file_name()))
+
+    def _next_file_name(self) -> str:
+        """Tên file Parquet — `run_id` rồi số thứ tự. Xem docstring module.
+
+        Số thứ tự đệm 0 cho ĐỦ RỘNG chứ không `str(n)` trần: tên file là thứ người
+        đi dọn rác trên S3 đọc bằng mắt và sắp bằng `ls`, và `part-9` đứng sau
+        `part-10` theo thứ tự chuỗi.
+        """
+        self._files_written += 1
+        return f"loom-{self._run_id.hex}-{self._files_written:06d}.parquet"
+
+    def commit(self) -> None:
+        """`incremental`: đăng ký cả nhóm file vào bảng ĐÍCH bằng MỘT commit.
+
+        Sau lời gọi này — và CHỈ sau nó — dữ liệu của nhóm là bền và đọc được, nên
+        đây là điểm mà `run_incremental` được phép báo watermark. Đảo hai bước đó
+        là mất dòng im lặng; xem `runner.run_incremental`.
+
+        **Bỏ `DataFileWriter` đi sau mỗi commit** vì nó giữ credential STS mà
+        Lakekeeper vend, và credential đó có hạn. Nhóm sau nạp lại bảng nên nó có
+        credential mới — tức tuổi tối đa của một credential đang dùng là thời gian
+        ghi K lô, không phải cả lần chạy. (Đường `full` KHÔNG có tính chất này: nó
+        commit đúng một lần ở cuối, nên writer của nó sống suốt lượt ghi staging.
+        Nếu một lần `full` rất dài hỏng với một lỗi 403 ở giữa lượt ghi thì đây là
+        chỗ phải xem trước — chưa đo được ngưỡng đó, và nói ra thay vì đoán.)
+
+        Nhóm rỗng thì không gọi `add_files`: hành vi của nó với danh sách rỗng chưa
+        được đo, và cả hai người gọi đều đã tự bỏ qua nhóm rỗng, nên đây là lớp
+        chặn thứ hai chứ không phải chỗ dựa.
+        """
+        if not self._pending:
+            return
+        self._lakehouse.register_files(self._target, self._pending)
+        self._pending.clear()
+        self._writer = None
 
     def staging_done(self) -> None:
-        """Không có bảng staging thì KHÔNG tráo — xem `NothingStaged`."""
+        """`full`: đăng ký MỌI file đã ghi vào staging bằng MỘT commit, rồi kiểm.
+
+        `full` không có watermark, nên không có gì buộc nó chia nhóm: một commit
+        cho cả lần chạy là cấu hình rẻ nhất, và nó cũng là hình dạng mà thăm dò
+        `add_files` đo trực tiếp (50 file / 1 snapshot / 3,2 s).
+
+        Phép kiểm tồn tại đứng SAU commit chứ không trước: nguồn rỗng nghĩa là
+        không lô nào được ghi, nên bảng staging chưa bao giờ được tạo — và câu trả
+        lời đúng cho trường hợp đó là `NothingStaged`, không phải một `add_files`
+        vào một bảng không có.
+        """
+        if self._pending:
+            self._lakehouse.register_files(self._staging, self._pending)
+            self._pending.clear()
+            self._writer = None
         if not self._lakehouse.exists(self._staging):
             raise NothingStaged(
                 f"bảng nguồn {self._stream!r} không trả về dòng nào, nên mode 'full' "

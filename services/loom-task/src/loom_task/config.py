@@ -130,6 +130,55 @@ class ReadTuning(BaseSettings):
     batch_rows: int = Field(default=40_000, gt=0)
 
 
+class WriteTuning(BaseSettings):
+    """Bao nhiêu lô ĐỌC đi vào MỘT commit Iceberg — lớp thứ NĂM, cùng loại với `ReadTuning`.
+
+    Tách khỏi `ReadTuning` chứ không thêm một trường vào đó: hai con số điều khiển
+    hai đầu khác nhau của đường nạp (`batch_rows` là cỡ một lô ĐỌC, `commit_every_
+    batches` là số lô mỗi lần GHI-commit) và chúng hỏng theo hai kiểu khác nhau —
+    `batch_rows` quá lớn là OOMKill, `commit_every_batches` quá lớn là nhiều dòng
+    TRÙNG hơn khi pod chết. Trộn chúng vào một lớp làm hai docstring khác nhau phải
+    sống cạnh nhau trong một chỗ.
+
+    **K ĐÁNH ĐỔI: số dòng TRÙNG khi pod chết  <->  thời gian commit.** Đây là câu
+    phải đọc trước mọi câu khác ở đây.
+
+    * Watermark chỉ tiến SAU một commit thật (`runner.run_incremental`), nên một
+      pod chết giữa nhóm làm cả nhóm phải đọc lại — tối đa `K x batch_rows` dòng,
+      và những dòng đó vào bảng bronze LẦN THỨ HAI. Hợp đồng at-least-once của
+      spec mục 4 cho phép trùng; nó không cho phép mất.
+    * Đổi lại, số lần commit catalog giảm K lần. ĐO 3 đo commit catalog ở 44,0%
+      đồng hồ tường (42,1 s trên 97,0 s ở `batch_rows=10.000`), sàn ~0,83 s mỗi
+      commit BẤT KỂ lô lớn cỡ nào. Số lần BÁO watermark cũng giảm K lần, nên việc
+      "báo watermark thưa hơn" (5,4 s, 13,5% đồng hồ tường của ĐO 3) tự đạt được
+      mà không cần một thay đổi riêng — spec 3d mục 3b.
+
+    **Mặc định 5, và đây là lý do chọn 5 chứ không 1 hay 50.**
+
+    * `add_files` giữ thời gian commit PHẲNG theo số file trong khoảng đã đo (N =
+      1 / 5 / 20 -> 0,56 / 0,62 / 0,61 s — `scripts/probe_iceberg_add_files.py`),
+      nên K = 5 nằm giữa khoảng đó: mỗi commit vẫn rẻ như một commit một-file, và
+      không có ngoại suy nào ra ngoài vùng đã đo.
+    * Với `batch_rows` mặc định 40.000, K = 5 đặt trần dòng trùng ở 200.000 dòng
+      — cùng ĐỘ LỚN với một lô, không cùng độ lớn với cả lần nạp. K = 50 (một
+      commit cho một lần nạp 500.000 dòng) thì trần đó là CẢ BẢNG, tức là mất hẳn
+      tính chất tiến-dần mà `incremental` có và `full` thì không.
+    * Phần thời gian cắt được đã gần hết ở K = 5: nó bỏ 80% số lần commit. K = 20
+      chỉ bỏ thêm 15% nữa (95% so với 80%) trong khi nhân trần dòng trùng lên bốn
+      lần — một cuộc đổi tồi ở phía bên kia.
+
+    K = 1 là hành vi CHÍNH XÁC của Giai đoạn 3a (một commit và một lời báo mỗi lô)
+    và nó vẫn chạy được, nên hạ về 1 là đường lùi nếu dòng trùng thành vấn đề thật.
+
+    `gt=0`: `run_incremental` cũng từ chối số không dương, nhưng nó từ chối sau khi
+    connector đã mở — một cấu hình vô nghĩa nên chết ở chỗ nó được đọc.
+    """
+
+    model_config = _ENV_ONLY
+
+    commit_every_batches: int = Field(default=5, gt=0)
+
+
 class SourceCredentials(BaseSettings):
     """Cách MỞ nguồn — cặp duy nhất mà `IngestSourceSpec` cố ý KHÔNG mang.
 

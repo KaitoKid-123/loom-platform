@@ -1,25 +1,38 @@
 """HAI vòng lặp nạp, HAI hợp đồng đứt-giữa-chừng. Xem spec 3a mục 3.1.
 
-`incremental`: GHI TRƯỚC, BÁO SAU — commit từng lô, nạp lại đi tiếp.
-`full`: ghi hết vào bảng STAGING (commit từng lô), rồi TRÁO tên ba bước.
+`incremental`: GHI TRƯỚC, BÁO SAU — ghi K lô, commit MỘT lần, rồi mới báo.
+`full`: ghi hết vào bảng STAGING (một commit ở cuối), rồi TRÁO tên ba bước.
 
 `Sink` là một Protocol chứ không phải `loom_iceberg.Lakehouse` trực tiếp: nó cho
 phép kiểm THỨ TỰ mà không cần Iceberg, và chính thứ tự mới là chỗ mất dữ liệu
 sinh ra — ở `incremental` là mất dòng im lặng, ở `full` là mất cả bảng cũ. Đường
 ghi Iceberg thật (`loom_task.sink.IcebergSink`) được kiểm ở integration.
 
+**Vì sao GHI và COMMIT là hai lời gọi từ Giai đoạn 3d.** ĐO 3 định giá commit
+catalog ở 44,0% đồng hồ tường vì đường nạp commit MỖI LÔ.
+`scripts/probe_iceberg_add_files.py` đo được rằng `Table.add_files()` hạ N file
+Parquet vào ĐÚNG MỘT snapshot (N = 1, 5, 20; thời gian commit phẳng theo N), nên
+gộp commit là việc làm được — nhưng chỉ khi thứ tự ghi-trước-báo-sau còn nguyên.
+Spec 3d mục 3b chốt hình dạng đó: nhóm K lô vào một commit, và báo watermark MỘT
+lần cho mỗi nhóm, SAU commit. Xem `run_incremental`.
+
+Điều đó KHÔNG bác bỏ ĐO 2: ĐO 2 đo `table.transaction()` (hai `tx.append` cho 2
+snapshot, và tốn thêm RAM), `add_files` là một API khác. Cái sai — nếu ai đó đã
+đọc ĐO 2 thành như vậy — là câu "PyIceberg 0.11.1 không gộp được commit".
+
 **`full` KHÔNG nguyên tử, và không có chỗ nào trong file này được nói ngược lại.**
-Thiết kế "một commit ở cuối" đã bị ĐO 2 bác bỏ bằng số: `table.transaction()` của
-PyIceberg 0.11.1 không gộp (hai `append` cho 2 snapshot), và gom trong transaction
-còn tốn 478 MiB so với 421 MiB khi commit từng lô. Cú tráo tên vì vậy phải qua
-nhiều lời gọi catalog, và giữa chúng có một cửa sổ mà tên bảng đích không phân
-giải được. `full` là GẦN nguyên tử — xem `run_full`.
+`full` giờ commit đúng MỘT lần, nhưng cú tráo TÊN vẫn phải qua nhiều lời gọi
+catalog: ĐO 2 mục D4 đã đo `rename_table` TỪ CHỐI đè lên một tên đang tồn tại, nên
+"thay bảng X bằng nội dung bảng Y" không viết được thành một lời gọi. Giữa các lời
+gọi đó có một cửa sổ mà tên bảng đích không phân giải được. `full` là GẦN nguyên
+tử — xem `run_full`.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -68,45 +81,54 @@ class Sink(Protocol):
     phương thức trong khi nó gọi 1 — nói ra để không ai đọc `Sink` thành "mọi
     phương thức ở đây đều dùng ở mọi đường".
 
-    **Tên phương thức TRÙNG tên sự kiện mà `RecordingSink` ghi lại** (`stage`,
-    `staging_done`, `rename_target_away`, `promote_staging`, `drop_old_target`).
-    Một bản nháp trước dùng `stage`/`commit_replacing` cho protocol nhưng
-    `staging_done`/`promote_staging` cho test — hai bộ từ vựng cho một hợp đồng,
-    nên không đọc được test nào canh phương thức nào. Ngoại lệ duy nhất là
-    `append` (ghi sự kiện `"write"`, có từ Task 11): đổi nó bây giờ chỉ để cho
-    đều là sửa ba bài test đang xanh mà không mua thêm gì.
+    **Tên phương thức TRÙNG tên sự kiện mà `RecordingSink` ghi lại** (`write`,
+    `commit`, `stage`, `staging_done`, `rename_target_away`, `promote_staging`,
+    `drop_old_target`). Một bản nháp trước dùng `stage`/`commit_replacing` cho
+    protocol nhưng `staging_done`/`promote_staging` cho test — hai bộ từ vựng cho
+    một hợp đồng, nên không đọc được test nào canh phương thức nào. (`append` là
+    tên cũ của `write`, có từ Task 11; nó ghi sự kiện `"write"` từ đầu, nên
+    Giai đoạn 3d đổi tên phương thức cho khớp — và ở 3d nó BUỘC phải đổi: một
+    `append` không commit là một cái tên nói dối, vì `append` của Iceberg nghĩa là
+    ghi VÀ commit.)
     """
 
-    def append(self, batch: pa.RecordBatch) -> None:
-        """Ghi VÀ commit ngay VÀO BẢNG ĐÍCH — hợp đồng của `incremental`.
+    def write(self, batch: pa.RecordBatch) -> None:
+        """Ghi một lô vào đường của BẢNG ĐÍCH, KHÔNG commit.
 
-        Một `append` chỉ ghi file dữ liệu mà chưa commit sẽ phá đúng tính chất
-        mà `run_incremental` dựa vào: sau khi nó trả về, dữ liệu của lô này phải
-        ĐÃ bền, vì watermark được báo ngay sau đó.
+        Sau lời gọi này dữ liệu chưa bền và chưa ai đọc được. Nên `run_incremental`
+        KHÔNG được báo watermark ở đây — chỉ sau `commit()`.
+        """
+
+    def commit(self) -> None:
+        """Đưa MỌI lô đã `write` kể từ lần commit trước vào bảng đích, MỘT commit.
+
+        Đây là điểm dữ liệu trở nên bền, và vì vậy là điểm DUY NHẤT mà watermark
+        được phép tiến qua. `add_files` của PyIceberg gộp N file vào một snapshot
+        (đã đo — xem docstring module), nên số lần commit giảm K lần mà thứ tự
+        ghi-trước-báo-sau không đổi một chút nào.
         """
 
     def stage(self, batch: pa.RecordBatch) -> None:
-        """Ghi VÀ commit một lô vào bảng STAGING — không chạm bảng đích.
+        """Ghi một lô vào đường của bảng STAGING, KHÔNG commit, không chạm đích.
 
-        Commit TỪNG LÔ có chủ đích, và đây là chỗ dễ đọc ngược nhất trong cả
-        Task 12: ĐO 2 đã bác bỏ "gom rồi commit một lần" bằng số đo (không gộp
-        được snapshot, và tốn thêm 57 MiB RAM), nên commit từng lô là hành vi
-        ĐÚNG ở đây, không phải một thoả hiệp. Cái làm nó an toàn không phải số
-        lần commit mà là ĐÍCH của chúng: staging là một bảng khác, nên một lần
-        chạy đứt giữa chừng không để lại lô nửa vời trong bảng người dùng đang
-        đọc.
+        `stage` ghi file chứ không commit, và điều làm chuyện đó an toàn ở đây
+        không phải số lần commit mà là ĐÍCH của chúng: staging là một bảng khác,
+        nên một lần chạy đứt giữa chừng không để lại lô nửa vời trong bảng người
+        dùng đang đọc — dù nó có commit hay không.
         """
 
     def staging_done(self) -> None:
-        """Chốt staging: sau lời gọi này bảng staging phải TỒN TẠI và đủ dòng.
+        """Chốt staging: commit MỌI lô đã `stage`, và sau đó bảng phải TỒN TẠI.
 
-        Có mặt vì `run_full` cần một điểm phân chia QUAN SÁT ĐƯỢC giữa "đang
-        ghi" và "đang tráo" — `test_full_writes_everything_to_staging_before_
-        touching_the_target` cắt chuỗi sự kiện ở đúng đây. Và nó có việc thật:
-        một lần chạy không ghi được lô nào (nguồn rỗng) thì bảng staging chưa
-        bao giờ được tạo, và phải hỏng ồn ào ở đây thay vì hỏng ở
-        `promote_staging` dưới dạng một `NoSuchTableError` không nhắc gì tới
-        nguyên nhân.
+        `full` không có watermark nên không có gì buộc nó chia nhóm: một commit cho
+        cả lần chạy (spec 3d mục 3b: "K = tất cả").
+
+        Có mặt từ Task 12 vì `run_full` cần một điểm phân chia QUAN SÁT ĐƯỢC giữa
+        "đang ghi" và "đang tráo" — `test_full_writes_everything_to_staging_before_
+        touching_the_target` cắt chuỗi sự kiện ở đúng đây. Và nó có việc thật: một
+        lần chạy không ghi được lô nào (nguồn rỗng) thì bảng staging chưa bao giờ
+        được tạo, và phải hỏng ồn ào ở đây thay vì hỏng ở `promote_staging` dưới
+        dạng một `NoSuchTableError` không nhắc gì tới nguyên nhân.
         """
 
     def target_exists(self) -> bool:
@@ -343,41 +365,117 @@ def _max_cursor(batch: pa.RecordBatch, cursor_column: str, cursor_type: str) -> 
     return format_cursor_value(cursor_type, max(batch.column(cursor_column).to_pylist()))
 
 
+@dataclass(frozen=True, slots=True)
+class _Group:
+    """Một nhóm lô ĐÃ GHI mà CHƯA commit — ba con số cần để đóng nó lại.
+
+    Gói thành một kiểu thay vì ba biến rời vì cả ba phải được đặt lại CÙNG LÚC:
+    một bản cài đặt reset `rows` mà quên `cursor_value` sẽ báo watermark của nhóm
+    trước cho nhóm sau — watermark LÙI, và `moves_forward` phía server lặng lẽ bỏ
+    qua lời báo đó, nên nhóm đó không bao giờ được ghi nhận là đã xong.
+    """
+
+    batches: int
+    rows: int
+    cursor_value: str
+
+
+def _commit_then_report(
+    sink: Sink, client: IngestClientLike, cursor: CursorCandidate, group: _Group
+) -> None:
+    """Đóng một nhóm: COMMIT trước, BÁO sau. Thứ tự hai dòng này là cả hợp đồng.
+
+    Tách thành một hàm để chỉ có MỘT chỗ trong repo biết thứ tự đó — vòng lặp gọi
+    nó ở hai nơi (ranh giới nhóm, và nhóm cuối dở dang), và hai bản sao của thứ tự
+    này là hai chỗ để một trong hai bị đảo mà bộ test chỉ bắt được một.
+    """
+    sink.commit()
+    client.report_progress(
+        cursor_column=cursor.name,
+        cursor_type=cursor.cursor_type,
+        cursor_value=group.cursor_value,
+        rows=group.rows,
+    )
+
+
 def run_incremental(
     connector: Connector,
     sink: Sink,
     client: IngestClientLike,
     stream: str,
     cursor: CursorCandidate,
+    commit_every_batches: int = 1,
     crash_after_batch: int | None = None,
 ) -> int:
-    """GHI TRƯỚC, BÁO SAU. Đảo lại là mất dòng — xem test cùng tên.
+    """GHI TRƯỚC, COMMIT, RỒI MỚI BÁO. Đảo lại là mất dòng — xem test cùng tên.
 
-    Nếu watermark được báo TRƯỚC khi lô được commit, một pod chết giữa hai bước
+    ```
+    ghi K file Parquet -> commit (1 lần) -> báo watermark của lô CUỐI trong nhóm
+    ```
+
+    Nếu watermark được báo TRƯỚC khi nhóm được commit, một pod chết giữa hai bước
     làm watermark tiến qua dữ liệu chưa hề được ghi, và lần nạp sau bỏ qua đúng
     khoảng đó. Không có gì phát hiện được điều đó về sau — bảng chỉ đơn giản là
     thiếu dòng, không lỗi, không dấu vết. Thứ tự này cho TRÙNG chứ không cho
     MẤT, khớp hợp đồng at-least-once của spec mục 4.
 
+    **Vì sao NHÓM chứ không một commit cho cả lần chạy** (spec 3d mục 3b): một
+    commit duy nhất giữ được thứ tự trên, nhưng nó xoá mất tính chất TIẾN DẦN mà
+    `incremental` đang có — chết ở giờ thứ 9 của 10 giờ thì lùi về watermark CŨ,
+    và một lần nạp dài thành ăn-tất-hoặc-không-gì. Nhóm K lô giữ cả hai: mất tiến
+    độ có chặn ở K lô, và số lần commit LẪN số lần báo watermark đều giảm K lần.
+
+    **`commit_every_batches=1` là hành vi của 3a** (một commit và một lời báo cho
+    mỗi lô), nên K là một phép TỔNG QUÁT HOÁ chứ không một đường đi thứ hai. Mặc
+    định ở đây là 1 chứ không phải mặc định production: giá trị chạy thật đến từ
+    `config.WriteTuning` và `main.ingest` truyền nó vào. Đặt 1 ở đây để một người
+    gọi quên truyền tham số rơi vào hành vi CŨ, đã kiểm — không phải vào một cỡ
+    nhóm mà họ không biết mình đã chọn.
+
+    **Nhóm CUỐI gần như luôn dở dang, và nó phải được commit.** 50 lô với K = 20
+    để lại 10 lô sau vòng lặp; bỏ chúng là mất đúng ngần ấy dòng, mỗi lần chạy,
+    trong im lặng — cho tới khi có người đếm. Vòng lặp vì vậy có một lời commit
+    thứ hai SAU nó, và `test_the_last_partial_group_is_committed_too` canh đúng chỗ
+    đó.
+
+    **`rows` báo về là TỔNG của cả nhóm, không phải của lô cuối.**
+    `ingest_run.rows_written` chỉ cộng dồn qua `/progress`, nên báo số dòng của một
+    lô cho một nhóm K lô làm cột đó thiếu đi K lần — một con số sai mà không có gì
+    trong hệ thống mâu thuẫn với nó.
+
     `crash_after_batch` chỉ để test nạp lại (`main.py` không truyền nó): nó ném
-    `Boom` SAU khi lô thứ N đã ghi và đã báo, mô phỏng đúng chỗ đứt mà một
-    OOMKill tạo ra.
+    `Boom` SAU khi lô thứ N đã ghi — và, nếu N đúng cuối một nhóm, sau cả commit
+    lẫn lời báo của nhóm đó. Đó là mô phỏng đúng chỗ đứt mà một OOMKill tạo ra: nó
+    rơi vào một chỗ BẤT KỲ trong nhóm, không phải chỉ ở ranh giới.
     """
+    if commit_every_batches < 1:
+        raise ValueError(f"commit_every_batches phải >= 1, nhận {commit_every_batches}")
+
     total = 0
+    # Nhóm ĐANG mở, hoặc `None` khi vừa commit xong. Một `Group` tồn tại nghĩa là
+    # có file đã ghi mà chưa commit — tức là có dòng chưa bền, và watermark chưa
+    # được phép tiến qua chúng.
+    group: _Group | None = None
+
     for index, batch in enumerate(connector.read(stream, client.current_state())):
         enriched = add_bronze_columns(batch, client.source_id, uuid.uuid4())
-        # 1. ghi VÀ commit lô này
-        sink.append(enriched)
-        # 2. chỉ khi (1) đã xong mới báo watermark
-        client.report_progress(
-            cursor_column=cursor.name,
-            cursor_type=cursor.cursor_type,
+        sink.write(enriched)
+        group = _Group(
+            batches=(group.batches if group else 0) + 1,
+            rows=(group.rows if group else 0) + batch.num_rows,
+            # Mốc của lô CUỐI đã ghi: sau commit cả nhóm đã bền, nên watermark
+            # được phép tiến tới đúng đó và không xa hơn.
             cursor_value=_max_cursor(batch, cursor.name, cursor.cursor_type),
-            rows=batch.num_rows,
         )
         total += batch.num_rows
+        if group.batches >= commit_every_batches:
+            _commit_then_report(sink, client, cursor, group)
+            group = None
         if crash_after_batch is not None and index + 1 >= crash_after_batch:
             raise Boom("crash có chủ đích để kiểm nạp lại")
+
+    if group is not None:
+        _commit_then_report(sink, client, cursor, group)
     return total
 
 
@@ -391,11 +489,23 @@ def run_full(
     """Đọc CẢ bảng vào staging, rồi TRÁO tên BA bước. Trả về số dòng đã đọc.
 
     ```
-    1. ghi hết vào staging, commit TỪNG LÔ   <- RAM có chặn; đích còn nguyên
+    1. ghi hết vào staging, MỘT commit ở cuối  <- RAM có chặn; đích còn nguyên
     2. rename(đích -> đích_cũ)
-    3. rename(staging -> đích)               <- cửa sổ nằm giữa 2 và 3
+    3. rename(staging -> đích)                <- cửa sổ nằm giữa 2 và 3
     4. drop(đích_cũ)
     ```
+
+    **Một commit, không K nhóm** (spec 3d mục 3b): `full` không có watermark, nên
+    không có gì để tiến quá dữ liệu chưa ghi và không có tiến-độ-bền nào để bảo
+    toàn — một lần chạy đứt giữa chừng bỏ cả bảng staging bất kể nó đã commit bao
+    nhiêu lần. Chỗ commit đó là `sink.staging_done()`.
+
+    **Báo tiến độ vẫn TỪNG LÔ, không theo nhóm**, và đó là một điểm khác có chủ
+    đích với `run_incremental`: ở đây lời báo không mang watermark (xem dưới) nên
+    nó không có hợp đồng thứ tự nào với commit, và giữ nó từng lô là thứ duy nhất
+    cho người dùng thấy `rows_written` nhích lên trong lúc nạp. Gộp nó theo nhóm
+    chỉ để "cho giống" sẽ đổi một chỉ số tiến độ đang đúng lấy một con số nhảy một
+    lần ở cuối.
 
     **Vì sao BA bước chứ không `drop(đích)` rồi `rename(staging -> đích)`.** Hai
     bước trông gọn hơn và là cái bẫy: nó kéo cửa sổ ra suốt thao tác `drop`, và
@@ -437,11 +547,13 @@ def run_full(
     `IngestProgressReport` cho phép đúng hình dạng này (cả ba trường cursor
     `None`); `test_full_reports_rows_but_never_a_cursor` canh nó.
 
-    Số dòng báo về đếm những dòng đã vào STAGING, nên một lần chạy đứt giữa chừng
-    để lại `rows_written` lớn hơn số dòng thật sự có trong bảng đích (staging bị
-    bỏ, bảng đích không đổi). Đó là hình dạng đúng của một chỉ số TIẾN ĐỘ; biến nó
-    thành một con số chỉ đúng lúc kết thúc đòi báo tất cả sau cú tráo, tức là
-    không có tiến độ nào trong lúc chạy.
+    Số dòng báo về đếm những dòng đã GHI về phía staging — kể cả những lô chưa
+    được commit, vì commit chỉ xảy ra ở cuối. Nên một lần chạy đứt giữa chừng để
+    lại `rows_written` lớn hơn số dòng thật sự có trong bảng đích (staging bị bỏ,
+    bảng đích không đổi), và từ 3d thì lớn hơn cả số dòng có trong bảng STAGING bị
+    bỏ đó. Đó là hình dạng đúng của một chỉ số TIẾN ĐỘ; biến nó thành một con số
+    chỉ đúng lúc kết thúc đòi báo tất cả sau cú tráo, tức là không có tiến độ nào
+    trong lúc chạy.
 
     **KHÔNG đụng watermark, và KHÔNG đọc nó.** `connector.read` nhận
     `StreamState()` RỖNG chứ không `client.current_state()`: `full` nghĩa là đọc
@@ -458,17 +570,18 @@ def run_full(
     total = 0
     for index, batch in enumerate(connector.read(stream, StreamState())):
         enriched = add_bronze_columns(batch, client.source_id, uuid.uuid4())
-        # 1. ghi VÀ commit lô này vào staging
+        # 1. ghi lô này vào đường của staging — CHƯA commit (một commit cho cả
+        #    lần chạy, ở `staging_done` dưới đây)
         sink.stage(enriched)
-        # 2. chỉ khi (1) đã xong mới báo — cùng thứ tự với `run_incremental`, dù ở
-        #    đây nó không mua được tính đúng đắn nào (không có watermark để tiến
-        #    quá dữ liệu chưa ghi). Giữ một thứ tự cho cả hai đường để không ai
-        #    phải đọc hai vòng lặp mới biết cái nào báo trước.
+        # 2. báo số dòng ngay, KHÔNG chờ commit: lời báo này không mang watermark
+        #    nên nó không có gì để tiến quá dữ liệu chưa ghi, và giữ nó từng lô là
+        #    thứ duy nhất cho `rows_written` nhích lên trong lúc nạp.
         client.report_progress(rows=batch.num_rows)
         total += batch.num_rows
         if crash_after_batch is not None and index + 1 >= crash_after_batch:
             raise Boom("crash có chủ đích để kiểm bảng đích còn nguyên")
 
+    # MỘT commit cho mọi lô đã ghi, rồi kiểm staging có thật — xem `Sink.staging_done`.
     sink.staging_done()
     had_target = sink.target_exists()
     if had_target:

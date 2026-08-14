@@ -5,11 +5,16 @@
 sau vẫn cho ra đúng số dòng, đúng nội dung, và đúng mọi phép kiểm khác — cho tới
 ngày một lần nạp hỏng giữa chừng và xoá mất bảng của một người.
 
-**Bài `test_full_commits_exactly_once_no_matter_how_many_batches` CỐ Ý KHÔNG tồn
-tại.** Kế hoạch gốc đòi nó, và ĐO 2 đã bác bỏ đúng tính chất đó: hai `tx.append`
-trong một transaction của PyIceberg 0.11.1 cho 2 snapshot, không phải 1. Viết bài
-đó ra là khoá một lời hứa sai vào bộ test, rồi sẽ có người "sửa" mã cho khớp.
-Staging commit TỪNG LÔ là hành vi đúng ở đây.
+**Bài `test_full_commits_exactly_once_no_matter_how_many_batches` từng CỐ Ý KHÔNG
+tồn tại, và giờ nó tồn tại.** Kế hoạch Task 12 đòi nó; ĐO 2 bác bỏ đúng tính chất
+đó cho API mà nó đo — hai `tx.append` trong một `table.transaction()` của PyIceberg
+0.11.1 cho 2 snapshot, không phải 1 — nên viết bài đó ra lúc ấy là khoá một lời
+hứa sai vào bộ test. Giai đoạn 3d đo một API KHÁC (`Table.add_files`,
+`scripts/probe_iceberg_add_files.py`) và nó gộp thật: N file vào ĐÚNG 1 snapshot ở
+N = 1, 5, 20. Nên lời hứa giờ đúng, và nó có phép canh.
+
+Điều KHÔNG được đọc ngược: ĐO 2 vẫn đúng nguyên. Cái sai là câu tổng quát
+"PyIceberg 0.11.1 không gộp được commit", nếu ai đó đã rút ra nó từ ĐO 2.
 
 `_ROWS`/`_BATCH` cho BA lô có chủ đích, cùng lý do như `test_runner_incremental`:
 với đúng một lô, "ghi hết vào staging rồi tráo" và "tráo rồi ghi" chỉ khác nhau ở
@@ -142,13 +147,40 @@ def test_a_crash_while_writing_staging_never_touches_the_target() -> None:
     assert "promote_staging" not in kinds
 
 
-def test_the_batches_that_reached_staging_before_the_crash_stay_committed() -> None:
-    """Commit TỪNG LÔ là hành vi đúng, không phải một thoả hiệp — nói ra bằng test.
+def test_full_commits_exactly_once_no_matter_how_many_batches() -> None:
+    """BA lô, MỘT commit — và cái commit đó là `staging_done`, không phải `stage`.
 
-    ĐO 2: `table.transaction()` không gộp snapshot VÀ tốn thêm RAM, nên gom cả
-    bảng vào một commit là một lựa chọn tệ hơn ở cả hai mặt. Cái làm commit từng
-    lô an toàn là ĐÍCH của chúng (staging, không phải bảng người dùng đang đọc),
-    và bài này khẳng định hai lô đầu thật sự đã đi vào staging trước khi đứt.
+    Đây là tính chất mà Giai đoạn 3d mua được: ĐO 3 định giá commit catalog ở
+    44,0% đồng hồ tường vì đường nạp commit mỗi lô, và `add_files` hạ N file vào
+    một snapshot (đo thật: 50 file / 1 snapshot / 3,2 s so với 50 lần `append` /
+    47,9 s).
+
+    Đếm `stage` cũng cần thiết chứ không chỉ đếm commit: một bản cài đặt gom cả
+    ba lô vào RAM rồi ghi một file duy nhất cũng cho "một commit", và nó là đúng
+    cái đánh đổi RAM mà cả đường nạp này không được phép làm (trần pod 512Mi).
+    """
+    sink = RecordingSink([])
+    run_full(_source(), sink, RecordingClient([]), _STREAM)
+    kinds = [kind for kind, _ in sink.events]
+
+    assert kinds.count("stage") == _ROWS // _BATCH == 3
+    assert kinds.count("staging_done") == 1, kinds
+
+
+def test_a_crash_while_writing_staging_commits_nothing() -> None:
+    """Đứt khi đang ghi staging: hai lô đã GHI, và KHÔNG commit nào xảy ra.
+
+    Từ Giai đoạn 3d, `stage` ghi một file Parquet mà chưa đăng ký nó vào bảng, nên
+    những lô đã ghi trước cú đứt KHÔNG đọc được — chúng là object rác trên S3 dưới
+    thư mục của một bảng staging mà không lần chạy nào sau đó nhìn tới. Đó là hạ
+    cấp so với 3a (chỗ chúng thật sự nằm trong bảng staging) và nó KHÔNG mất gì:
+    bảng staging của một lần chạy chết vốn đã bị bỏ hẳn — hậu tố `run_id` nghĩa là
+    không lần chạy nào sau đó tìm lại nó (xem `staging_table_name`), nên "đã
+    commit" chưa bao giờ mua được một lần nạp tiếp.
+
+    Cái phải giữ nguyên là bảng ĐÍCH, và `test_a_crash_while_writing_staging_never_
+    touches_the_target` canh nó. Bài này canh vế còn lại: không có `staging_done`
+    nào, tức là cú tráo chưa bao giờ bắt đầu.
     """
     sink = RecordingSink([])
     with pytest.raises(Boom):
