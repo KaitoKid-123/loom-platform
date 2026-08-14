@@ -33,8 +33,20 @@ class Settings(BaseSettings):
     db_name: str = "loom"
     db_user: str = "loom"
     db_password: str = "loom"  # noqa: S105 — giá trị mặc định cho dev, không phải secret thật
-    db_pool_size: int = 5
-    db_max_overflow: int = 5
+    # NGÂN SÁCH CONNECTION, không phải một con số chọn cho đẹp. Aiven service
+    # của dự án có `max_connections=20` và nó KHÔNG chỉ phục vụ Loom — đo ngày
+    # 2026-08-14: Lakekeeper 7, một ứng dụng KHÁC của chủ dự án (`bi_portal`,
+    # application_name "PostgreSQL JDBC Driver") 5, database `loom` 4.
+    #
+    # Với 5+5, riêng loom-api đã được quyền chiếm 10/20, và Lakekeeper mặc định
+    # được quyền chiếm 15 nữa (đọc 10 + ghi 5). Tổng quyền của hai thành phần là
+    # 25 trên một server 20 slot: cụm BỘI CHI ngay từ thiết kế, và nó không vỡ
+    # lúc nghỉ mà vỡ đúng lúc một consumer MỚI xin connection đầu tiên — pod nạp.
+    # Đó là cách `make smoke` trượt 13/14 ở đúng ô `/ingest`.
+    #
+    # 3+2 để lại chỗ cho pod nạp. Xem `packages/core/tests/test_connection_budget.py`.
+    db_pool_size: int = 3
+    db_max_overflow: int = 2
     # asyncpg hiểu `ssl`, không phải `sslmode` (cách libpq/Aiven viết) — xem
     # `_normalise_ssl_param` ở loom_api.db. `verify-full` là mặc định an toàn:
     # kết nối managed Postgres qua Internet công cộng cần xác thực server,

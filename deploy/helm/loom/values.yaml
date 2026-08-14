@@ -171,6 +171,11 @@ lakekeeper:
   # Vault qua External Secrets, cùng đường với loom-db-app.
   encryptionSecret: ""
   encryptionKeyLocal: local-dev-only-not-a-real-key
+  # Mặc định của Lakekeeper v0.9.2 là đọc 10 + ghi 5 = 15 connection, trên một
+  # Aiven service chỉ có 20 slot và còn phải chia cho loom-api lẫn pod nạp. Xem
+  # `db_pool_size` ở packages/core/src/loom_core/config.py cho cả phép tính.
+  readPoolConnections: 3
+  writePoolConnections: 2
   resources:
     requests: { cpu: 25m, memory: 96Mi }
     limits: { memory: 192Mi }
