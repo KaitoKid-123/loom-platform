@@ -522,6 +522,34 @@ measure-write: check-context  ## Rủi ro #4 (CỬA CHẶN GĐ2) — đường g
 measure-write-cleanup: check-context  ## Dọn bảng/namespace/warehouse/S3 của lần measure-write đã lưu
 	uv run python scripts/measure_write_path.py --cleanup $(ARGS)
 
+.PHONY: probe-read-cost
+probe-read-cost:  ## Đo 4 GĐ3a — tách chi phí ĐƯỜNG TRUYỀN khỏi chi phí BIẾN ĐỔI trên đường đọc
+	@# Trả lời câu hỏi ĐO 3 để ngỏ: trần ~7,3 MB/s của giai đoạn đọc nguồn là
+	@# đường internet tới Aiven, hay là bước `list[dict]` -> Arrow trong
+	@# `PostgresConnector._read_rows`? Hai câu trả lời chỉ về hai hướng ngược
+	@# nhau (viết lại ngưỡng / sửa connector), nên phải tách chúng bằng số.
+	@#
+	@# KHÔNG có `check-context`, và đó là chủ ý chứ không phải bỏ sót: phép đo
+	@# này KHÔNG chạm cụm k3d. Nó chạy trên HOST, nói chuyện thẳng với Aiven
+	@# (tên miền phân giải được từ host — `make migrate` vẫn làm thế) và với
+	@# một container Postgres do testcontainers dựng. Đòi context k3d ở đây chỉ
+	@# là một hàng rào giả cho một thứ không đi qua cụm.
+	@#
+	@# CẦN Docker (testcontainers dựng `postgres:17-alpine` cho hai ô "local").
+	@# Chỉ đo Aiven, không cần Docker:
+	@#   make probe-read-cost ARGS="--sources aiven"
+	@#
+	@# KHÔNG GHI GÌ VÀO AIVEN, và điều đó được THI HÀNH: connection tới Aiven mở
+	@# với `-c default_transaction_read_only=on`, dòng được sinh server-side
+	@# bằng `generate_series` (không chạm đĩa, không sinh WAL), và script in
+	@# tổng `pg_database_size` TRƯỚC/SAU để con số tự nói. Lý do đầy đủ nằm ở
+	@# docstring của script: một lần chạy trước đã đẩy service này sang chỉ-đọc
+	@# THẬT trong lúc control plane đang sống.
+	@#
+	@# Đọc credential từ deploy/local/aiven.env (gitignore) — KHÔNG đi qua dòng
+	@# lệnh, không vào log, không vào progress.json.
+	uv run python scripts/probe_read_path_cost.py $(ARGS)
+
 .PHONY: measure-ingest-pod
 measure-ingest-pod: check-context  ## Đo 1 GĐ3a (CỬA CHẶN) — RAM ghi Iceberg từ TRONG cụm
 	@# Dùng image loom-query đang chạy: nó đã có pyiceberg/pyarrow/icebergkit. Dựng
@@ -749,6 +777,143 @@ probe-single-commit: check-context  ## Đo 2 GĐ3a (CỬA CHẶN) — PyIceberg 
 	@# và bọc MỌI bước dọn dẹp trong try/except riêng — dọn dẹp là best-effort
 	@# chạy SAU KHI verdict đã chốt, một lỗi dọn dẹp (dù là gì) không được phép
 	@# đổi mã thoát của một phép đo đã tính đúng.
+
+.PHONY: probe-add-files
+probe-add-files: check-context  ## Thăm dò GĐ3a — add_files có hạ N file vào MỘT snapshot không
+	@# Câu hỏi mà ĐO 2 KHÔNG hỏi. ĐO 2 đo `table.transaction()` + `append` và
+	@# thấy nó không gộp snapshot; nó chưa bao giờ chạm `Table.add_files()`, API
+	@# đăng ký những file Parquet ĐÃ ghi xong. ĐO 3 định giá khoảng trống đó:
+	@# commit catalog là 44,0% thời gian của đường nạp, một hằng số ~0,83s MỖI
+	@# LÔ trải trên 2,98 MB. Xem docstring `scripts/probe_iceberg_add_files.py`.
+	@#
+	@# Cùng cách dựng Job như `probe-single-commit` ngay trên, cùng lý do: image
+	@# loom-query đang chạy (đã có pyiceberg/pyarrow/icebergkit), script nạp qua
+	@# ConfigMap (KHÔNG `python -c "$$(cat ...)"` — backtick trong docstring làm
+	@# bash chạy nội dung như lệnh; KHÔNG heredoc — mỗi dòng recipe của Make là
+	@# một shell riêng; cả hai đã vỡ THẬT trên máy này), credential MinIO GỐC qua
+	@# secretKeyRef, và `backoffLimit=0` để một lần chạy hỏng không sinh ra
+	@# warehouse rác thứ hai.
+	@#
+	@# Chờ TRẠNG THÁI CUỐI CÙNG bằng `.status.succeeded`/`.status.failed` chứ
+	@# KHÔNG `kubectl wait --for=condition=complete`: script thoát khác 0 khi Q1
+	@# không đạt, và với `backoffLimit=0` một Job như thế KHÔNG BAO GIỜ đạt
+	@# Complete. (Cũng KHÔNG đọc `.status.conditions[...]` — trên k3s 1.32.13 của
+	@# cụm này một Job Complete có HAI condition `status: "True"`, xem chú thích
+	@# dài ở `probe-single-commit`.)
+	@#
+	@# Trần 900s, rộng hơn 600s của `probe-single-commit`: phép này chạy 50 lần
+	@# commit `append` thật cho Q3 (ĐO 3 đo 42,1s riêng phần commit ở đúng hình
+	@# dạng đó) CỘNG một lượt ghi 50 file Parquet, rồi mới tới Q1/Q4/Q5.
+	@set -eo pipefail; \
+	img=$$(kubectl -n $(NS) get deploy loom-query -o jsonpath='{.spec.template.spec.containers[0].image}'); \
+	echo "image: $$img"; \
+	kubectl -n $(NS) delete job probe-add-files --ignore-not-found; \
+	kubectl -n $(NS) delete configmap probe-add-files-script --ignore-not-found; \
+	kubectl -n $(NS) create configmap probe-add-files-script \
+	  --from-file=probe_iceberg_add_files.py=scripts/probe_iceberg_add_files.py \
+	  --dry-run=client -o yaml | kubectl -n $(NS) apply -f -; \
+	kubectl -n $(NS) create job probe-add-files --image="$$img" --dry-run=client -o json \
+	  -- python /scripts/probe_iceberg_add_files.py $(ARGS) \
+	| jq '.spec.backoffLimit = 0 | .spec.template.spec.containers[0].volumeMounts = [{"name":"script","mountPath":"/scripts"}] | .spec.template.spec.volumes = [{"name":"script","configMap":{"name":"probe-add-files-script"}}] | .spec.template.spec.containers[0].env = [{"name":"MINIO_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-user"}}},{"name":"MINIO_SECRET_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-password"}}}]' \
+	| kubectl -n $(NS) apply -f -; \
+	elapsed=0; phase=""; \
+	while [ "$$phase" != "Complete" ] && [ "$$phase" != "Failed" ]; do \
+	  if [ "$$elapsed" -ge 900 ]; then \
+	    echo "Job không kết thúc (Complete/Failed) sau 900s — xem trạng thái dưới:"; \
+	    kubectl -n $(NS) describe job probe-add-files | tail -20; \
+	    kubectl -n $(NS) logs job/probe-add-files --tail=40 || true; \
+	    kubectl -n $(NS) delete job probe-add-files --ignore-not-found; \
+	    kubectl -n $(NS) delete configmap probe-add-files-script --ignore-not-found; \
+	    exit 1; \
+	  fi; \
+	  sleep 5; elapsed=$$((elapsed + 5)); \
+	  succeeded=$$(kubectl -n $(NS) get job probe-add-files \
+	    -o jsonpath='{.status.succeeded}' 2>/dev/null || true); \
+	  failed=$$(kubectl -n $(NS) get job probe-add-files \
+	    -o jsonpath='{.status.failed}' 2>/dev/null || true); \
+	  if [ "$$succeeded" = "1" ]; then phase="Complete"; \
+	  elif [ "$$failed" = "1" ]; then phase="Failed"; \
+	  else phase=""; fi; \
+	done; \
+	kubectl -n $(NS) logs job/probe-add-files; \
+	kubectl -n $(NS) delete job probe-add-files --ignore-not-found; \
+	kubectl -n $(NS) delete configmap probe-add-files-script --ignore-not-found; \
+	test "$$phase" = "Complete"
+	@#
+	@# ĐÃ ĐO thật (2026-08-14, cụm k3d-loom, image loom/query:dev, PyIceberg
+	@# 0.11.1; mặc định --rows-per-batch=10000 --batches=50 = 500.000 dòng ~
+	@# 0,149 GB, đúng hình dạng C1 của ĐO 3 để so trực tiếp).
+	@#
+	@# Q1 (CỬA CHẶN) — N file Parquet qua MỘT add_files: **1 snapshot ở CẢ BA**
+	@#   N=1 -> 1 snapshot (0,56s);  N=5 -> 1 (0,62s);  N=20 -> 1 (0,61s)
+	@#   ĐẠT. Số snapshot KHÔNG đi theo N, và thời gian cũng gần như không đổi
+	@#   theo N — `add_files` là MỘT commit catalog bất kể có bao nhiêu file.
+	@#   Đây đúng là thứ `transaction()` + `append` KHÔNG làm được ở ĐO 2 (2
+	@#   append = 2 snapshot), nên nút thắt "một commit mỗi lô" là ràng buộc của
+	@#   CÁCH GỌI thư viện, không phải của PyIceberg 0.11.1.
+	@#
+	@# Q2 RSS đỉnh (`ru_maxrss`, MỖI đường một tiến trình con riêng — xem
+	@# docstring script cho lý do phải fork; nền lúc fork ~99 MiB cho cả hai):
+	@#   append từng lô : 281 MiB  (182 MiB trên nền)
+	@#   add_files      : 173 MiB  ( 74 MiB trên nền)   -108 MiB
+	@#   Rẻ HƠN, không phải đắt hơn: đường add_files giữ đúng một lô sống rồi
+	@#   đẩy thẳng ra Parquet, còn đường append cõng thêm sổ sách snapshot/
+	@#   manifest tích luỹ qua 50 lần commit (cùng chỗ rò mà ĐO 1 đã thấy RSS
+	@#   bò lên đều qua từng lô mà không quy được trách nhiệm).
+	@#
+	@# Q3 thời gian tường, CÙNG 500.000 dòng:
+	@#   append   : 47,9s / 50 commit
+	@#   add_files:  3,2s / 1 commit  (ghi Parquet 2,5s + commit 0,7s) — 15x
+	@#   Phép kiểm chéo với ĐO 3: 47,9 - 2,5 = 45,4s cho 50 lần commit, sát con
+	@#   số 42,1s mà ĐO 3 đo RIÊNG cho giai đoạn commit ở đúng hình dạng này.
+	@#   Hai phép đo độc lập nói cùng một điều, nên con số này không phải một
+	@#   tạo tác của cách đo.
+	@#
+	@# Q4a field ID / name-mapping: Parquet do pyarrow ghi KHÔNG mang field ID
+	@#   (`id=(không có), pad=(không có)`), còn file do chính Iceberg ghi thì CÓ
+	@#   (`id=1, pad=2`) — phép đối chứng, nên đây là khác biệt giữa hai đường
+	@#   ghi chứ không phải một quan sát lẻ. Bảng KHÔNG có name-mapping trước
+	@#   `add_files`; SAU thì CÓ (2 field, nằm ở thuộc tính
+	@#   `schema.name-mapping.default`). **PyIceberg 0.11.1 tự đặt nó** — người
+	@#   gọi không phải dựng name-mapping, và không có bước nào bị bỏ sót.
+	@#
+	@# Q4b vị trí file: **phải nằm TRONG location của CHÍNH bảng.** Hai vị trí
+	@#   kia đều hỏng, và hỏng vì `ACCESS_DENIED` chứ KHÔNG vì Iceberg từ chối
+	@#   đường dẫn: Lakekeeper vend credential STS hẹp theo TỪNG BẢNG, nên
+	@#   credential của bảng A không đọc nổi file nằm ngoài location của A —
+	@#   kể cả khi file đó nằm trong cùng warehouse. Cùng lý do, credential vend
+	@#   cũng không GHI được ra hai chỗ đó. Ràng buộc này là của Lakekeeper,
+	@#   không phải của `add_files`.
+	@#
+	@# Q4c check_duplicate_files: việc mà nó làm là `inspect.data_files()`, tức
+	@#   quét MANIFEST (không phải quét từng data file): 0,017s trên bảng 50
+	@#   data file / 1 manifest, 0,029s trên bảng 1 data file / 1 manifest —
+	@#   rẻ ở hình dạng này vì `add_files` gom cả 50 file vào MỘT manifest.
+	@#   Hiệu số `add_files` đầu-cuối (bật 0,787s vs tắt 0,959s) NHỎ HƠN nhiễu
+	@#   của một lần commit và có lần ra ÂM; đừng đọc nó như giá của phép kiểm.
+	@#   **TẮT thì KHÔNG an toàn:** đăng ký lại cùng một file với kiểm TẮT đưa
+	@#   bảng từ 1000 lên 2000 dòng, IM LẶNG. Với kiểm BẬT: `ValueError`.
+	@#
+	@# Q4d schema lệch: thừa cột -> ỒN (`ValueError: ... contains more columns`);
+	@#   sai kiểu -> ỒN (`ValueError: Mismatch in fields`); **THIẾU cột -> IM**:
+	@#   `add_files` nhận, và cột thiếu đọc ra TOÀN NULL. Đó là lỗ DUY NHẤT
+	@#   trong ba, và nó không kêu — bên gọi phải tự đối chiếu schema trước khi
+	@#   đăng ký, đúng như `check_schema` đang làm cho đường `incremental`.
+	@#
+	@# Q5 ghép với cú tráo ba bước của `full`: ĐƯỢC. staging nạp bằng add_files
+	@#   = 1 snapshot; `rename`/`rename`/`drop` chạy hết ba bước; bảng đích đọc
+	@#   ra đúng 5000 dòng của staging và KHÔNG sót id nào của bảng cũ. Đường
+	@#   dẫn data file KHÔNG đổi sau cú tráo (vẫn nằm dưới thư mục của bảng
+	@#   staging cũ) — và đo được rằng bảng đích MANG THEO location của staging
+	@#   (`location sau tráo == location staging`: True), nên credential vend
+	@#   của nó vẫn phủ đúng chỗ file nằm. Đó là lý do Q4b và Q5 KHÔNG mâu
+	@#   thuẫn nhau, và lý do đó phải đọc được ở đây chứ không phải suy ra.
+	@#
+	@# KHÔNG SUY RA ĐƯỢC TỪ PHÉP NÀY: `add_files` gỡ 44,0% thời gian mà ĐO 3
+	@#   quy cho commit catalog, nhưng ĐO 3 cũng đo SÀN của giai đoạn ĐỌC NGUỒN
+	@#   ở ~7,3 MB/s — bằng MỘT NỬA ngưỡng 14,7 MB/s, và không tham số nào phá
+	@#   được nó. Cắt commit từ 50 xuống 1 là một thắng lợi thật, nhưng nó KHÔNG
+	@#   đưa đường nạp qua cửa chặn; nó chỉ dời nút thắt về đúng chỗ ĐO 3 đã chỉ.
 
 .PHONY: measure-ingest
 measure-ingest: check-context  ## Đo 3 GĐ3a (CỬA CHẶN cuối) — đường NẠP tách theo giai đoạn
