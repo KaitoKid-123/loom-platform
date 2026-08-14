@@ -130,20 +130,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
 import statistics
 import sys
 import time
 import uuid
-from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from resource import RUSAGE_SELF, getrusage
 from typing import TYPE_CHECKING, Any
 
+# CÙNG thư mục, nạp vào cụm qua CÙNG ConfigMap (xem target `measure-ingest-path`):
+# `python /scripts/measure_ingest_path.py` đặt `/scripts` làm `sys.path[0]`.
+import _aiven_guard
 import boto3
 import httpx
-import psycopg
 import pyarrow as pa  # type: ignore[import-untyped]
 from psycopg import sql
 from pyiceberg.catalog.rest import RestCatalog
@@ -178,29 +178,29 @@ if TYPE_CHECKING:
 # (xem `_needs_text_cast` bên connector) — nghĩa là phép đo này canh ĐƯỜNG
 # NHANH của connector. Một nguồn có `uuid`/`jsonb`/`numeric` sẽ tốn thêm phần
 # kết xuất text phía Postgres; điều đó KHÔNG nằm trong con số dưới đây.
-_SOURCE_DDL = sql.SQL(
-    """
-    CREATE TABLE {} (
-        id           bigint PRIMARY KEY,
-        event_time   timestamp with time zone NOT NULL,
-        region       text NOT NULL,
-        status       text NOT NULL,
-        amount       double precision NOT NULL,
-        customer_id  text NOT NULL,
-        payload      text NOT NULL
-    )
-    """
-)
+# ─────────────────── nguồn: CHỈ ĐỌC, không bao giờ ghi ───────────────────
+#
+# Bản trước của file này DỰNG bảng nguồn: `_SOURCE_DDL`, `_source_rows`,
+# `seed_source` (một `COPY ... FROM STDIN` 500.000 dòng) và `drop_source`. Cả
+# khối đó đã bị GỠ, và đây là lý do — không phải để gọn.
+#
+# Chính đường ghi ấy đã lấp đầy đĩa của service Aiven và lật CẢ service sang
+# chỉ-đọc trong lúc control plane của Loom đang sống trên đó; ngay cả lệnh
+# `DROP SCHEMA` dọn dẹp cũng bị từ chối, tức phép đo tự nhốt mình. Chi tiết ở
+# docstring đầu `_aiven_guard.py`.
+#
+# Hàng rào bây giờ là một TÍNH CHẤT KIỂM ĐƯỢC chứ không phải một quy ước: mọi
+# connection Aiven trong `scripts/` đi qua `_aiven_guard`, và DSN nó dựng LUÔN
+# mang `-c default_transaction_read_only=on`. Không có tham số nào tắt được nó.
+# `packages/connectorkit/tests/test_aiven_measurement_guard.py` canh điều đó.
+#
+# HỆ QUẢ, nói thẳng: script này KHÔNG còn tự tạo được bảng nguồn. Nó đòi bảng
+# ĐÃ CÓ SẴN và dừng với hướng dẫn nếu không. Với một service gói 1 GB đĩa đang
+# chở control plane thật, việc sinh ~175 MB dữ liệu bench là một hành động PHẢI
+# do con người quyết định với console Aiven đang mở — đúng lượng ma sát mà sự
+# cố kia cho thấy là cần. Xem `docs/superpowers/plans/` (kế hoạch 3b) cho phần
+# ghi lại điều này ảnh hưởng thế nào tới việc chạy lại ĐO 3.
 
-REGIONS = [f"region-{i:02d}" for i in range(16)]  # lực lượng THẤP
-STATUSES = ["pending", "processing", "completed", "failed", "refunded"]
-
-# 220 ký tự hex cho cột đệm, cùng con số với `measure_write_path.py`. PHẢI ngẫu
-# nhiên THẬT theo từng dòng: Giai đoạn 2a đã dính bẫy `repeat('x', N)` một lần —
-# một cột giống hệt nhau nén từ điển gần về 0, và bài đo "chạy tốt" mà không
-# chạm băng thông nào thật.
-_PAYLOAD_HEX_CHARS = 220
-_PAYLOAD_BITS = _PAYLOAD_HEX_CHARS * 4
 
 # Mốc thời gian cơ sở + bước nhảy. KHÔNG dùng `infinity` hay một khoảng năm quá
 # rộng: psycopg ném `DataError: timestamp too large` TRƯỚC khi pyarrow thấy giá
@@ -210,204 +210,36 @@ _PAYLOAD_BITS = _PAYLOAD_HEX_CHARS * 4
 _BASE_TIME = datetime(2024, 1, 1, tzinfo=UTC)
 
 
-def _source_rows(offset: int, count: int, seed: int) -> Iterator[tuple[Any, ...]]:
-    """Sinh từng dòng một, KHÔNG dựng danh sách 1,2 triệu phần tử.
+def require_source_table(dsn: str, *, schema: str, table: str) -> tuple[int, int]:
+    """Đòi bảng nguồn ĐÃ CÓ. Trả (số dòng, byte). KHÔNG tạo gì.
 
-    `COPY` của psycopg nhận từng dòng, nên không có lý do gì để giữ cả lô trong
-    RAM — và tiến trình sinh dữ liệu chạy trong cùng một pod với phép đo, nơi
-    RAM là thứ đang được canh.
-    """
-    rng = random.Random(seed)  # noqa: S311 - dữ liệu đo, không phải mật mã
-    for i in range(offset, offset + count):
-        yield (
-            i,
-            _BASE_TIME + timedelta(seconds=i),
-            REGIONS[i % len(REGIONS)],
-            STATUSES[rng.randrange(len(STATUSES))],
-            rng.uniform(0.01, 25_000.0),
-            f"cust-{rng.getrandbits(64):016x}",
-            f"{rng.getrandbits(_PAYLOAD_BITS):0{_PAYLOAD_HEX_CHARS}x}",
-        )
-
-
-def _connect(dsn: str) -> psycopg.Connection[tuple[Any, ...]]:
-    return psycopg.connect(dsn, connect_timeout=15)
-
-
-def _all_databases_bytes(cur: psycopg.Cursor[tuple[Any, ...]]) -> int:
-    cur.execute("SELECT COALESCE(SUM(pg_database_size(datname)), 0) FROM pg_database")
-    row = cur.fetchone()
-    return int(row[0]) if row else 0
-
-
-def check_source_disk(
-    cur: psycopg.Cursor[tuple[Any, ...]], *, planned_bytes: int, ceiling_mb: int, label: str
-) -> None:
-    """TỪ CHỐI CHẠY nếu service Aiven sắp vượt trần tự đặt.
-
-    Hàng rào DUY NHẤT chặn phép đo lấp đầy đĩa của một service nhỏ đang chở
-    CONTROL PLANE ĐANG SỐNG của Loom. Vai trò giống `check_disk_space` bên
-    `scripts/measure_write_path.py`, nhưng bài học đắt hơn — xem dưới.
-
-    **ĐÃ VỠ THẬT MỘT LẦN, và bản này là phép sửa.** Bản đầu kiểm ĐÚNG MỘT LẦN
-    trước khi nạp, với ước lượng 1,2 triệu dòng x 330 byte = 396 MB trên 82 MB
-    đang dùng, tổng dự kiến 478 MB — dưới trần 600 MB, nên nó cho chạy. Ở dòng
-    thứ 1.000.000, Aiven CHUYỂN CẢ SERVICE SANG CHỈ-ĐỌC: `COPY` ném
-    `ReadOnlySqlTransaction`, và ngay sau đó cả `DROP SCHEMA` cũng bị từ chối —
-    tức là phép đo tự nhốt mình, không dọn được cái nó vừa tạo ra. Đo lại lúc
-    đó: tổng mọi database 432 MB, riêng bảng bench 350 MB. Trạng thái chỉ-đọc
-    tự hết sau vài phút (khi WAL được thu hồi), nhưng trong khoảng đó control
-    plane của chủ dự án cũng không ghi được.
-
-    Hai chỗ sai của bản đầu, và cả hai được sửa ở đây:
-
-    1. **Kiểm một lần là không đủ.** Dung lượng đi lên TRONG LÚC nạp, và cái
-       đẩy service qua mép không chỉ là dữ liệu — WAL của chính lần nạp cộng
-       vào cùng một volume. Bản này gọi lại sau MỖI khối.
-    2. **Trần 600 MB là suy đoán, không phải số đo.** Không có API nào trong
-       SQL cho biết dung lượng gói, nên trần phải đứng dưới mốc ĐÃ QUAN SÁT
-       được là nguy hiểm (432 MB), không đứng ở một con số tròn nghe hợp lý.
-
-    So với TỔNG của MỌI database, không phải riêng database bench: đĩa là của
-    service, và Lakekeeper ghi vào cùng volume đó ở mỗi commit catalog — tức là
-    trong suốt phép đo.
-    """
-    used = _all_databases_bytes(cur)
-    projected = used + planned_bytes
-    ceiling = ceiling_mb * 1_000_000
-    print(
-        f"đĩa nguồn [{label}]: đang dùng {used / 1e6:.0f} MB"
-        + (f", còn thêm ~{planned_bytes / 1e6:.0f} MB" if planned_bytes else "")
-        + f" => ~{projected / 1e6:.0f} MB, trần tự đặt {ceiling_mb} MB",
-        flush=True,
-    )
-    if projected > ceiling:
-        raise SystemExit(
-            f"TỪ CHỐI CHẠY: {projected / 1e6:.0f} MB vượt trần {ceiling_mb} MB. Service Aiven "
-            "này nhỏ và nó chở control plane ĐANG SỐNG của Loom — ép nó qua mép làm CẢ service "
-            "chuyển sang chỉ-đọc, kể cả với lệnh DROP dọn dẹp (đã xảy ra thật, xem docstring). "
-            "Giảm --source-rows, hoặc nâng --source-ceiling-mb chỉ khi đã TỰ KIỂM dung lượng "
-            "thật của gói ở console Aiven."
-        )
-
-
-def seed_source(
-    dsn: str, *, schema: str, table: str, rows: int, chunk: int, seed: int, ceiling_mb: int
-) -> None:
-    """Dựng bảng nguồn trên Aiven. Idempotent: có rồi thì báo và không đụng.
-
-    350 byte/dòng KHÔNG phải một ước lượng trên giấy: nó là số ĐO được từ lần
-    nạp đầu tiên (1.000.000 dòng -> `pg_total_relation_size` 350 MB, đã gồm cả
-    index PRIMARY KEY). Bản trước đoán 330 và đoán thiếu.
+    Kiểm bằng một connection CHỈ-ĐỌC như mọi thứ khác ở đây, nên nếu bảng thiếu
+    thì thứ duy nhất xảy ra là một thông báo — không có nhánh nào đi tới `CREATE`.
     """
     qualified = sql.Identifier(schema, table)
-    with _connect(dsn) as conn, conn.cursor() as cur:
+    with _aiven_guard.read_only_connection(dsn) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_schema=%s AND table_name=%s",
             (schema, table),
         )
-        if cur.fetchone() is not None:
-            cur.execute(
-                sql.SQL("SELECT count(*), pg_total_relation_size({}) FROM {}").format(
-                    sql.Literal(f"{schema}.{table}"), qualified
-                )
+        if cur.fetchone() is None:
+            raise SystemExit(
+                f"KHÔNG CÓ bảng nguồn {schema}.{table}, và script này KHÔNG tạo nó.\n"
+                "Đường ghi đã bị gỡ sau khi một lần nạp lật cả service Aiven sang "
+                "chỉ-đọc giữa lúc control plane đang sống (xem _aiven_guard.py).\n"
+                "Muốn chạy lại ĐO 3: tự dựng bảng nguồn, CÓ CHỦ Ý, với console Aiven "
+                "đang mở để nhìn dung lượng gói — 500.000 dòng ~ 175 MB đo được, "
+                "trên gói 1 GB dùng chung với control plane VÀ với một ứng dụng khác "
+                "của chủ dự án (bi_portal)."
             )
-            # `scalar_one` không có ở psycopg thuần, nhưng một `SELECT count(*)`
-            # LUÔN trả đúng một dòng — `None` ở đây là một giả định đã vỡ, không
-            # phải một trạng thái hợp lệ để đi tiếp bằng một nhánh im lặng.
-            existing = cur.fetchone()
-            assert existing is not None
-            print(
-                f"bảng nguồn {schema}.{table} ĐÃ CÓ: {existing[0]:,} dòng, "
-                f"{existing[1] / 1e6:.0f} MB — không đụng vào",
-                flush=True,
+        cur.execute(
+            sql.SQL("SELECT count(*), pg_total_relation_size({}) FROM {}").format(
+                sql.Literal(f"{schema}.{table}"), qualified
             )
-            return
-
-    bytes_per_row = 350
-    with _connect(dsn) as conn:
-        with conn.cursor() as cur:
-            check_source_disk(
-                cur,
-                planned_bytes=rows * bytes_per_row,
-                ceiling_mb=ceiling_mb,
-                label="trước khi nạp",
-            )
-        conn.commit()
-
-    t0 = time.perf_counter()
-    with _connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
-            cur.execute(_SOURCE_DDL.format(qualified))
-        conn.commit()
-
-        copy_stmt = sql.SQL(
-            "COPY {} (id, event_time, region, status, amount, customer_id, payload) FROM STDIN"
-        ).format(qualified)
-        written = 0
-        while written < rows:
-            # Nạp theo KHỐI và commit từng khối: một `COPY` nửa triệu dòng là
-            # một transaction duy nhất, và trên `max_wal_size=49 MB` nó ép
-            # Postgres giữ toàn bộ WAL của transaction đó cho tới lúc commit.
-            # Chia nhỏ cho WAL được tái sử dụng giữa chừng.
-            take = min(chunk, rows - written)
-            with conn.cursor() as cur, cur.copy(copy_stmt) as copy:
-                for row in _source_rows(written, take, seed + written):
-                    copy.write_row(row)
-            conn.commit()
-            written += take
-            # Kiểm lại SAU MỖI KHỐI, không chỉ một lần lúc đầu — xem
-            # `check_source_disk` cho lần nó đã vỡ vì thiếu đúng dòng này.
-            with conn.cursor() as cur:
-                check_source_disk(
-                    cur,
-                    planned_bytes=(rows - written) * bytes_per_row,
-                    ceiling_mb=ceiling_mb,
-                    label=f"{written:,}/{rows:,} dòng",
-                )
-            conn.commit()
-
-        with conn.cursor() as cur:
-            cur.execute(sql.SQL("ANALYZE {}").format(qualified))
-            # `FROM {}` là BẮT BUỘC ở đây và đã từng thiếu: không có nó,
-            # `count(*)` đếm trên một dòng ngầm định và báo "1 dòng" cho một
-            # bảng nửa triệu dòng — một con số SAI in ra như thể đã đo.
-            cur.execute(
-                sql.SQL("SELECT count(*), pg_total_relation_size({}) FROM {}").format(
-                    sql.Literal(f"{schema}.{table}"), qualified
-                )
-            )
-            final = cur.fetchone()
-            assert final is not None  # xem chú thích ở nhánh "ĐÃ CÓ" phía trên
-        conn.commit()
-
-    print(
-        f"bảng nguồn {schema}.{table}: {final[0]:,} dòng, {final[1] / 1e6:.0f} MB "
-        f"(nạp trong {time.perf_counter() - t0:.1f}s)",
-        flush=True,
-    )
-
-
-def drop_source(dsn: str, *, schema: str) -> None:
-    """Xoá schema bench rồi ĐỌC LẠI để xác nhận — không tin lệnh, tin phép đọc."""
-    with _connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
-        conn.commit()
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s", (schema,)
-            )
-            still_there = cur.fetchone() is not None
-            used = _all_databases_bytes(cur)
-    if still_there:
-        raise SystemExit(f"DROP SCHEMA chạy xong nhưng {schema} VẪN còn — dọn tay")
-    print(
-        f"đã xoá schema {schema}, xác nhận bằng information_schema.schemata. "
-        f"Tổng mọi database còn {used / 1e6:.0f} MB.",
-        flush=True,
-    )
+        )
+        found = cur.fetchone()
+        assert found is not None  # `SELECT count(*)` luôn trả đúng một dòng
+    return int(found[0]), int(found[1])
 
 
 # ─────────────────────────── báo tiến độ ────────────────────────────
@@ -1084,46 +916,38 @@ def run_config(args: argparse.Namespace, dsn: str, access_key: str, secret_key: 
 
 
 def _dsn_from_env() -> str:
-    """DSN nguồn ghép từ biến môi trường do `secretKeyRef` tiêm vào pod.
+    """DSN nguồn CHỈ-ĐỌC, ghép từ biến môi trường do `secretKeyRef` tiêm vào pod.
 
     KHÔNG nhận DSN qua dòng lệnh: một chuỗi kết nối trên `argv` lộ ra trong
     `ps`, trong log của `kubectl create job`, và trong shell history. Cùng lý do
     `make infra-local-source-secret` đổi tên khoá bằng `jq` trên JSON thay vì
     truyền giá trị qua `--from-literal`.
-    """
-    missing = [
-        name
-        for name in ("BENCH_PG_USER", "BENCH_PG_PASSWORD", "BENCH_PG_HOST", "BENCH_PG_DBNAME")
-        if not os.environ.get(name)
-    ]
-    if missing:
-        raise SystemExit(f"thiếu biến môi trường nguồn: {', '.join(missing)}")
-    from urllib.parse import quote
 
-    user = quote(os.environ["BENCH_PG_USER"], safe="")
-    password = quote(os.environ["BENCH_PG_PASSWORD"], safe="")
-    host = os.environ["BENCH_PG_HOST"]
-    port = os.environ.get("BENCH_PG_PORT", "5432")
-    database = quote(os.environ["BENCH_PG_DBNAME"], safe="")
-    return f"postgresql://{user}:{password}@{host}:{port}/{database}"
+    Việc ghép chuỗi đã chuyển sang `_aiven_guard.dsn_from_environ` — không phải
+    để gọn, mà để `-c default_transaction_read_only=on` chỉ có MỘT định nghĩa
+    trong repo. Bản trước ghép một URL `postgresql://...` ở đây và KHÔNG mang
+    tham số đó, nên nó mở một connection GHI ĐƯỢC vào đúng service mà một phép
+    đo trước đó đã lật sang chỉ-đọc.
+    """
+    return _aiven_guard.dsn_from_environ()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--seed-source", action="store_true", help="Dựng bảng nguồn trên Aiven")
-    parser.add_argument("--drop-source", action="store_true", help="Xoá schema bench trên Aiven")
+    # `--seed-source` / `--drop-source` ĐÃ GỠ cùng đường ghi. Xem khối chú
+    # thích ở đầu mục "nguồn: CHỈ ĐỌC" cho lý do.
     parser.add_argument("--mode", choices=("full", "incremental"), default="incremental")
     parser.add_argument("--batch-rows", type=int, default=10_000, help="Mặc định = mặc định THẬT")
     parser.add_argument("--source-schema", default="bench_ingest")
     parser.add_argument("--source-table", default="ingest_bench")
     # 500.000 dòng (~175 MB) và trần 350 MB: cả hai là hệ quả TRỰC TIẾP của lần
     # nạp đã đẩy service sang chỉ-đọc ở ~432 MB — xem `check_source_disk`.
-    parser.add_argument("--source-rows", type=int, default=500_000)
-    parser.add_argument("--source-chunk", type=int, default=50_000)
-    parser.add_argument("--source-ceiling-mb", type=int, default=350)
-    parser.add_argument("--seed", type=int, default=1337)
+    # `--source-rows` / `--source-chunk` / `--source-ceiling-mb` / `--seed` ĐÃ GỠ:
+    # cả bốn chỉ tham số hoá đường NẠP DỮ LIỆU, và đường đó không còn tồn tại.
+    # Số dòng thật của bảng nguồn bây giờ được ĐỌC ra (`require_source_table`)
+    # chứ không được truyền vào — một con số đọc được không lệch được với thực tế.
     parser.add_argument("--bucket", default="loom-local")
     parser.add_argument("--iceberg-namespace", default="bench_ingest")
     parser.add_argument("--target-table", default="ingest_path")
@@ -1150,7 +974,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-pre-create-target", dest="pre_create_target", action="store_false")
     parser.add_argument("--max-batches", type=int, default=None, help="Chạy thử nhanh")
     parser.add_argument("--log-every", type=int, default=10)
-    parser.add_argument("--threshold-mb-s", type=float, default=14.7)
+    parser.add_argument("--threshold-mb-s", type=float, default=6.01)
     parser.add_argument("--keep", action="store_true", help="KHÔNG dọn — chỉ để gỡ lỗi")
     return parser.parse_args(argv)
 
@@ -1159,20 +983,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     dsn = _dsn_from_env()
 
-    if args.drop_source:
-        drop_source(dsn, schema=args.source_schema)
-        return 0
-    if args.seed_source:
-        seed_source(
-            dsn,
-            schema=args.source_schema,
-            table=args.source_table,
-            rows=args.source_rows,
-            chunk=args.source_chunk,
-            seed=args.seed,
-            ceiling_mb=args.source_ceiling_mb,
-        )
-        return 0
+    # Đòi bảng nguồn TRƯỚC khi dựng warehouse: dựng warehouse rồi mới phát hiện
+    # thiếu nguồn để lại rác trên MinIO/Lakekeeper mà `finally` của `run_config`
+    # chưa chạy tới.
+    source_rows, source_bytes = require_source_table(
+        dsn, schema=args.source_schema, table=args.source_table
+    )
+    print(
+        f"bảng nguồn {args.source_schema}.{args.source_table}: "
+        f"{source_rows:,} dòng, {source_bytes / 1e6:.0f} MB (CHỈ ĐỌC)",
+        flush=True,
+    )
 
     # Credential GỐC MinIO: Lakekeeper cần chúng để tự AssumeRole hộ lúc tạo
     # warehouse (xem `create_warehouse`). Client PyIceberg không bao giờ thấy

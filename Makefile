@@ -622,6 +622,7 @@ probe-read-cost-pod: check-context  ## Đo 4b GĐ3a — CÙNG phép đo đó nh�
 	kubectl -n $(NS) delete configmap probe-read-cost-script --ignore-not-found; \
 	kubectl -n $(NS) create configmap probe-read-cost-script \
 	  --from-file=probe_read_path_cost.py=scripts/probe_read_path_cost.py \
+	  --from-file=_aiven_guard.py=scripts/_aiven_guard.py \
 	  --dry-run=client -o yaml | kubectl -n $(NS) apply -f -; \
 	kubectl -n $(NS) create job probe-read-cost --image="$$img" --dry-run=client -o json \
 	  -- python /scripts/probe_read_path_cost.py --sources aiven --verify-read-only \
@@ -1067,6 +1068,7 @@ measure-ingest: check-context  ## Đo 3 GĐ3a (CỬA CHẶN cuối) — đườn
 	kubectl -n $(NS) delete configmap measure-ingest-path-script --ignore-not-found; \
 	kubectl -n $(NS) create configmap measure-ingest-path-script \
 	  --from-file=measure_ingest_path.py=scripts/measure_ingest_path.py \
+	  --from-file=_aiven_guard.py=scripts/_aiven_guard.py \
 	  --dry-run=client -o yaml | kubectl -n $(NS) apply -f -; \
 	kubectl -n $(NS) create job measure-ingest-path --image="$$img" --dry-run=client -o json \
 	  -- python /scripts/measure_ingest_path.py $(ARGS) \

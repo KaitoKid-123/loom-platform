@@ -182,6 +182,20 @@ from typing import Any
 
 import psycopg
 import pyarrow as pa  # type: ignore[import-untyped]
+
+# `_aiven_guard` nằm CÙNG thư mục và được nạp vào cụm qua CÙNG ConfigMap (xem
+# target `probe-read-cost-pod`): `python /scripts/probe_read_path_cost.py` đặt
+# `/scripts` làm `sys.path[0]`, nên import này chạy được ở cả host lẫn trong pod.
+from _aiven_guard import (
+    StorageHeadroom,
+    aiven_dsn,
+    connect_read_only,
+    connection_slots,
+    read_env_file,
+    read_secret_dir,
+    verify_read_only,
+)
+from _aiven_guard import total_database_bytes as _guard_total_database_bytes
 from psycopg import sql
 from psycopg.rows import dict_row
 
@@ -193,6 +207,8 @@ from loom_connector.postgres import (
     _rows_to_record_batch,
 )
 from loom_connector.protocol import StreamState
+
+__all__ = ["aiven_dsn", "read_env_file", "read_secret_dir", "total_database_bytes"]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -530,127 +546,18 @@ class Logger:
 # ─────────────────────────── kết nối ────────────────────────────
 
 
-def read_env_file(path: Path) -> dict[str, str]:
-    """Đọc `deploy/local/aiven.env` (gitignore, CREDENTIAL THẬT).
-
-    Giá trị KHÔNG BAO GIỜ được in ra, không đi qua dòng lệnh, không vào
-    `progress.json`. Cùng quy ước với target `infra-local-secret` của Makefile.
-    """
-    if not path.exists():
-        raise SystemExit(
-            f"Thiếu {path} — copy từ aiven.env.example rồi điền (xem make infra-local-secret)."
-        )
-    values: dict[str, str] = {}
-    for raw_line in path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip()
-    return values
-
-
-def read_secret_dir(path: Path) -> dict[str, str]:
-    """Đọc credential từ một thư mục Secret của Kubernetes (CREDENTIAL THẬT).
-
-    Cùng dữ liệu như `read_env_file`, khác HÌNH DẠNG: kubelet chiếu một Secret
-    thành MỘT FILE MỖI KHOÁ (`/aiven/username`, `/aiven/password`, ...) chứ
-    không phải một file `key=value`. Dùng khi phép đo chạy TRONG CỤM, nơi
-    `deploy/local/aiven.env` không tồn tại và Secret `loom-db-app` (do
-    `make infra-local-secret` nạp từ chính file đó) là nguồn duy nhất.
-
-    Đọc THẲNG từ file mount vào pod là chủ ý: giá trị không đi qua dòng lệnh
-    (`ps` trong pod không thấy), không qua biến môi trường (`kubectl describe
-    pod` không thấy), và không vào log. Cùng quy ước "credential không bao giờ
-    là một đối số" mà `infra-local-secret` giữ ở phía Makefile.
-
-    `.rstrip("\\n")` chứ không `.strip()`: mật khẩu có thể mở/kết thúc bằng
-    khoảng trắng hợp lệ, và `--from-env-file` của kubectl lưu giá trị NGUYÊN
-    VĂN — chỉ bỏ đúng ký tự xuống dòng mà trình soạn thảo thêm vào.
-    """
-    if not path.is_dir():
-        raise SystemExit(f"--aiven-secret-dir {path} không phải thư mục (Secret đã mount chưa?)")
-    values: dict[str, str] = {}
-    for key in ("host", "port", "dbname", "username", "password"):
-        item = path / key
-        if item.is_file():
-            values[key] = item.read_text().rstrip("\n")
-    return values
-
-
-def verify_read_only(conn: psycopg.Connection[Any]) -> list[str]:
-    """CỐ Ý thử GHI, để hàng rào chỉ-đọc là BẰNG CHỨNG chứ không phải lời hứa.
-
-    `SHOW default_transaction_read_only` chỉ nói tham số ĐƯỢC ĐẶT; nó không
-    chứng minh server THI HÀNH nó. Hai câu dưới đây chứng minh: cả bảng TẠM
-    (thứ nhiều người tưởng là ngoại lệ vì nó không sinh WAL cho bảng thường)
-    lẫn bảng thường đều phải bị từ chối.
-
-    Nếu một câu nào đó THÀNH CÔNG thì giả định nền của cả phép đo đã sai và
-    script DỪNG ngay — `rollback` ở `finally` gỡ lại thứ vừa tạo (connection
-    không autocommit), rồi thoát trước khi bất cứ phép đo nào chạy.
-    """
-    attempts = (
-        ("CREATE TEMP TABLE probe_readonly_check (x int)", "CREATE TEMP TABLE"),
-        ("CREATE TABLE probe_readonly_check_perm (x int)", "CREATE TABLE"),
-    )
-    lines: list[str] = []
-    for statement, label in attempts:
-        rejected = False
-        try:
-            with conn.cursor() as cur:
-                cur.execute(statement)
-        except psycopg.errors.ReadOnlySqlTransaction as exc:
-            rejected = True
-            detail = str(exc).strip().splitlines()[0]
-            lines.append(f"TỪ CHỐI (đúng như mong đợi): {label} -> {type(exc).__name__}: {detail}")
-        finally:
-            conn.rollback()
-        if not rejected:
-            raise SystemExit(
-                f"HÀNG RÀO CHỈ-ĐỌC HỎNG: server CHẤP NHẬN `{label}`. Đã rollback, "
-                "nhưng KHÔNG chạy phép đo nào nữa — sửa DSN trước."
-            )
-    return lines
-
-
-def aiven_dsn(env_path: Path, ca_path: Path, secret_dir: Path | None = None) -> str:
-    """DSN tới Aiven, MỞ Ở CHẾ ĐỘ CHỈ-ĐỌC.
-
-    `-c default_transaction_read_only=on` là hàng rào THẬT chứ không phải một
-    lời hứa trong docstring: mọi `INSERT`/`CREATE`/`COPY FROM` trên connection
-    này bị Postgres từ chối, kể cả nếu một thay đổi sau này vô tình thêm một
-    câu như thế. Xem docstring đầu file cho lý do (một lần chạy trước đã đẩy
-    service này sang chỉ-đọc thật trong lúc control plane đang sống).
-
-    `sslmode=verify-full`: xác thực CẢ hostname, dùng CA của Aiven. Chuỗi trả về
-    có mật khẩu — KHÔNG log nó.
-
-    `secret_dir` khác None: lấy credential từ một thư mục Secret đã mount thay
-    cho `deploy/local/aiven.env` — đường của bản chạy TRONG CỤM, xem
-    `read_secret_dir`. CA cũng nằm trong Secret đó (`ca.pem`), nên `ca_path`
-    trỏ vào cùng thư mục.
-    """
-    if not ca_path.exists():
-        raise SystemExit(f"Thiếu {ca_path} — tải CA từ console Aiven (xem aiven.env.example).")
-    source: Path = secret_dir if secret_dir is not None else env_path
-    env = read_secret_dir(secret_dir) if secret_dir is not None else read_env_file(env_path)
-    missing = [k for k in ("host", "port", "dbname", "username", "password") if not env.get(k)]
-    if missing:
-        raise SystemExit(f"{source} thiếu khoá: {', '.join(missing)}")
-    return (
-        f"host={env['host']} port={env['port']} dbname={env['dbname']} "
-        f"user={env['username']} password={env['password']} "
-        f"sslmode=verify-full sslrootcert={ca_path} "
-        f"options='-c default_transaction_read_only=on -c statement_timeout=900000'"
-    )
+# `read_env_file`, `read_secret_dir`, `verify_read_only`, `aiven_dsn` và
+# `total_database_bytes` TỪNG được định nghĩa ngay ở đây. Chúng đã chuyển sang
+# `_aiven_guard` vì bản chép thứ hai trong `measure_ingest_path.py` đã TRÔI khỏi
+# bản này: bản đó kiểm đĩa sau MỖI khối nhưng mở connection GHI ĐƯỢC, bản này mở
+# chỉ-đọc nhưng chỉ kiểm đĩa MỘT lần cho cả lần chạy. Mỗi bản giữ đúng một nửa
+# bài học của một sự cố khác nhau — xem docstring đầu `_aiven_guard.py`.
 
 
 def total_database_bytes(conn: psycopg.Connection[Any]) -> int:
+    """Bọc `_aiven_guard.total_database_bytes` cho hình dạng `conn` của file này."""
     with conn.cursor() as cur:
-        cur.execute("SELECT COALESCE(sum(pg_database_size(datname)), 0)::bigint FROM pg_database")
-        row = cur.fetchone()
-    return int(row[0]) if row else 0
+        return _guard_total_database_bytes(cur)
 
 
 def _scalar(conn: psycopg.Connection[Any], statement: str) -> str:
@@ -1403,6 +1310,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--storage-slack-mb",
+        type=int,
+        default=50,
+        help=(
+            "Khe cho phép TRÊN dung lượng đang dùng, kiểm lại sau MỖI khối. "
+            "Phép đo này đúng ra tăng 0 byte, nên khe hẹp là chủ ý."
+        ),
+    )
+    parser.add_argument(
         "--state-dir", type=Path, default=REPO_ROOT / ".bench-state" / "probe-read-cost"
     )
     parser.add_argument("--fresh", action="store_true", help="Bỏ progress.json cũ, chạy lại từ đầu")
@@ -1471,6 +1387,7 @@ def main(argv: list[str] | None = None) -> int:
 
         aiven_conn: psycopg.Connection[Any] | None = None
         local_conn: psycopg.Connection[Any] | None = None
+        headroom: StorageHeadroom | None = None
         local_dsn = ""
 
         with (
@@ -1491,9 +1408,21 @@ def main(argv: list[str] | None = None) -> int:
                     seed_local_table(local_dsn, args.rows, log)
 
             if "aiven" in sources:
-                aiven_conn = psycopg.connect(
+                # `connect_read_only` chứ không `psycopg.connect`: nó ĐỌC LẠI
+                # `SHOW default_transaction_read_only` từ chính server trước khi
+                # trả connection. Một `options` sai chính tả vẫn cho connect
+                # thành công và im lặng bỏ qua tham số, nên chuỗi DSN một mình
+                # không chứng minh được gì.
+                aiven_conn = connect_read_only(
                     aiven_dsn(args.aiven_env, args.aiven_ca, args.aiven_secret_dir),
-                    connect_timeout=20,
+                    verify=args.verify_read_only,
+                )
+                with aiven_conn.cursor() as slot_cur:
+                    used_slots, max_slots = connection_slots(slot_cur)
+                aiven_conn.rollback()
+                log.line(
+                    f"  connection slot: {used_slots}/{max_slots} đang dùng "
+                    "(service này dùng CHUNG với control plane đang sống)"
                 )
                 progress.env.aiven_version = _scalar(aiven_conn, "SELECT version()")[:70]
                 progress.env.aiven_tls = describe_tls(aiven_conn)
@@ -1504,17 +1433,21 @@ def main(argv: list[str] | None = None) -> int:
                 progress.env.aiven_rtt_ms = round_trip_ms(aiven_conn)
                 if not progress.env.aiven_db_bytes_before:
                     progress.env.aiven_db_bytes_before = total_database_bytes(aiven_conn)
+                # Trần = dung lượng ĐANG dùng cộng một khe hẹp. Phép đo này
+                # KHÔNG được ghi gì (chỉ-đọc + `generate_series`), nên mức tăng
+                # đúng của nó là 0 byte và bất cứ mức tăng nào cũng là một giả
+                # định đã vỡ. Trần hẹp làm nó vỡ NGAY ở khối kế tiếp, thay vì
+                # sau vài phút như lần `check_source_disk` bản đầu đã để lọt.
+                slack = args.storage_slack_mb * 1_000_000
+                headroom = StorageHeadroom(ceiling_bytes=progress.env.aiven_db_bytes_before + slack)
                 log.line(f"Aiven: {progress.env.aiven_version}")
                 log.line(f"  TLS: {progress.env.aiven_tls}")
                 log.line(f"  default_transaction_read_only = {progress.env.aiven_read_only}")
                 log.line(f"  tổng đĩa mọi database TRƯỚC: {progress.env.aiven_db_bytes_before:,} B")
-                if progress.env.aiven_read_only.lower() not in ("on", "true"):
-                    log.line("TỪ CHỐI CHẠY: connection Aiven KHÔNG ở chế độ chỉ-đọc.")
-                    return 1
+                # `connect_read_only` đã TỪ CHỐI mở nếu tham số không phải `on`,
+                # và với `--verify-read-only` nó đã thử GHI thật rồi. Dòng dưới
+                # chỉ ghi lại BẰNG CHỨNG vào báo cáo — nó không còn là phép kiểm.
                 if args.verify_read_only:
-                    # TRƯỚC mọi phép đo, không sau: nếu hàng rào hỏng thì điều
-                    # cần làm là không đo, chứ không phải phát hiện ra sau khi
-                    # đã chạy 7 phút trên một service đang chở control plane.
                     for line in verify_read_only(aiven_conn):
                         log.line(f"  {line}")
             elif local_conn is not None:
@@ -1586,6 +1519,14 @@ def main(argv: list[str] | None = None) -> int:
                         # thứ ở đây là đọc, và connection Aiven vốn chỉ-đọc.
                         if conn is not None:
                             conn.rollback()
+                        # SAU MỖI KHỐI, không một lần lúc đầu. Đây là đúng dòng
+                        # mà bản đầu của hàng rào bên `measure_ingest_path.py`
+                        # thiếu, và thiếu nó là lý do cả service Aiven lật sang
+                        # chỉ-đọc giữa một lần chạy — xem `_aiven_guard`.
+                        if source == "aiven" and headroom is not None and conn is not None:
+                            with conn.cursor() as hr_cur:
+                                headroom.check(hr_cur, f"rep {rep} / {kind}")
+                            conn.rollback()
                         progress.peak_rss_kb = max(progress.peak_rss_kb, _peak_rss_kb())
                         save_progress(progress_path, progress)
                         extra = ""
@@ -1604,6 +1545,11 @@ def main(argv: list[str] | None = None) -> int:
                 progress.env.aiven_db_bytes_after = total_database_bytes(aiven_conn)
                 save_progress(progress_path, progress)
                 log.line(f"tổng đĩa mọi database SAU: {progress.env.aiven_db_bytes_after:,} B")
+                if headroom is not None:
+                    log.line(
+                        f"hàng rào đĩa: {len(headroom.checks)} lần kiểm SAU KHỐI, "
+                        f"chênh {headroom.delta:+,} byte (phép đo chỉ-đọc phải cho ra 0)"
+                    )
                 aiven_conn.close()
             if local_conn is not None:
                 local_conn.close()
