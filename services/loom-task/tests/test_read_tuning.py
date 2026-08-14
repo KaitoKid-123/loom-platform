@@ -90,17 +90,23 @@ def test_the_connector_is_built_with_the_configured_batch_size(  # type: ignore[
 
 
 def test_the_batch_size_defaults_to_the_measured_value_not_the_connector_one(built) -> None:  # type: ignore[no-untyped-def]
-    """KHÔNG đặt biến nào -> connector vẫn phải nhận 40 000, không phải 10 000.
+    """KHÔNG đặt biến nào -> connector vẫn phải nhận 80 000, không phải 10 000.
 
     Đây là vế bắt đúng lỗi đã có: bỏ `batch_rows` khỏi lời gọi thì
     `PostgresConnector` tự lấy 10 000 của nó và mọi thứ vẫn "chạy". Khẳng định
     thứ hai (`!= _CONNECTOR_OWN_DEFAULT`) là thứ nói ra điều đó thành lời — nếu
     một ngày nào đó hai mặc định trùng nhau, bài này phải ĐỎ để người sửa biết
     rằng nó đã ngừng canh được gì.
+
+    **Bài này một mình KHÔNG đủ, và chỗ nói ra điều đó là
+    `test_duplicate_row_ceiling.py`.** Nó khoá một THỪA SỐ; trần dòng trùng là
+    `batch_rows x commit_every_batches`, nên nâng con số ở đây mà không hạ K vẫn
+    XANH ở cả bài này lẫn `test_write_tuning.py` trong khi số dòng phải đọc lại
+    sau một cú chết đã nhân đôi.
     """
     kwargs = built()
 
-    assert kwargs["batch_rows"] == 40_000
+    assert kwargs["batch_rows"] == 80_000
     assert kwargs["batch_rows"] != _CONNECTOR_OWN_DEFAULT
 
 

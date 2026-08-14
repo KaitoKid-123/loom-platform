@@ -124,11 +124,17 @@ def test_the_default_group_is_the_measured_one_not_the_loop_default(
     Vế thứ hai là vế bắt lỗi: `run_incremental` mặc định K = 1 để một người gọi
     quên tham số rơi vào hành vi 3a đã kiểm, nên nếu `main.ingest` cũng quên
     truyền thì mọi thứ vẫn "chạy" — chỉ là commit vẫn từng lô và cả Giai đoạn 3d
-    không có hiệu lực nào trong production. Với ba lô, K = 5 cho MỘT commit còn
-    K = 1 cho ba, nên hai bản cài đặt đó không cho cùng một con số.
+    không có hiệu lực nào trong production. Với ba lô, K = 2 cho HAI commit (một
+    nhóm đủ + một nhóm dở) còn K = 1 cho ba, nên hai bản cài đặt đó không cho
+    cùng một con số.
+
+    **Bài này một mình KHÔNG đủ, và chỗ nói ra điều đó là
+    `test_duplicate_row_ceiling.py`.** Nó khoá một THỪA SỐ; trần dòng trùng là
+    `batch_rows x commit_every_batches`, nên giữ K ở đây mà nâng `batch_rows` vẫn
+    XANH ở cả bài này lẫn `test_read_tuning.py` trong khi trần đã tăng.
     """
-    assert WriteTuning().commit_every_batches == 5
-    assert _commits_with(monkeypatch, None).count("commit") == 1
+    assert WriteTuning().commit_every_batches == 2
+    assert _commits_with(monkeypatch, None).count("commit") == 2
 
 
 def test_a_group_of_zero_batches_is_refused_at_the_config_layer() -> None:

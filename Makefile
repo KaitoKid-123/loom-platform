@@ -1311,3 +1311,73 @@ measure-ingest-rss: check-context  ## ĐO 5 GĐ3d — RSS đỉnh đường nạ
 	kubectl -n $(NS) delete job measure-ingest-rss --ignore-not-found; \
 	kubectl -n $(NS) delete configmap measure-ingest-rss-script --ignore-not-found; \
 	test "$$phase" = "Complete"
+
+# ──────────────── ĐO 6 GĐ3d: chi phí client/MB (CỬA CHẶN kết thúc) ────────────────
+
+.PHONY: measure-client-cost
+measure-client-cost: check-context  ## ĐO 6 GĐ3d — chi phí client/MB, nguồn TRONG CỤM
+	@# CÂU HỎI (spec 3d mục 2): đường nạp cộng thêm bao nhiêu ms cho mỗi MB so với
+	@# một phép `COPY ... TO STDOUT` thô trên CÙNG nguồn trong CÙNG lần chạy. Đó là
+	@# cửa chặn kết thúc của cả giai đoạn, và nó quyết định hai việc còn lại
+	@# (`binary=True`, Arrow theo cột) có tồn tại hay không.
+	@#
+	@# Vì sao KHÔNG dùng `measure-ingest-path` (target cũ, ngay phía trên `ram`):
+	@# target đó tiêm credential Aiven (`loom-db-app`) và chạy ảnh đang deploy. Ở
+	@# đây cả hai đều sai — nguồn phải là Postgres TRONG CỤM (thước đo này trung
+	@# tính với mạng nên không cần Aiven, spec 3d mục 2), và ảnh phải là mã VỪA SỬA
+	@# chứ không ảnh đang chạy. Hai target vì vậy tồn tại song song thay vì một
+	@# target với hai chế độ: một cờ chọn giữa "đọc Aiven" và "đọc cụm" là một cờ
+	@# sẽ có người đặt sai.
+	@#
+	@# `resources` KHÔNG đặt trần RAM, cùng lý do đã ghi ở `measure-ingest-rss`:
+	@# mỗi mẫu fork một tiến trình con và ĐỌC `ru_maxrss` của chính nó, còn một
+	@# tiến trình bị OOMKill không báo được con số nào cả. Trần pod không làm RSS
+	@# thấp đi.
+	@#
+	@# KHÔNG truyền `--state-dir`: pod không có volume bền, nên một `progress.json`
+	@# trong lớp container biến mất cùng pod và cơ chế nối lại không mua được gì.
+	@# Script in ra rằng nó KHÔNG dùng cache — đó là thứ phải đọc trước mọi con số,
+	@# vì một bản trước của `probe_read_path_cost.py` đã in một bảng đầy đủ từ cache
+	@# mà không nói gì và số cũ suýt được báo như một mốc nền mới.
+	@#
+	@# Trần 3600s: ba ô x 3 lần trên 500.000 dòng, cộng dựng/xoá warehouse. Trần
+	@# phải rộng hơn hẳn dự đoán, nếu không phép đo bị chính cái đồng hồ của nó cắt.
+	@set -eo pipefail; \
+	kubectl -n $(NS) get deployment bench-pg >/dev/null 2>&1 || { \
+	  echo "Chưa có Postgres nguồn — chạy 'make bench-source-up' trước."; exit 1; }; \
+	docker build -f services/loom-task/Dockerfile -t loom/task:$(IMAGE_TAG) .; \
+	flock /tmp/loom-k3d-image-import.lock \
+	  k3d image import loom/task:$(IMAGE_TAG) -c $(CLUSTER) -m direct; \
+	kubectl -n $(NS) delete job measure-client-cost --ignore-not-found; \
+	kubectl -n $(NS) delete configmap measure-client-cost-script --ignore-not-found; \
+	kubectl -n $(NS) create configmap measure-client-cost-script \
+	  --from-file=measure_ingest_path.py=scripts/measure_ingest_path.py \
+	  --from-file=_aiven_guard.py=scripts/_aiven_guard.py \
+	  --dry-run=client -o yaml | kubectl -n $(NS) apply -f -; \
+	kubectl -n $(NS) create job measure-client-cost --image=loom/task:$(IMAGE_TAG) \
+	  --dry-run=client -o json -- python /scripts/measure_ingest_path.py $(ARGS) \
+	| jq '.spec.backoffLimit = 0 | .spec.template.spec.containers[0].imagePullPolicy = "IfNotPresent" | .spec.template.spec.containers[0].volumeMounts = [{"name":"script","mountPath":"/scripts"}] | .spec.template.spec.volumes = [{"name":"script","configMap":{"name":"measure-client-cost-script"}}] | .spec.template.spec.containers[0].env = [{"name":"MINIO_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-user"}}},{"name":"MINIO_SECRET_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-password"}}},{"name":"BENCH_SOURCE_USER","valueFrom":{"secretKeyRef":{"name":"bench-source","key":"username"}}},{"name":"BENCH_SOURCE_DBNAME","valueFrom":{"secretKeyRef":{"name":"bench-source","key":"dbname"}}},{"name":"BENCH_SOURCE_PASSWORD","valueFrom":{"secretKeyRef":{"name":"bench-source","key":"password"}}},{"name":"BENCH_SOURCE_HOST","value":"bench-pg"}]' \
+	| kubectl -n $(NS) apply -f -; \
+	elapsed=0; phase=""; \
+	while [ "$$phase" != "Complete" ] && [ "$$phase" != "Failed" ]; do \
+	  if [ "$$elapsed" -ge 3600 ]; then \
+	    echo "Job không kết thúc (Complete/Failed) sau 3600s — xem trạng thái dưới:"; \
+	    kubectl -n $(NS) describe job measure-client-cost | tail -20; \
+	    kubectl -n $(NS) logs job/measure-client-cost --tail=40 || true; \
+	    kubectl -n $(NS) delete job measure-client-cost --ignore-not-found; \
+	    kubectl -n $(NS) delete configmap measure-client-cost-script --ignore-not-found; \
+	    exit 1; \
+	  fi; \
+	  sleep 5; elapsed=$$((elapsed + 5)); \
+	  succeeded=$$(kubectl -n $(NS) get job measure-client-cost \
+	    -o jsonpath='{.status.succeeded}' 2>/dev/null || true); \
+	  failed=$$(kubectl -n $(NS) get job measure-client-cost \
+	    -o jsonpath='{.status.failed}' 2>/dev/null || true); \
+	  if [ "$$succeeded" = "1" ]; then phase="Complete"; \
+	  elif [ "$$failed" = "1" ]; then phase="Failed"; \
+	  else phase=""; fi; \
+	done; \
+	kubectl -n $(NS) logs job/measure-client-cost; \
+	kubectl -n $(NS) delete job measure-client-cost --ignore-not-found; \
+	kubectl -n $(NS) delete configmap measure-client-cost-script --ignore-not-found; \
+	test "$$phase" = "Complete"

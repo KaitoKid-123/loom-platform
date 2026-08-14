@@ -95,8 +95,19 @@ class ReadTuning(BaseSettings):
     `SourceCredentials` sẽ biến một con số chỉnh được thành một khoá bắt buộc
     phải có trong Secret của connection.
 
-    **Mặc định 40 000 đến từ ĐO 3, không phải từ cảm giác.** Cùng đường nạp,
-    cùng nguồn, chỉ đổi số dòng/lô (0,149 GB, 50 lô ở cấu hình 10 000):
+    **CON SỐ NÀY KHÔNG ĐỘC LẬP. Đọc `WriteTuning` TRƯỚC khi đổi nó.** Trần số
+    dòng TRÙNG khi pod chết là `batch_rows x commit_every_batches` — một PHÉP
+    NHÂN, nên nhân đôi `batch_rows` mà không chạm K là nhân đôi trần đó, tức là
+    làm hồi quy một tính chất ĐỘ BỀN trong lúc chỉ định sửa thông lượng. Hai con
+    số vì vậy được chốt CÙNG NHAU ở Giai đoạn 3d (80 000 x 2 = 160 000), và
+    `tests/test_duplicate_row_ceiling.py` canh chính TÍCH đó chứ không canh từng
+    thừa số — một phép canh từng thừa số vẫn xanh khi có người đổi một thừa số.
+
+    **Mặc định 80 000 đến từ ĐO 5, và 40 000 trước đó từ ĐO 3.** Cùng đường nạp,
+    cùng hình dạng dòng, chỉ đổi số dòng/lô.
+
+    ĐO 3 (đường ghi CŨ — một commit catalog cho MỖI lô; 0,149 GB, 50 lô ở cấu
+    hình 10 000):
 
         10 000 dòng/lô -> 1,5 MB/s, RSS đỉnh 402 MiB
         40 000 dòng/lô -> 3,6 MB/s, RSS đỉnh 385 MiB   (+135% thông lượng)
@@ -106,13 +117,39 @@ class ReadTuning(BaseSettings):
     bất kể lô lớn cỡ nào, ĐO 3), nên lô lớn gấp bốn nghĩa là số lần commit giảm
     bốn lần trong khi phần dữ liệu sống trong RAM vẫn chỉ là MỘT lô.
 
-    **Vì sao KHÔNG nâng tiếp — đây là trần, không phải một con số bỏ dở.** ĐO 3
-    đo 100 000 dòng/lô ở RSS đỉnh 587 MiB, VƯỢT `limits.memory` 512Mi của pod nạp
-    (`task.memory` trong `deploy/helm/loom/values.yaml`). Vượt limit là OOMKill,
-    và một pod bị OOMKill không báo được gì cả — `main.run_reporting_the_outcome`
-    nói rõ SIGKILL là một trong ba lớp trường hợp nó KHÔNG phủ — nên hàng
-    `ingest_run` nằm lại ở `running` cho tới vòng đối chiếu của Task 13. Đổi một
-    lần nạp chậm lấy một lần nạp chết-im-lặng là một cuộc đổi tồi.
+    ĐO 5 đo lại trên đường ghi MỚI (`add_files`, `scripts/measure_ingest_rss.py`),
+    trong một pod THẬT, `ru_maxrss` của một tiến trình con riêng cho mỗi cấu hình:
+
+        40 000 dòng/lô -> RSS đỉnh 311 MiB   (phẳng từ lô 7)
+        60 000 dòng/lô -> RSS đỉnh 382 MiB   (phẳng từ lô 8)
+        80 000 dòng/lô -> RSS đỉnh 453 MiB   (phẳng từ lô 3, dư 59 MiB)
+       100 000 dòng/lô -> RSS đỉnh 520 MiB   (CÒN ĐANG LÊN, và đã vượt 512Mi)
+
+    **80 000 là lô LỚN NHẤT ĐO ĐƯỢC LÀ AN TOÀN, không phải một con số bỏ dở.**
+    "An toàn" ở đây có hai điều kiện, và cả hai đều đo được: đỉnh nằm DƯỚI
+    `limits.memory` 512Mi của pod nạp (`task.memory` trong
+    `deploy/helm/loom/values.yaml`), và đường cong đã PHẲNG — tức chi phí là MỘT
+    lô sống trong RAM, nên một lần nạp DÀI HƠN không đọc cao hơn. Cấu hình
+    100 000 trượt cả hai: 520 MiB đã vượt trần, và vì đường cong còn đang lên thì
+    520 chỉ là CHẶN DƯỚI.
+
+    Vượt limit là OOMKill, và một pod bị OOMKill không báo được gì cả —
+    `main.run_reporting_the_outcome` nói rõ SIGKILL là một trong ba lớp trường
+    hợp nó KHÔNG phủ — nên hàng `ingest_run` nằm lại ở `running` cho tới vòng
+    đối chiếu của Task 13. Đổi một lần nạp chậm lấy một lần nạp chết-im-lặng là
+    một cuộc đổi tồi.
+
+    **59 MiB dư KHÔNG phải chỗ để nâng thêm, và ĐO 6 làm biên đó MỎNG HƠN.** Nó là
+    biên cho một hình dạng dòng KHÁC (xem đoạn "vì sao là biến môi trường" dưới
+    đây) và cho phần RSS mà ĐO 5 cố ý KHÔNG bao gồm — lời báo tiến độ qua HTTP
+    không có trong con số 453.
+
+    ĐO 6 đo lại RSS ở CHÍNH 80.000 dòng/lô như một phép đối chiếu phụ (12 mẫu:
+    bốn cấu hình K x 3 lần, mỗi mẫu một tiến trình con riêng): 419,8 - 480,9 MiB,
+    trung vị 457. Trung vị khớp 453 của ĐO 5, nhưng mẫu CAO NHẤT là 480,9 — dư
+    31 MiB, chứ không 59. Đọc con số 59 như một biên đã chốt là đọc một MẪU thành
+    một GIỚI HẠN; biên đo được cho hình dạng dòng này là ~31 MiB, và đó là một lý
+    do nữa để 80.000 là trần chứ không phải một chặng nghỉ.
 
     **Vì sao là biến môi trường chứ không phải một hằng số trong mã.** Con số
     trên chỉ đúng cho HÌNH DẠNG DÒNG đã đo; một bảng nguồn có cột rộng hơn đẩy
@@ -127,7 +164,7 @@ class ReadTuning(BaseSettings):
 
     model_config = _ENV_ONLY
 
-    batch_rows: int = Field(default=40_000, gt=0)
+    batch_rows: int = Field(default=80_000, gt=0)
 
 
 class WriteTuning(BaseSettings):
@@ -140,8 +177,20 @@ class WriteTuning(BaseSettings):
     TRÙNG hơn khi pod chết. Trộn chúng vào một lớp làm hai docstring khác nhau phải
     sống cạnh nhau trong một chỗ.
 
-    **K ĐÁNH ĐỔI: số dòng TRÙNG khi pod chết  <->  thời gian commit.** Đây là câu
-    phải đọc trước mọi câu khác ở đây.
+    **TRẦN SỐ DÒNG TRÙNG LÀ MỘT PHÉP NHÂN: `batch_rows x commit_every_batches`.**
+    Đây là câu phải đọc trước mọi câu khác ở đây, và nó là lý do hai con số được
+    chốt CÙNG NHAU chứ không mỗi cái một lần:
+
+        40.000 x 5 = 200.000     Giai đoạn 3a/3d-bản-đầu
+        80.000 x 5 = 400.000     nâng batch_rows MỘT MÌNH — trần TĂNG GẤP ĐÔI
+        80.000 x 2 = 160.000     chốt của Giai đoạn 3d (giá trị hiện tại)
+
+    Dòng giữa là thứ phải tránh, và nó là một hồi quy IM LẶNG: không test nào đỏ,
+    không log nào lạ, chỉ là số dòng phải đọc lại sau một cú chết tăng gấp đôi.
+    Vì vậy phép canh (`tests/test_duplicate_row_ceiling.py`) khoá TÍCH, không khoá
+    từng thừa số — đổi một thừa số mà không đổi thừa số kia là đúng cái nó bắt.
+
+    **K ĐÁNH ĐỔI: số dòng TRÙNG khi pod chết  <->  thời gian commit.**
 
     * Watermark chỉ tiến SAU một commit thật (`runner.run_incremental`), nên một
       pod chết giữa nhóm làm cả nhóm phải đọc lại — tối đa `K x batch_rows` dòng,
@@ -153,22 +202,49 @@ class WriteTuning(BaseSettings):
       "báo watermark thưa hơn" (5,4 s, 13,5% đồng hồ tường của ĐO 3) tự đạt được
       mà không cần một thay đổi riêng — spec 3d mục 3b.
 
-    **Mặc định 5, và đây là lý do chọn 5 chứ không 1 hay 50.**
+    **Mặc định 2, và đây là lý do chọn 2 chứ không 5 hay 50.**
 
     * `add_files` giữ thời gian commit PHẲNG theo số file trong khoảng đã đo (N =
       1 / 5 / 20 -> 0,56 / 0,62 / 0,61 s — `scripts/probe_iceberg_add_files.py`),
-      nên K = 5 nằm giữa khoảng đó: mỗi commit vẫn rẻ như một commit một-file, và
-      không có ngoại suy nào ra ngoài vùng đã đo.
-    * Với `batch_rows` mặc định 40.000, K = 5 đặt trần dòng trùng ở 200.000 dòng
-      — cùng ĐỘ LỚN với một lô, không cùng độ lớn với cả lần nạp. K = 50 (một
-      commit cho một lần nạp 500.000 dòng) thì trần đó là CẢ BẢNG, tức là mất hẳn
-      tính chất tiến-dần mà `incremental` có và `full` thì không.
-    * Phần thời gian cắt được đã gần hết ở K = 5: nó bỏ 80% số lần commit. K = 20
-      chỉ bỏ thêm 15% nữa (95% so với 80%) trong khi nhân trần dòng trùng lên bốn
-      lần — một cuộc đổi tồi ở phía bên kia.
+      nên MỌI K trong khoảng đó có cùng giá MỖI commit. Tức K không mua thêm được
+      gì ở phía giá-mỗi-commit; nó chỉ đổi SỐ LẦN commit, và số lần commit của cả
+      một lần nạp là `số dòng / (batch_rows x K)` — lại đúng cái TÍCH ở trên.
+    * **K KHÔNG RẺ, và số đo nói thế — đừng đọc câu "phẳng" ở trên thành "K miễn
+      phí".** ĐO 6 (`scripts/measure_ingest_path.py`, báo cáo ở
+      `docs/measurements/2026-08-14-phase-3d-client-cost.md`) đo CHÍNH đường này:
+      80.000 dòng/lô, 500.000 dòng nguồn (7 lô), Postgres TRONG CỤM, 3 mẫu mỗi
+      cấu hình, trung vị:
+
+          K = 1  ->  7 commit,  11,75 s,  74,6 ms/MB,  trần   80.000
+          K = 2  ->  4 commit,   9,25 s,  56,6 ms/MB,  trần  160.000
+          K = 3  ->  3 commit,   8,63 s,  52,4 ms/MB,  trần  240.000
+          K = 5  ->  2 commit,   7,30 s,  43,3 ms/MB,  trần  400.000
+
+      Giá MỖI commit đo được là ~0,78 s và nó PHẲNG (5,41/7, 3,09/4, 2,42/3,
+      1,57/2) — xác nhận `probe_iceberg_add_files` trên đường thật. Chính vì phẳng
+      mà mỗi bậc K bỏ đi được `số commit` x 0,78 s THẬT: đây là một cuộc đổi có
+      giá, không phải một con số tự do.
+    * **Vì sao vẫn là 2:** cửa chặn kết thúc của giai đoạn (nghiệm thu mục 6 — chi
+      phí client/MB <= N, với N = 72 chốt sau khi đo) ĐÃ ĐẠT ở K = 2 với biên 21%
+      (56,6 so với 72), trong khi đường trước 3d trượt ở 94,0. Phần thông lượng mà
+      K = 3 hoặc K = 5 mua thêm là phần giai đoạn này KHÔNG CẦN để đạt cửa chặn —
+      còn trần dòng trùng thì là thứ nó không có quyền chi. Giá của lựa chọn đó,
+      ghi ra để lần sau nâng K là một quyết định CÓ SỐ chứ không phải một cảm giác:
+      4,2 ms/MB so với K = 3, và 13,3 ms/MB so với K = 5.
+    * K = 50 (một commit cho một lần nạp 500.000 dòng) thì trần đó là CẢ BẢNG,
+      tức là mất hẳn tính chất tiến-dần mà `incremental` có và `full` thì không.
+
+    **Vì sao 160.000 chứ không giữ nguyên 200.000 của 3a.** 200.000 không phải một
+    ngưỡng ai đó chứng minh là đúng — nó là TÍCH tình cờ của hai con số chọn riêng.
+    Khi cả hai được chọn cùng lúc thì điều kiện đúng là "trần KHÔNG được tăng", và
+    K = 2 thoả nó với biên (160.000 < 200.000) thay vì đúng bằng. K = 3 (240.000)
+    cũng nằm trong vùng đã đo và nhanh hơn 4,2 ms/MB, nhưng nó TĂNG trần 20% —
+    và Giai đoạn 3d là một giai đoạn HIỆU NĂNG: nó không có mandate để chi một
+    tính chất độ bền, nhất là khi cửa chặn của nó đã đạt mà không cần chi.
 
     K = 1 là hành vi CHÍNH XÁC của Giai đoạn 3a (một commit và một lời báo mỗi lô)
     và nó vẫn chạy được, nên hạ về 1 là đường lùi nếu dòng trùng thành vấn đề thật.
+    Trần khi đó là 80.000 — vẫn là TÍCH, chỉ với K = 1.
 
     `gt=0`: `run_incremental` cũng từ chối số không dương, nhưng nó từ chối sau khi
     connector đã mở — một cấu hình vô nghĩa nên chết ở chỗ nó được đọc.
@@ -176,7 +252,7 @@ class WriteTuning(BaseSettings):
 
     model_config = _ENV_ONLY
 
-    commit_every_batches: int = Field(default=5, gt=0)
+    commit_every_batches: int = Field(default=2, gt=0)
 
 
 class SourceCredentials(BaseSettings):
