@@ -550,6 +550,109 @@ probe-read-cost:  ## Đo 4 GĐ3a — tách chi phí ĐƯỜNG TRUYỀN khỏi ch
 	@# lệnh, không vào log, không vào progress.json.
 	uv run python scripts/probe_read_path_cost.py $(ARGS)
 
+.PHONY: probe-read-cost-pod
+probe-read-cost-pod: check-context  ## Đo 4b GĐ3a — CÙNG phép đo đó nhưng TỪ TRONG CỤM
+	@# Đo 4 chạy trên HOST và để lại ĐÚNG một khoảng trống: trần 11,14 MB/s là
+	@# trần của HOST, còn ĐO 3 và pod nạp thật chạy TRONG CỤM. Suy ra từ host cho
+	@# một bảng thật là 16,12s; ĐO 3 đo trong cụm 20,4s — ~27% chưa quy được, và
+	@# có ĐÚNG hai ứng viên: chi phí chạy trong pod, và chi phí quét bảng thật
+	@# (thứ `generate_series` không có). Target này đo ứng viên THỨ NHẤT bằng
+	@# cách chạy CÙNG MỘT SCRIPT, cùng câu SQL, cùng hình dạng dòng — chỉ đổi chỗ
+	@# đứng. Hiệu hai lần chạy LÀ chi phí pod, không còn lẫn với thứ gì khác.
+	@#
+	@# CHẠY LẠI `make probe-read-cost` (host) NGAY TRƯỚC HOẶC SAU, đừng so với số
+	@# đã in trong báo cáo cũ: băng thông internet trôi theo giờ (Đo 4 đã đo RTT
+	@# 34,5 ms; một lần đo lại hôm sau ra 46 ms). So một lần chạy trong cụm HÔM
+	@# NAY với một lần chạy trên host HÔM QUA thì hiệu thu được là "pod + trôi
+	@# mạng", và không tách được hai thứ đó nữa — đúng cái lỗi mà target này sinh
+	@# ra để sửa.
+	@#
+	@# Image lấy TỪ `LOOM_TASK_IMAGE` của deployment loom-api, không viết cứng —
+	@# cùng lý do đã ghi ở `measure-ingest`: đó là đúng image mà `JobLauncher`
+	@# dựng pod nạp thật bằng, nên phép đo chạy trên cùng bộ psycopg/pyarrow mà
+	@# production chạy. Một image khác đo một hệ thống khác.
+	@#
+	@# `requests.cpu=50m` khớp `Settings.task_cpu` của pod nạp thật, và KHÔNG có
+	@# `limits.cpu` — vì `JobLauncher.launch` cũng không đặt (xem
+	@# `V1ResourceRequirements(requests={"cpu":..., "memory":...},
+	@# limits={"memory":...})`). Đặt một `limits.cpu` ở đây sẽ đo một pod bị bóp
+	@# CPU mà production không bị, tức là đo một hệ thống khác.
+	@#
+	@# KHÔNG đặt `limits.memory` dù pod nạp thật có: cùng quyết định đã ghi ở
+	@# `measure-ingest` — một phép đo bị OOMKilled không cho ra số nào, nó chỉ
+	@# cho ra một pod chết. Ô `connector` ở `batch_rows=100.000` đã đo RSS đỉnh
+	@# 451 MiB trên host, sát 512Mi; để nguyên limit là tự đặt một cửa sập giữa
+	@# phép đo. RSS vẫn đọc được ở dòng "RSS đỉnh" của tổng kết.
+	@#
+	@# Credential: Secret `loom-db-app` MOUNT THÀNH THƯ MỤC (`/aiven`), không qua
+	@# biến môi trường và không qua dòng lệnh. Hai lý do: (a) khoá `ca.pem` KHÔNG
+	@# phải một tên biến môi trường hợp lệ nên `envFrom` sẽ bỏ qua nó và ghi
+	@# `InvalidVariableNames` (đúng cái bẫy đã ghi ở `infra-local-source-secret`),
+	@# mà `sslmode=verify-full` thì cần chính file đó; (b) giá trị không lộ trong
+	@# `kubectl describe pod`. Script đọc thư mục này qua `--aiven-secret-dir`
+	@# (xem `read_secret_dir`).
+	@#
+	@# `PYTHONUNBUFFERED=1`: `Logger.line` in bằng `print`, và stdout của pod là
+	@# một PIPE chứ không phải tty nên Python gom khối 8 KB. Không có biến này,
+	@# một pod chết giữa chừng (OOM, timeout, mạng đứt) mang theo mọi dòng chưa
+	@# kịp xả — mất cả những mẫu ĐÃ ĐO XONG. Có nó, `kubectl logs` là bản sao
+	@# bền của từng mẫu ngay khi mẫu đó xong, và `progress.json` trong `/tmp` của
+	@# pod (chết theo pod) không còn là bản duy nhất.
+	@#
+	@# `--verify-read-only`: thử CỐ Ý `CREATE TEMP TABLE`/`CREATE TABLE` TRƯỚC
+	@# khi đo và đòi server TỪ CHỐI cả hai. Ràng buộc "không ghi gì vào Aiven"
+	@# phải được chứng minh TỪ TRONG CỤM chứ không suy ra từ lần chạy trên host:
+	@# đây là một connection khác, mở từ một chỗ khác.
+	@#
+	@# Nạp script qua ConfigMap và `backoffLimit=0`: cùng hai lý do đã ghi dài ở
+	@# `measure-ingest-pod` (backtick trong docstring làm `python -c "$$(cat ...)"`
+	@# vỡ thật; thiếu `backoffLimit` thì Kubernetes tự chạy lại một job hỏng).
+	@#
+	@# Chờ TRẠNG THÁI CUỐI CÙNG (`.status.succeeded`/`.status.failed`) thay vì
+	@# `kubectl wait --for=condition=complete`: script thoát khác 0 khi hàng rào
+	@# chỉ-đọc hỏng, và với `backoffLimit=0` một Job như thế KHÔNG BAO GIỜ đạt
+	@# Complete — `kubectl wait` sẽ treo tới hết timeout rồi báo một lỗi chung
+	@# chung thay vì in log cho biết chuyện gì đã xảy ra.
+	@set -eo pipefail; \
+	img=$$(kubectl -n $(NS) get deploy loom-api \
+	  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LOOM_TASK_IMAGE")].value}'); \
+	test -n "$$img" || { echo "không đọc được LOOM_TASK_IMAGE từ deploy/loom-api"; exit 1; }; \
+	echo "image: $$img"; \
+	kubectl -n $(NS) delete job probe-read-cost --ignore-not-found; \
+	kubectl -n $(NS) delete configmap probe-read-cost-script --ignore-not-found; \
+	kubectl -n $(NS) create configmap probe-read-cost-script \
+	  --from-file=probe_read_path_cost.py=scripts/probe_read_path_cost.py \
+	  --dry-run=client -o yaml | kubectl -n $(NS) apply -f -; \
+	kubectl -n $(NS) create job probe-read-cost --image="$$img" --dry-run=client -o json \
+	  -- python /scripts/probe_read_path_cost.py --sources aiven --verify-read-only \
+	     --aiven-secret-dir /aiven --aiven-ca /aiven/ca.pem --state-dir /tmp/probe-read-cost \
+	     $(ARGS) \
+	| jq '.spec.backoffLimit = 0 | .spec.template.spec.containers[0].volumeMounts = [{"name":"script","mountPath":"/scripts"},{"name":"aiven","mountPath":"/aiven","readOnly":true}] | .spec.template.spec.volumes = [{"name":"script","configMap":{"name":"probe-read-cost-script"}},{"name":"aiven","secret":{"secretName":"loom-db-app"}}] | .spec.template.spec.containers[0].env = [{"name":"PYTHONUNBUFFERED","value":"1"}] | .spec.template.spec.containers[0].resources = {"requests":{"cpu":"50m","memory":"512Mi"}}' \
+	| kubectl -n $(NS) apply -f -; \
+	elapsed=0; phase=""; \
+	while [ "$$phase" != "Complete" ] && [ "$$phase" != "Failed" ]; do \
+	  if [ "$$elapsed" -ge 2400 ]; then \
+	    echo "Job không kết thúc sau 2400s — trạng thái:"; \
+	    kubectl -n $(NS) describe job probe-read-cost | tail -20; \
+	    kubectl -n $(NS) logs job/probe-read-cost --tail=40 || true; \
+	    kubectl -n $(NS) delete job probe-read-cost --ignore-not-found; \
+	    kubectl -n $(NS) delete configmap probe-read-cost-script --ignore-not-found; \
+	    exit 1; \
+	  fi; \
+	  sleep 5; elapsed=$$((elapsed + 5)); \
+	  succeeded=$$(kubectl -n $(NS) get job probe-read-cost \
+	    -o jsonpath='{.status.succeeded}' 2>/dev/null || true); \
+	  failed=$$(kubectl -n $(NS) get job probe-read-cost \
+	    -o jsonpath='{.status.failed}' 2>/dev/null || true); \
+	  if [ "$$succeeded" = "1" ]; then phase="Complete"; \
+	  elif [ "$$failed" = "1" ]; then phase="Failed"; \
+	  else phase=""; fi; \
+	done; \
+	kubectl -n $(NS) logs job/probe-read-cost; \
+	kubectl -n $(NS) delete job probe-read-cost --ignore-not-found; \
+	kubectl -n $(NS) delete configmap probe-read-cost-script --ignore-not-found; \
+	test "$$phase" = "Complete"
+
 .PHONY: measure-ingest-pod
 measure-ingest-pod: check-context  ## Đo 1 GĐ3a (CỬA CHẶN) — RAM ghi Iceberg từ TRONG cụm
 	@# Dùng image loom-query đang chạy: nó đã có pyiceberg/pyarrow/icebergkit. Dựng

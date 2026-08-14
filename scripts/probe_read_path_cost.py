@@ -503,7 +503,71 @@ def read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def aiven_dsn(env_path: Path, ca_path: Path) -> str:
+def read_secret_dir(path: Path) -> dict[str, str]:
+    """Đọc credential từ một thư mục Secret của Kubernetes (CREDENTIAL THẬT).
+
+    Cùng dữ liệu như `read_env_file`, khác HÌNH DẠNG: kubelet chiếu một Secret
+    thành MỘT FILE MỖI KHOÁ (`/aiven/username`, `/aiven/password`, ...) chứ
+    không phải một file `key=value`. Dùng khi phép đo chạy TRONG CỤM, nơi
+    `deploy/local/aiven.env` không tồn tại và Secret `loom-db-app` (do
+    `make infra-local-secret` nạp từ chính file đó) là nguồn duy nhất.
+
+    Đọc THẲNG từ file mount vào pod là chủ ý: giá trị không đi qua dòng lệnh
+    (`ps` trong pod không thấy), không qua biến môi trường (`kubectl describe
+    pod` không thấy), và không vào log. Cùng quy ước "credential không bao giờ
+    là một đối số" mà `infra-local-secret` giữ ở phía Makefile.
+
+    `.rstrip("\\n")` chứ không `.strip()`: mật khẩu có thể mở/kết thúc bằng
+    khoảng trắng hợp lệ, và `--from-env-file` của kubectl lưu giá trị NGUYÊN
+    VĂN — chỉ bỏ đúng ký tự xuống dòng mà trình soạn thảo thêm vào.
+    """
+    if not path.is_dir():
+        raise SystemExit(f"--aiven-secret-dir {path} không phải thư mục (Secret đã mount chưa?)")
+    values: dict[str, str] = {}
+    for key in ("host", "port", "dbname", "username", "password"):
+        item = path / key
+        if item.is_file():
+            values[key] = item.read_text().rstrip("\n")
+    return values
+
+
+def verify_read_only(conn: psycopg.Connection[Any]) -> list[str]:
+    """CỐ Ý thử GHI, để hàng rào chỉ-đọc là BẰNG CHỨNG chứ không phải lời hứa.
+
+    `SHOW default_transaction_read_only` chỉ nói tham số ĐƯỢC ĐẶT; nó không
+    chứng minh server THI HÀNH nó. Hai câu dưới đây chứng minh: cả bảng TẠM
+    (thứ nhiều người tưởng là ngoại lệ vì nó không sinh WAL cho bảng thường)
+    lẫn bảng thường đều phải bị từ chối.
+
+    Nếu một câu nào đó THÀNH CÔNG thì giả định nền của cả phép đo đã sai và
+    script DỪNG ngay — `rollback` ở `finally` gỡ lại thứ vừa tạo (connection
+    không autocommit), rồi thoát trước khi bất cứ phép đo nào chạy.
+    """
+    attempts = (
+        ("CREATE TEMP TABLE probe_readonly_check (x int)", "CREATE TEMP TABLE"),
+        ("CREATE TABLE probe_readonly_check_perm (x int)", "CREATE TABLE"),
+    )
+    lines: list[str] = []
+    for statement, label in attempts:
+        rejected = False
+        try:
+            with conn.cursor() as cur:
+                cur.execute(statement)
+        except psycopg.errors.ReadOnlySqlTransaction as exc:
+            rejected = True
+            detail = str(exc).strip().splitlines()[0]
+            lines.append(f"TỪ CHỐI (đúng như mong đợi): {label} -> {type(exc).__name__}: {detail}")
+        finally:
+            conn.rollback()
+        if not rejected:
+            raise SystemExit(
+                f"HÀNG RÀO CHỈ-ĐỌC HỎNG: server CHẤP NHẬN `{label}`. Đã rollback, "
+                "nhưng KHÔNG chạy phép đo nào nữa — sửa DSN trước."
+            )
+    return lines
+
+
+def aiven_dsn(env_path: Path, ca_path: Path, secret_dir: Path | None = None) -> str:
     """DSN tới Aiven, MỞ Ở CHẾ ĐỘ CHỈ-ĐỌC.
 
     `-c default_transaction_read_only=on` là hàng rào THẬT chứ không phải một
@@ -514,13 +578,19 @@ def aiven_dsn(env_path: Path, ca_path: Path) -> str:
 
     `sslmode=verify-full`: xác thực CẢ hostname, dùng CA của Aiven. Chuỗi trả về
     có mật khẩu — KHÔNG log nó.
+
+    `secret_dir` khác None: lấy credential từ một thư mục Secret đã mount thay
+    cho `deploy/local/aiven.env` — đường của bản chạy TRONG CỤM, xem
+    `read_secret_dir`. CA cũng nằm trong Secret đó (`ca.pem`), nên `ca_path`
+    trỏ vào cùng thư mục.
     """
     if not ca_path.exists():
         raise SystemExit(f"Thiếu {ca_path} — tải CA từ console Aiven (xem aiven.env.example).")
-    env = read_env_file(env_path)
+    source: Path = secret_dir if secret_dir is not None else env_path
+    env = read_secret_dir(secret_dir) if secret_dir is not None else read_env_file(env_path)
     missing = [k for k in ("host", "port", "dbname", "username", "password") if not env.get(k)]
     if missing:
-        raise SystemExit(f"{env_path} thiếu khoá: {', '.join(missing)}")
+        raise SystemExit(f"{source} thiếu khoá: {', '.join(missing)}")
     return (
         f"host={env['host']} port={env['port']} dbname={env['dbname']} "
         f"user={env['username']} password={env['password']} "
@@ -913,6 +983,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--aiven-env", type=Path, default=REPO_ROOT / "deploy/local/aiven.env")
     parser.add_argument("--aiven-ca", type=Path, default=REPO_ROOT / "deploy/local/aiven-ca.pem")
     parser.add_argument(
+        "--aiven-secret-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Thư mục Secret Kubernetes đã mount (một file mỗi khoá) thay cho --aiven-env. "
+            "Dùng khi chạy TRONG CỤM — xem read_secret_dir()."
+        ),
+    )
+    parser.add_argument(
+        "--verify-read-only",
+        action="store_true",
+        help="CỐ Ý thử CREATE TEMP TABLE/CREATE TABLE trước khi đo, để chứng minh server TỪ CHỐI",
+    )
+    parser.add_argument(
         "--state-dir", type=Path, default=REPO_ROOT / ".bench-state" / "probe-read-cost"
     )
     parser.add_argument("--fresh", action="store_true", help="Bỏ progress.json cũ, chạy lại từ đầu")
@@ -1002,7 +1086,8 @@ def main(argv: list[str] | None = None) -> int:
 
             if "aiven" in sources:
                 aiven_conn = psycopg.connect(
-                    aiven_dsn(args.aiven_env, args.aiven_ca), connect_timeout=20
+                    aiven_dsn(args.aiven_env, args.aiven_ca, args.aiven_secret_dir),
+                    connect_timeout=20,
                 )
                 progress.env.aiven_version = _scalar(aiven_conn, "SELECT version()")[:70]
                 progress.env.aiven_tls = describe_tls(aiven_conn)
@@ -1020,6 +1105,12 @@ def main(argv: list[str] | None = None) -> int:
                 if progress.env.aiven_read_only.lower() not in ("on", "true"):
                     log.line("TỪ CHỐI CHẠY: connection Aiven KHÔNG ở chế độ chỉ-đọc.")
                     return 1
+                if args.verify_read_only:
+                    # TRƯỚC mọi phép đo, không sau: nếu hàng rào hỏng thì điều
+                    # cần làm là không đo, chứ không phải phát hiện ra sau khi
+                    # đã chạy 7 phút trên một service đang chở control plane.
+                    for line in verify_read_only(aiven_conn):
+                        log.line(f"  {line}")
             elif local_conn is not None:
                 progress.env.cursor_result_format = cursor_result_format(local_conn)
 
