@@ -6,19 +6,34 @@ ra là những con số THẬT, kể cả khi chúng trượt ngưỡng — nh�
 
 ## Ngưỡng, CHỐT TRƯỚC khi đo và không đổi sau khi thấy số
 
-Nền của Giai đoạn 2c (`docs/measurements/2026-08-10-phase-2c-write-path-50gb.md`)
-đo đường GHI thuần (Arrow trong RAM -> Iceberg) ở **24,5 MB/s**. Đường NẠP làm
-đúng việc đó CỘNG một lần đọc từ Postgres nguồn, nên nó chỉ có thể chậm hơn. Câu
-hỏi là chậm hơn BAO NHIÊU, và ngưỡng đã chốt là:
+**NGƯỠNG CŨ 14,7 MB/s KHÔNG HỢP LỆ, và nó đã bị thay.** Nó là 60% của 24,5 MB/s
+— con số đường GHI THUẦN của Giai đoạn 2c (Arrow trong RAM -> Iceberg). Hai lỗi,
+và lỗi thứ hai là lỗi chí mạng:
 
-    >= 60% của 24,5 MB/s  =  >= 14,7 MB/s      ĐẠT
-    <  14,7 MB/s                               KHÔNG ĐẠT — chi phí đọc nguồn
-                                               đang nuốt cả đường ghi, và đó là
-                                               một bài toán KHÁC, có phép điều
-                                               tra riêng của nó.
+  1. 2c chạy HOÀN TOÀN CỤC BỘ, không có nguồn từ xa nào. Một phép đo không hề
+     chạm mạng không thể đặt trần cho một phép đo mà mạng là phần lớn nhất.
+  2. 14,7 MB/s nằm **TRÊN TRẦN VẬT LÝ** của đường truyền tới Aiven. Không cấu
+     hình nào đạt được nó, kể cả một cài đặt hoàn hảo — nên nó không phải một
+     ngưỡng khó, nó là một ngưỡng VÔ NGHĨA.
+
+Ngưỡng đã sửa, đo TRONG CỤM (cùng chỗ đứng với pod nạp), ĐO 4b:
+
+    trần `COPY ... TO STDOUT` thuần, TRONG CỤM = 10,02 MB/s
+        (149,0 MB byte Arrow-tương-đương / 14,869 s trung vị, 8 lần đo, sd 0,758)
+
+    >= 60% của 10,02 MB/s  =  >= 6,01 MB/s      ĐẠT
+    <  6,01 MB/s                                KHÔNG ĐẠT
+
+**TRẦN PHẢI ĐO LẠI, KHÔNG ĐƯỢC CHÉP.** 10,02 là trần của MỘT lần đo, và đường
+truyền trôi ±8% giữa các khối — cùng ngày hôm sau đo lại ra 11,0-11,9 MB/s, tức
+ngưỡng 6,57. Vì vậy ngưỡng thật là một TỈ LỆ ("đạt >= 60% trần đo trên chính
+nguồn đó, cùng môi trường, cùng lần chạy"), không phải hằng số 6,01. Mặc định
+`--threshold-mb-s` là 6,01 vì một con số phải có mặt ở đâu đó, không phải vì nó
+là một hằng số của tự nhiên.
 
 **KHÔNG hạ ngưỡng để cho qua.** Nếu trượt, nói ra là trượt và chỉ vào giai đoạn
-nào đang ăn thời gian.
+nào đang ăn thời gian. (Trạng thái lúc chốt Giai đoạn 3a: TRƯỢT — xem PR đóng
+giai đoạn và kế hoạch 3b.)
 
 MB/s ở đây là **byte Arrow THÔ** (`RecordBatch.nbytes`) chia cho đồng hồ tường
 của vòng lặp lô — cùng đại lượng và cùng ranh giới mà 2c dùng

@@ -212,7 +212,9 @@ loại trừ bằng số. Báo cáo đầy đủ:
 Lần chạy đầu chết ở lô 40/200. MinIO là Go, và **Go không đọc hạn mức cgroup** — bộ thu gom
 rác nhắm theo GOGC, tức theo tốc độ phình của heap, nên nó phình qua trần 320Mi mà không
 biết có trần. Sửa bằng `GOMEMLIMIT=352MiB` (giới hạn MỀM mà GC nhìn thấy) cộng limit cứng
-448Mi; nâng limit không thôi chỉ làm nó chết muộn hơn.
+448Mi; nâng limit không thôi chỉ làm nó chết muộn hơn. (Bộ số 352/448 đó **đã bị Giai đoạn
+3a đo lại và thay** — tải NẠP đẩy heap lên 374 Mi, tức TRÊN giới hạn mềm cũ. Xem mục Giai
+đoạn 3a.)
 
 Vì sao bốn phép đo RAM trước không thấy: tất cả đều đo lúc cụm **nghỉ**. MinIO nghỉ dùng
 223 Mi, MinIO đang ghi dùng 271 Mi heap. Và `memory.current` một mình cũng không đủ — nó
@@ -236,3 +238,119 @@ xem mục Giai đoạn 3a về việc con số đó không phải giới hạn t
 - **Một CTAS mất ~11s ở local**, và gần hết chỗ đó là chuyến đi tới Aiven. Chấp nhận được
   cho một thao tác tạo bảng, nhưng nó đặt sàn cho mọi bài kiểm chạm đường ghi: `make smoke`
   giờ chờ tới `QUERY_TIMEOUT_S` (mặc định 60s) thay vì một trần 3 giây không có căn cứ.
+
+
+## Giai đoạn 3a — đường nạp
+
+Nạp từ một Postgres nguồn vào bảng bronze Iceberg: `POST /ingest` mở một Job, pod nạp đọc
+nguồn qua cursor CÓ TÊN, thêm ba cột bronze, ghi Parquet thẳng lên S3, rồi báo tiến độ về
+control plane. Hai chế độ: `incremental` (theo watermark, mỗi stream một watermark, không
+bao giờ lùi) và `full` (dựng bảng staging rồi tráo ba bước).
+
+`make smoke` mở rộng từ 13 lên **14 phép kiểm**, phép thứ 14 đi hết đường nạp rồi đọc lại
+bronze.
+
+### Cửa chặn hiệu năng: **KHÔNG ĐẠT**, và ngưỡng cũ thì không hợp lệ
+
+Ngưỡng chốt ban đầu là **14,7 MB/s** = 60% của 24,5 MB/s (đường GHI thuần của 2c). Con số
+đó **chưa bao giờ hợp lệ**, vì hai lý do, và lý do thứ hai là lý do chí mạng:
+
+1. 2c đo một đường ghi **hoàn toàn cục bộ**, không có nguồn từ xa nào. Một phép đo không hề
+   chạm mạng không thể đặt trần cho một phép đo mà mạng là phần lớn nhất.
+2. 14,7 MB/s nằm **trên trần vật lý** của đường truyền tới Aiven. Không cấu hình nào đạt
+   được nó, kể cả một cài đặt hoàn hảo — nên nó không phải một ngưỡng khó, nó vô nghĩa.
+
+Trần thật, đo **trong cụm** (cùng chỗ đứng với pod nạp), bằng `COPY … TO STDOUT` thuần —
+không dựng một object Python nào:
+
+> **10,02 MB/s** — 149,0 MB byte Arrow-tương-đương / 14,869 s trung vị, 8 lần đo, sd 0,758.
+> **Ngưỡng đã sửa = 60% × 10,02 = 6,01 MB/s.**
+
+**Trần này phải ĐO LẠI, không được CHÉP.** Đường truyền trôi ±8% giữa các khối: cùng ngày
+hôm sau đo lại ra 11,0–11,9 MB/s, tức ngưỡng 6,57. Nên ngưỡng thật là một **tỉ lệ** — đạt
+≥ 60% trần đo trên chính nguồn đó, cùng môi trường, cùng lần chạy — chứ không phải hằng số
+6,01.
+
+Đo được, và cả hai cấu hình đều trượt:
+
+| cấu hình | MB/s | vừa `LOOM_TASK_MEMORY=512Mi`? |
+|---|---|---|
+| 40.000 dòng/lô | 3,61 | vừa (đỉnh RSS 385 MiB) |
+| 100.000 dòng/lô | 5,10 | **KHÔNG — 587 MiB, OOMKilled** |
+
+Cấu hình duy nhất *chiếu* ra trên ngưỡng (100k dòng/lô cộng cả hai cải tiến, 6,74) là cấu
+hình **bị OOMKilled**, nên nó không phải một lựa chọn triển khai được — nó là một dòng
+trong bảng. **Đó là lý do việc sửa RAM chặn trước việc sửa thông lượng.**
+
+Nút thắt có địa chỉ, không phải một điều bí ẩn: đồng hồ tường trong cụm tách được thành
+`dây 14,48s + psycopg 10,32s + Arrow 2,46s`. Lớp GIỮA — psycopg dựng object Python cho
+500.000 × 7 trường — là lớp trả lời được, và `binary=True` trên cursor có tên cắt được
+**3,3 giây** của nó (dương ở cả 10/10 cặp đo).
+
+Việc hoãn sang 3b, theo THỨ TỰ mà số đo quy định:
+
+| việc | lợi ích ĐO ĐƯỢC |
+|---|---|
+| `add_files` — N file Parquet vào MỘT snapshot | **10,2s**, và đỉnh RSS 281 → 173 MiB (không phải đánh đổi RAM) |
+| báo tiến độ thưa hơn | **5,4s** |
+| `binary=True` trên cursor có tên | **3,3s**, dương 10/10 lần đo |
+| dựng Arrow theo CỘT | RAM, không phải tốc độ — điều kiện để lô 100k dòng vừa trần pod |
+
+### Hai sự cố Aiven, và hàng rào dựng lên sau đó
+
+Cả hai xảy ra THẬT, trên service Aiven của chủ dự án, trong lúc control plane của Loom
+đang sống trên đó — và cả hai đều do một phép ĐO gây ra, không phải mã production.
+
+1. **Hết đĩa, cả service lật sang CHỈ-ĐỌC.** Một phép đo nạp bảng bench lấp đầy gói 1 GB.
+   Hàng rào bản đầu kiểm dung lượng đúng MỘT lần trước khi nạp, ước lượng thiếu byte/dòng,
+   và không tính WAL của chính lần nạp. Ngay cả `DROP SCHEMA` dọn dẹp cũng bị từ chối —
+   phép đo tự nhốt mình.
+2. **Hết connection slot.** Giết một pod đang đọc giữa chừng. `max_connections=20`, và
+   service dùng CHUNG với một ứng dụng khác của chủ dự án.
+
+Kỷ luật rút ra giờ **thi hành được**, không phải nhớ được: `scripts/_aiven_guard.py` là
+định nghĩa DUY NHẤT — DSN luôn mang `-c default_transaction_read_only=on` (không tham số
+nào tắt được), dung lượng kiểm sau MỖI khối chứ không một lần, và đường GHI vào Aiven đã
+bị gỡ khỏi script đo. `packages/connectorkit/tests/test_aiven_measurement_guard.py` canh
+bằng `ast` rằng nó không trôi lại.
+
+### Ngân sách connection: cụm bội chi ngay từ thiết kế
+
+Đo ngày 2026-08-14 trên chính service: lakekeeper 7, `bi_portal` (ứng dụng KHÁC của chủ dự
+án) 5, database `loom` 4 — trên 20 slot. Trong khi đó **quyền** của hai thành phần Loom
+cộng lại là **25**: loom-api 5+5, Lakekeeper v0.9.2 mặc định đọc 10 + ghi 5.
+
+Bội chi không vỡ lúc nghỉ — mỗi pool chỉ phình tới phần nó thật sự cần. Nó vỡ đúng lúc một
+consumer MỚI xin connection đầu tiên, và consumer đó là **pod nạp**. Lakekeeper giờ chặn ở
+đọc 3 + ghi 2, loom-api ở 3+2; `packages/core/tests/test_connection_budget.py` giữ tổng.
+
+### "Trần 1843 Mi" không tồn tại
+
+Con số đó được coi như vật lý suốt Giai đoạn 0 tới 2 — nó định hình limit 448Mi của MinIO,
+384Mi của loom-query, và suýt làm Giai đoạn 3a bị đánh dấu BLOCKED. Bác bỏ ở commit
+`7413758`: máy 16 GB, `HostConfig.Memory` = 0, không cgroup limit, không `--memory`. Mẫu số
+là **RAM máy**, không phải 1843 Mi. Ngân sách 4096 Mi mà `make ram` đối chiếu là **tự đặt
+và KHÔNG được thi hành** — nó ở đó để bắt tăng trưởng bất thường, không phải để mô tả một
+bức tường. Đo lúc chốt giai đoạn: **1404 Mi**.
+
+### MinIO: 271 → 374 Mi
+
+`MEASURED_ANON_MIB = 271` là số của tải GHI 2c. Tải NẠP đo lại trên cùng cgroup: **anon
+374 Mi** (446/448 Mi tổng, 84% không thu hồi được, chưa OOM kill). Với 374, bất biến mà
+phép canh giữ (`GOMEMLIMIT > anon đo được`) đã **VỠ** — giới hạn mềm 352MiB nằm DƯỚI
+working set thật, tức một đích GC không bao giờ tới được: trả CPU liên tục mà không mua
+được an toàn nào. `GOMEMLIMIT` nâng lên **448MiB**, limit cứng lên **576Mi**.
+
+### Nợ đã biết sau Giai đoạn 3a
+
+- **Cửa chặn hiệu năng chưa qua.** Bốn việc ở bảng trên, theo đúng thứ tự đó, và việc RAM
+  chặn trước việc thông lượng.
+- **`binary=True` đổi giá trị `real`** (text gửi shortest-decimal → float64, nhị phân gửi
+  float32 nới rộng). Mảng Arrow vẫn **trùng khít từng bit** vì `_ARROW_TYPE_MAP` khai
+  `real → pa.float32()` — nhưng sự tương đương đó **có điều kiện** ở đúng dòng khai báo ấy.
+  Nếu nhị phân được đưa vào production thì nó cần một phép canh riêng.
+- **Không còn script nào tự dựng được bảng nguồn trên Aiven.** Chạy lại ĐO 3 đòi một người
+  dựng bảng đó CÓ CHỦ Ý với console Aiven đang mở. Đó là ma sát cố ý, không phải thiếu sót.
+- **`make smoke` 13/14 tại thời điểm chốt.** Phép thứ 14 (nạp) trượt vì hết connection
+  slot. Bản sửa ngân sách connection đã có trong repo nhưng **chưa được triển khai vào
+  cụm** — cần một lần `helm upgrade`/Tilt để nó có hiệu lực.

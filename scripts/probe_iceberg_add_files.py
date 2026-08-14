@@ -4,7 +4,11 @@ snapshot duy nhất không, và nếu có thì nó tốn gì.
 ## Vì sao phép thăm dò này tồn tại
 
 ĐO 3 (`docs/measurements/2026-08-13-phase-3a-ingest-path.md`) đo đường nạp ở
-**1,5 MB/s** trên ngưỡng 14,7 MB/s, và tách được chỗ mất thời gian: với
+**1,5 MB/s** trên ngưỡng lúc đó là 14,7 MB/s (ngưỡng ĐÓ đã bị bác bỏ — nó nằm
+TRÊN trần vật lý của đường truyền; ngưỡng đã sửa là 6,01 MB/s = 60% trần
+`COPY` đo trong cụm, xem `measure_ingest_path.py`). Phép tách chỗ mất thời gian
+dưới đây KHÔNG phụ thuộc vào ngưỡng nào cả — nó là tỉ lệ phần trăm của chính
+đồng hồ tường, nên nó vẫn đúng nguyên: với
 `batch_rows=10.000`, **commit catalog chiếm 44,0%** (42,1s trên 97,0s) cộng báo
 tiến độ 21,4% — hai phần ba thời gian là chi phí CỐ ĐỊNH MỖI LÔ trải trên gần
 như không có byte nào. Sàn đo được là ~0,83 giây mỗi commit BẤT KỂ lô to cỡ nào;

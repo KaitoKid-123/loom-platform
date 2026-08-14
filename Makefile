@@ -1015,7 +1015,10 @@ probe-add-files: check-context  ## Thăm dò GĐ3a — add_files có hạ N file
 	@#
 	@# KHÔNG SUY RA ĐƯỢC TỪ PHÉP NÀY: `add_files` gỡ 44,0% thời gian mà ĐO 3
 	@#   quy cho commit catalog, nhưng ĐO 3 cũng đo SÀN của giai đoạn ĐỌC NGUỒN
-	@#   ở ~7,3 MB/s — bằng MỘT NỬA ngưỡng 14,7 MB/s, và không tham số nào phá
+	@#   ở ~7,3 MB/s — dưới ngưỡng ĐÃ SỬA 6,01 MB/s thì nó ở trên, nhưng đó là
+	@#   giai đoạn đọc MỘT MÌNH; cả đường nạp vẫn trượt. (Ngưỡng 14,7 MB/s ghi ở
+	@#   đây trước kia đã bị bác bỏ: nó nằm TRÊN trần vật lý của đường truyền —
+	@#   xem docstring `measure_ingest_path.py`.) Không tham số nào phá
 	@#   được nó. Cắt commit từ 50 xuống 1 là một thắng lợi thật, nhưng nó KHÔNG
 	@#   đưa đường nạp qua cửa chặn; nó chỉ dời nút thắt về đúng chỗ ĐO 3 đã chỉ.
 

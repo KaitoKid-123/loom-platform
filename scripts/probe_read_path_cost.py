@@ -13,7 +13,8 @@ nhân chỉ về hai hướng NGƯỢC NHAU:
   * **Chặn bởi MẠNG/TLS.** Đường internet tới Aiven. Không sửa được bằng mã, và
     nếu đúng thì ngưỡng 14,7 MB/s (suy ra từ đường GHI 2c chạy HOÀN TOÀN cục bộ,
     không có nguồn từ xa nào) chưa bao giờ là một phép so sánh công bằng — ngưỡng
-    phải viết lại.
+    phải viết lại. **Đã viết lại rồi:** phép đo này bác bỏ nó, và ĐO 4b đo trần
+    trong cụm 10,02 MB/s => ngưỡng 6,01 MB/s.
   * **Chặn bởi BIẾN ĐỔI.** `PostgresConnector._read_rows` gom `list[dict]` từ
     psycopg rồi mới dựng `RecordBatch`. Sửa được: dựng theo CỘT thay vì theo DÒNG.
 
@@ -1017,7 +1018,18 @@ def _stats(values: list[float]) -> tuple[float, float, float, float]:
     return (statistics.median(values), min(values), max(values), stdev)
 
 
-def print_summary(progress: Progress, log: Logger) -> None:
+def print_summary(
+    progress: Progress, log: Logger, replayed: set[tuple[str, str, int]] | None = None
+) -> None:
+    """In tổng kết, và NÓI RÕ mẫu nào đo lần này, mẫu nào phát lại từ đĩa.
+
+    Nối lại được là đúng cho một phép đo dài — nhưng bản trước in mẫu PHÁT LẠI
+    y hệt mẫu VỪA ĐO, không một dấu hiệu nào. Một lần chạy không đo gì cả (mọi
+    ô đã có trong `progress.json`) vẫn in ra một bảng đầy đủ trông như vừa đo
+    xong, và đã suýt được báo cáo như một mốc nền mới. Một con số cũ trình bày
+    như số mới là một lỗi ĐỌC, và chỗ sửa nó là chỗ in ra.
+    """
+    replayed = replayed or set()
     env = progress.env
     bpr = progress.arrow_bytes_per_row
     arrow_mb = progress.rows * bpr / 1e6
@@ -1043,10 +1055,26 @@ def print_summary(progress: Progress, log: Logger) -> None:
     log.line(f"RSS đỉnh tiến trình đo: {progress.peak_rss_kb / 1024:.0f} MiB")
 
     log.line("")
+    n_replayed = sum(1 for x in progress.samples if (x.source, x.kind, x.rep) in replayed)
+    n_fresh = len(progress.samples) - n_replayed
+    stamps = [x.completed_at for x in progress.samples if x.completed_at]
+    when = f"{min(stamps)} .. {max(stamps)}" if stamps else "không có dấu thời gian"
+    if n_fresh == 0 and n_replayed:
+        log.line("*** TOÀN BỘ SỐ DƯỚI ĐÂY LÀ PHÁT LẠI TỪ ĐĨA — LẦN CHẠY NÀY KHÔNG ĐO GÌ. ***")
+        log.line(f"*** Đo lúc: {when}. Muốn số mới: --fresh, hoặc một --state-dir khác. ***")
+    elif n_replayed:
+        log.line(
+            f"*** TRỘN: {n_fresh} mẫu đo lần này, {n_replayed} mẫu PHÁT LẠI từ đĩa. "
+            "Cột 'nguồn mẫu' bên dưới nói từng ô thuộc loại nào. ***"
+        )
+        log.line(f"*** Toàn bộ mẫu đo trong khoảng: {when}. ***")
+    else:
+        log.line(f"Mọi mẫu đo trong LẦN CHẠY NÀY, khoảng {when}.")
     log.line("=== SỐ ĐO (mẫu số = byte Arrow, ĐÚNG đại lượng của ĐO 3 và 2c) ===")
     header = (
         f"{'nguồn':<6} {'phép đo':<20} {'n':>2} {'trung vị s':>11} "
-        f"{'min-max s':>15} {'sd s':>7} {'MB/s Arrow':>11} {'MB/s dây':>10}"
+        f"{'min-max s':>15} {'sd s':>7} {'MB/s Arrow':>11} {'MB/s dây':>10} "
+        f"{'nguồn mẫu':>10}"
     )
     log.line(header)
     log.line("-" * len(header))
@@ -1057,13 +1085,22 @@ def print_summary(progress: Progress, log: Logger) -> None:
                 continue
             secs = [s.seconds for s in picked]
             median, lo, hi, sd = _stats(secs)
+            # Ô này đo lần này, phát lại, hay pha trộn? Một ô TRỘN là ô nguy
+            # hiểm nhất: trung vị của nó gộp hai điều kiện mạng khác nhau.
+            n_old = sum(1 for x in picked if (x.source, x.kind, x.rep) in replayed)
+            if n_old == 0:
+                origin = "đo lần này"
+            elif n_old == len(picked):
+                origin = "PHÁT LẠI"
+            else:
+                origin = f"TRỘN {len(picked) - n_old}/{n_old}"
             if kind in KINDS_SERVER:
                 server = [s.server_ms / 1000.0 for s in picked]
                 m_srv, lo_srv, hi_srv, sd_srv = _stats(server)
                 log.line(
                     f"{source:<6} {kind:<20} {len(picked):>2} {m_srv:>11.3f} "
                     f"{lo_srv:>6.3f}-{hi_srv:<8.3f} {sd_srv:>7.3f} "
-                    f"{'(CPU server, không có dây)':>22}"
+                    f"{'(CPU server, không có dây)':>22} {origin:>10}"
                 )
                 continue
             arrow_rate = arrow_mb / median if median > 0 else 0.0
@@ -1072,7 +1109,8 @@ def print_summary(progress: Progress, log: Logger) -> None:
             wire_cell = f"{wire_rate:>10.2f}" if wire_rate else f"{'—':>10}"
             log.line(
                 f"{source:<6} {kind:<20} {len(picked):>2} {median:>11.3f} "
-                f"{lo:>6.3f}-{hi:<8.3f} {sd:>7.3f} {arrow_rate:>11.2f} {wire_cell}"
+                f"{lo:>6.3f}-{hi:<8.3f} {sd:>7.3f} {arrow_rate:>11.2f} {wire_cell} "
+                f"{origin:>10}"
             )
 
     log.line("")
@@ -1348,7 +1386,12 @@ def main(argv: list[str] | None = None) -> int:
             if not progress_path.exists():
                 log.line(f"Không có {progress_path} — chưa có lần chạy nào để in.")
                 return 1
-            print_summary(load_progress(progress_path), log)
+            replayed_only = load_progress(progress_path)
+            print_summary(
+                replayed_only,
+                log,
+                {(x.source, x.kind, x.rep) for x in replayed_only.samples},
+            )
             return 0
 
         sources = [s.strip() for s in args.sources.split(",") if s.strip()]
@@ -1554,7 +1597,7 @@ def main(argv: list[str] | None = None) -> int:
             if local_conn is not None:
                 local_conn.close()
 
-        print_summary(progress, log)
+        print_summary(progress, log, done)
         return 0
     finally:
         log.close()
