@@ -1,4 +1,4 @@
-"""Sáu phép trên `Lakehouse`, chạy trên Lakekeeper THẬT.
+"""Các phép trên `Lakehouse`, chạy trên Lakekeeper THẬT.
 
 `test_new_table_shows_up_in_the_listing` là phép DUY NHẤT bù cho một
 `list_tables` bị hỏng theo kiểu cụ thể — xem docstring của nó.
@@ -8,6 +8,7 @@ import uuid
 
 import pyarrow as pa
 import pytest
+from pyiceberg.exceptions import TableAlreadyExistsError
 
 from loom_iceberg import Lakehouse, build_catalog
 
@@ -136,6 +137,54 @@ def test_create_from_without_replace_still_rejects_an_existing_table(
 
     with pytest.raises(Exception):  # noqa: B017 — lỗi thật từ PyIceberg, không đoán loại
         lakehouse.create_from(qualified, pa.table({"i": pa.array([2], type=pa.int64())}))
+
+
+def test_rename_table_moves_the_data_and_retires_the_old_name(
+    lakehouse: Lakehouse, ns: str
+) -> None:
+    """`rename_table` là MOVE, không COPY — và cả Task 12 dựa vào điều đó.
+
+    Chuỗi tráo bảng của `mode: full` (`loom_task.run_full`) đọc `rename` là "dữ
+    liệu đi theo cái tên": bước 2 gửi bảng đích đi chỗ khác NGUYÊN VẸN, bước 3
+    đưa staging vào. Nếu `rename` là copy thì tên cũ còn lại và bước 3 hỏng vì
+    đích vẫn tồn tại; nếu nó không giữ dữ liệu thì cú tráo là một cách xoá bảng
+    có nhiều bước.
+
+    ĐO 2 mục D đã đo cả hai tính chất này TRONG CỤM một lần (xem
+    `scripts/probe_iceberg_single_commit.py`). Bài này giữ chúng lại trong bộ
+    test chạy mỗi lần push, vì một script đo đã chạy một lần không phát hiện
+    được ngày Lakekeeper đổi hành vi.
+    """
+    source = f"{ns}.t10"
+    destination = f"{ns}.t10_renamed"
+    lakehouse.create_from(source, pa.table({"i": pa.array([1, 2, 3], type=pa.int64())}))
+
+    lakehouse.rename_table(source, destination)
+
+    assert lakehouse.scan(destination).read_all().column("i").to_pylist() == [1, 2, 3]
+    assert not lakehouse.exists(source), "rename phải là MOVE — tên cũ không được còn"
+
+
+def test_rename_table_refuses_to_overwrite_a_name_that_already_exists(
+    lakehouse: Lakehouse, ns: str
+) -> None:
+    """Vế phủ định, và nó là LÝ DO chuỗi tráo của `full` có ba bước.
+
+    ĐO 2 mục D4 đã đo: đè lên một tên đang tồn tại bị TỪ CHỐI
+    (`TableAlreadyExistsError`). Nếu điều này một ngày nào đó trở thành ĐƯỢC
+    PHÉP, cú tráo của `full` gọn lại thành MỘT lời gọi nguyên tử thật, và bài
+    này đỏ để nói ra điều đó thay vì để một chuỗi ba bước tồn tại mãi vì không
+    ai kiểm lại giả định của nó.
+    """
+    target = f"{ns}.t11"
+    staging = f"{ns}.t11_staging"
+    lakehouse.create_from(target, pa.table({"i": pa.array([1], type=pa.int64())}))
+    lakehouse.create_from(staging, pa.table({"i": pa.array([2], type=pa.int64())}))
+
+    with pytest.raises(TableAlreadyExistsError):
+        lakehouse.rename_table(staging, target)
+
+    assert lakehouse.scan(target).read_all().column("i").to_pylist() == [1]
 
 
 def test_scan_size_bytes_matches_pyiceberg_manifest_stats_and_two_files_sum(

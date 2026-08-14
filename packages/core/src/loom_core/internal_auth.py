@@ -22,3 +22,13 @@ Giai đoạn 6. README của `services/loom-query` ghi lại đúng giới hạn
 """
 
 QUERY_SHARED_SECRET_HEADER = "X-Loom-Query-Secret"  # noqa: S105 — tên header, không phải giá trị bí mật
+
+# Bí mật của ĐƯỜNG NGƯỢC LẠI (Giai đoạn 3a, Task 10): pod nạp -> `loom-api`,
+# trên `/internal/ingest/*`. Xem `loom_api.internal_security`.
+#
+# Một header RIÊNG cho một bí mật RIÊNG, không dùng lại tên ở trên. Hai đường
+# này khác nhau ở cả ba mặt — ai gửi, ai kiểm, và giá trị nào — nên một tên
+# chung sẽ chỉ mời hai bên nối nhầm vào nhau và biến việc TÁCH bí mật (lý do
+# `ingest-shared-secret` tồn tại, xem `loom_core.config.Settings.
+# task_shared_secret_key`) thành một sự tách chỉ có trên giấy.
+INGEST_SHARED_SECRET_HEADER = "X-Loom-Ingest-Secret"  # noqa: S105 — tên header, không phải giá trị

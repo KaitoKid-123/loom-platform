@@ -44,10 +44,21 @@ async def require_shared_secret(request: Request) -> None:
     hai đều là closures kiểm bằng có khớp hay không) nhưng chỉ MỘT tráo đổi
     này thôi là mở lại đúng lỗ timing attack mà dòng comment này tồn tại để
     chặn người tới sau lặp lại.
+
+    **So trên BYTES, không trên `str`** (sửa ở Giai đoạn 3a, Task 10, khi lỗi
+    này lộ ra lúc dựng bản tương đương cho `loom-api`):
+    `hmac.compare_digest` trên hai `str` NÉM `TypeError: comparing strings with
+    non-ASCII characters is not supported`. Starlette giải mã header bằng
+    latin-1, nên MỘT byte >127 trong header là đủ để cổng này trả 500 kèm
+    nguyên traceback thay vì 401 — một request không cần xác thực gì mà ép được
+    server 500. Xem `loom_api.internal_security.require_ingest_secret` cho lý
+    do cặp `latin-1`/`utf-8` là đúng chứ không tuỳ tiện.
     """
     settings: Settings = request.app.state.settings
     provided = request.headers.get(QUERY_SHARED_SECRET_HEADER)
-    if provided is None or not hmac.compare_digest(provided, settings.shared_secret):
+    if provided is None or not hmac.compare_digest(
+        provided.encode("latin-1", "replace"), settings.shared_secret.encode("utf-8")
+    ):
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "missing or invalid internal shared secret"
         )

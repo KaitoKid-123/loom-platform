@@ -1,0 +1,98 @@
+# `loom-api` cần gọi Kubernetes API để tạo Job nạp và đọc lại trạng thái của
+# nó — nhưng ĐÚNG MỘT module được phép làm việc đó
+# (`services/api/src/loom_api/jobs.py`, xem docstring module đó và phép canh
+# AST `tests/test_k8s_client_guard.py`). Role dưới đây là ranh giới THỰC THI
+# của lời hứa "hẹp nhất có thể" đó ở phía cụm: nó chỉ cấp đúng những gì
+# `JobLauncher` gọi tới, và Makefile (`helm-validate`) canh cả hai chiều —
+# không được rộng hơn, và không được hẹp tới mức mất luôn quyền tạo Job.
+#
+# KHÔNG cấp `secrets`. `loom-api` chỉ truyền TÊN của một Secret vào Job spec
+# qua `env_from`/`secretKeyRef` (xem comment trong `jobs.py`), không bao giờ
+# tự đọc nội dung Secret đó — đây chính là lời hứa mà `SECRET_REF_RE` ở
+# `packages/core/src/loom_core/item_definitions.py` tồn tại để giữ: ô
+# `secret_ref` trong `ConnectionDefinition` chỉ là một ĐƯỜNG DẪN, không phải
+# mật khẩu. Cấp `get`/`list` lên secrets ở đây sẽ dỡ bỏ lời hứa đó: một lỗi SQL
+# injection trong API khi đó có đường đọc thẳng mật khẩu database NGUỒN qua
+# Kubernetes API, thay vì chỉ đọc được tên một Secret.
+#
+# KHÔNG cấp `deployments`. Tạo Deployment nghĩa là chạy một workload sống mãi,
+# nằm ngoài vòng đời của bất kỳ run nạp nào — trái với mô hình "Job một lần,
+# `backoff_limit=0`, tự dọn sau `ttl_seconds_after_finished`" mà `jobs.py`
+# dựng nên. Không có lý do nghiệp vụ nào ở Giai đoạn 3a cần một workload dài
+# hạn do `loom-api` tự tạo.
+#
+# KHÔNG cấp `jobs/status`, và đó là một quyết định chứ không phải một chỗ quên.
+# RBAC coi subresource `jobs/status` là một resource RIÊNG: `get` trên `jobs`
+# KHÔNG cho `get` trên `jobs/status`. `JobLauncher.status` vì vậy gọi
+# `read_namespaced_job` chứ không phải `read_namespaced_job_status` — hai lời
+# gọi trả về CÙNG một `V1Job` với cùng `.status`, nên thêm một resource vào Role
+# ở đây sẽ mua đúng số không. Task 15 đã gặp chiều ngược lại trên cụm thật: khi
+# `jobs.py` còn gọi bản `_status`, `GET /api/v1/ingest/{run_id}` trả 500 kèm
+# "cannot get resource \"jobs/status\"" mỗi lần run chưa kết thúc.
+#
+# KHÔNG cấp `pods/exec`. `exec` là một shell vào bên trong pod của người khác —
+# không phải thứ `JobLauncher.status` (chỉ đọc `.status.active/succeeded/
+# failed`, xem docstring hàm đó) hay việc đọc `pods/log` để hiển thị log khi
+# một run thất bại cần tới.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "loom.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loom.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "loom.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loom.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+rules:
+  # `JobLauncher.launch` tạo Job (create); một lần submit lại đọc lại/dọn Job
+  # cùng tên (get/list/delete) — tên Job tất định theo `run_id`, xem
+  # docstring `job_name` trong jobs.py về vì sao submit lại phải vô hại.
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - create
+      - get
+      - list
+      - delete
+  # get/list pods + get pods/log: tra trạng thái pod và đọc log khi một run
+  # nạp thất bại. KHÔNG kèm pods/exec — xem lý do ở đầu file.
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "loom.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loom.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "loom.fullname" . }}-api
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "loom.fullname" . }}-api

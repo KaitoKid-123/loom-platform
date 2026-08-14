@@ -16,7 +16,9 @@ from loom_api.routers import (
     auth,
     domains,
     health,
+    ingest,
     internal,
+    internal_ingest,
     items,
     query,
     roles,
@@ -101,6 +103,14 @@ def create_app(
     app.state.user_store = store
     app.state.verify_id_token = verify_id_token
     app.state.query_http = query_client
+    # LUÔN là None ở đây, khác hẳn ba collaborator ở trên.
+    # `JobLauncher.__init__` nạp kubeconfig (xem `jobs.py`), nên dựng một cái ở
+    # đây sẽ giết mọi `create_app()` trên máy không ở trong cụm: CI, và mọi unit
+    # test hiện có. `routers/ingest.py::_launch` dựng nó lười, ở lần nạp đầu
+    # tiên, và ghi ngược lại đúng thuộc tính này. Test thay bằng một double
+    # SAU khi app đã dựng (`app.state.job_launcher = ...`), đúng cách
+    # `test_query_proxy_api.py` thay `app.state.query_http`.
+    app.state.job_launcher = None
 
     # Phải là lệnh add_middleware() CUỐI CÙNG. Starlette bọc middleware theo thứ
     # tự đăng ký đảo ngược, nên cái thêm sau cùng chạy ngoài cùng — vào trước
@@ -114,6 +124,7 @@ def create_app(
     app.include_router(workspaces.router, prefix="/api/v1")
     app.include_router(items.router, prefix="/api/v1")
     app.include_router(query.router, prefix="/api/v1")
+    app.include_router(ingest.router, prefix="/api/v1")
     app.include_router(roles.router, prefix="/api/v1")
     app.include_router(search.router, prefix="/api/v1")
     app.include_router(audit.router, prefix="/api/v1")
@@ -122,4 +133,10 @@ def create_app(
     # này (xem `routers/internal.py`), nên `/internal` không có route nào để dò
     # từ bên ngoài cluster — bảo vệ nằm ở đó, không ở dependency xác thực.
     app.include_router(internal.router, prefix="/internal")
+    # Cũng KHÔNG `/api/v1`, cùng lý do ranh giới ingress như dòng trên — nhưng
+    # router NÀY còn có thêm một cổng bí mật chia sẻ ở cấp router
+    # (`internal_security.require_ingest_secret`), vì người gọi nó là một pod
+    # nạp trong cùng namespace chứ không phải `loom-query`. Xem docstring
+    # `routers/internal_ingest.py` cho lý do hai router không gộp làm một.
+    app.include_router(internal_ingest.router, prefix="/internal/ingest")
     return app

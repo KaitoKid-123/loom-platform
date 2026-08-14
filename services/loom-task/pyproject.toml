@@ -1,0 +1,41 @@
+[project]
+name = "loom-task"
+version = "0.1.0"
+description = "Ảnh chạy MỘT lần rồi chết: đọc nguồn, ghi bronze, báo tiến độ về loom-api"
+requires-python = ">=3.12"
+dependencies = [
+    # `loom_core.internal_auth` (tên header) và `loom_core.cursor` (parse/format
+    # watermark) + `loom_core.schemas` (chính các model mà `/internal/ingest/*`
+    # nhận và trả). Dùng CHUNG model với control plane chứ không tự khai lại
+    # hình dạng JSON: một lần đổi trường ở `loom-api` mà pod không biết sẽ là
+    # một `ValidationError` ồn ào ở pod, không phải một trường đọc ra `None`.
+    "loom-core",
+    # `Connector`/`PostgresConnector`/`StreamState`. Nó tự kéo `loom-core` theo
+    # (xem `packages/connectorkit/pyproject.toml`) — dòng trên vẫn cần vì service
+    # NÀY import trực tiếp, và một dependency bắc cầu không phải một lời hứa.
+    "loom-connector",
+    # `Lakehouse`/`build_catalog` — đường ghi bronze thật (`loom_task.sink`).
+    # KHÔNG khai `loom-storage` ở đây dù `loom-iceberg` kéo nó theo: `loom_task`
+    # không import `loom_storage` ở bất kỳ dòng nào, và khai một dependency mình
+    # không dùng là một lời hứa sai theo hướng còn lại của chú thích ở trên. Nó
+    # VẪN phải có mặt ở COPY layer của Dockerfile, vì `uv sync` phải phân giải
+    # được mọi member workspace bắc cầu — xem chú thích ở đó.
+    "loom-iceberg",
+    "httpx>=0.28",
+    # `add_bronze_columns` dựng `RecordBatch` — pyarrow là kiểu dữ liệu đi qua
+    # toàn bộ đường nạp, không phải chi tiết cài đặt của connector.
+    "pyarrow>=18.0",
+    "structlog>=24.4",
+]
+
+[tool.uv.sources]
+loom-core = { workspace = true }
+loom-connector = { workspace = true }
+loom-iceberg = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom_task"]

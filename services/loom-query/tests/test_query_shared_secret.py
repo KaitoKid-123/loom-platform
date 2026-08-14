@@ -74,6 +74,35 @@ async def test_wrong_secret_is_rejected_with_401_not_500_or_403(
     assert response.status_code == 401
 
 
+async def test_a_header_with_non_ascii_bytes_is_401_not_500(
+    fake_authz: FakeAuthz, principal: Principal
+) -> None:
+    """Lỗi THẬT, tìm ra ở Giai đoạn 3a Task 10 khi dựng bản tương đương cho
+    `loom-api`, và đã dựng lại được ở CẢ HAI service trước khi sửa.
+
+    `hmac.compare_digest` trên hai `str` ném `TypeError: comparing strings with
+    non-ASCII characters is not supported`; Starlette giải mã header bằng
+    latin-1, nên một byte >127 trong header là đủ để cổng này trả 500 kèm
+    nguyên traceback thay vì 401. Đây đúng là trường hợp mà
+    `test_wrong_secret_is_rejected_with_401_not_500_or_403` ngay trên ĐẶT TÊN
+    nhưng không chạm tới: nó gửi một chuỗi ASCII, và mọi chuỗi ASCII đều đi qua
+    `compare_digest` an toàn.
+
+    Header truyền dưới dạng BYTES THÔ: httpx từ chối mã hoá một `str` ngoài
+    ASCII vào header, nên một phép kiểm viết bằng `str` đỏ ở CLIENT và không
+    bao giờ chạm tới server.
+    """
+    app = create_app(authz=fake_authz)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/query",
+            json=_body(uuid.uuid4(), principal),
+            headers={QUERY_SHARED_SECRET_HEADER.encode(): b"khong-phai-bi-mat\xc3\xa9"},
+        )
+    assert response.status_code == 401
+
+
 async def test_correct_secret_passes_the_gate(fake_authz: FakeAuthz, principal: Principal) -> None:
     """Chốt chống-xanh-rỗng cho hai test trên: nếu header ĐÚNG mà vẫn 401 thì
     cả hai phép kiểm phía trên xanh vì một lý do khác hẳn (mọi request đều

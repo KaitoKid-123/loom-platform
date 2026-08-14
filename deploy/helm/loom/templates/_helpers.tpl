@@ -186,6 +186,15 @@ người so hai bản render với nhau.
 - name: LAKEKEEPER__PG_ENCRYPTION_KEY
   value: {{ .Values.lakekeeper.encryptionKeyLocal | quote }}
 {{- end }}
+# Trần pool. KHÔNG để mặc định: v0.9.2 mặc định đọc 10 + ghi 5 = 15 connection
+# trên một service 20 slot dùng chung với loom-api, với pod nạp, và với một ứng
+# dụng khác của chủ dự án. Lưu ý initContainer `migrate` KHÔNG bị hai biến này
+# chặn (nó dựng pool riêng không đặt max_connections) — đó là một đỉnh ngắn lúc
+# khởi động, và nói ra vì hai biến này không hứa được điều chúng không làm.
+- name: LAKEKEEPER__PG_READ_POOL_CONNECTIONS
+  value: {{ .Values.lakekeeper.readPoolConnections | quote }}
+- name: LAKEKEEPER__PG_WRITE_POOL_CONNECTIONS
+  value: {{ .Values.lakekeeper.writePoolConnections | quote }}
 - name: LAKEKEEPER__LISTEN_PORT
   value: "8181"
 {{- end -}}

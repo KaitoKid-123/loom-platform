@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -370,5 +371,133 @@ class AuditLog(Base):
     request_id: Mapped[str] = mapped_column(String(128), nullable=False)
     summary: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class IngestRun(Base):
+    """Một hàng cho mỗi lần thử nạp một stream nguồn vào bronze.
+
+    Trạng thái: `pending`, `running`, `succeeded`, `failed`. KHÔNG có
+    `cancelled` — chưa có gì tự sinh run nên chưa có gì để huỷ, và một nút Huỷ
+    dựng nửa vời còn tệ hơn là không có.
+
+    `pending` là khoảng trống giữa "hàng vừa được tạo" và "Job đã báo đang
+    chạy". Một run kẹt mãi ở `pending` nghĩa là Job chưa bao giờ khởi động
+    được — thường do sai tên Secret — và vòng reconcile lười của Task 13 PHẢI
+    chuyển nó thành `failed`, không được để nó nằm mãi ở đây.
+
+    **`running` nghĩa là "pod ĐÃ LẤY spec ít nhất một lần", KHÔNG phải "pod còn
+    sống".** Task 10 đặt chuyển tiếp `pending -> running` ở `GET
+    /internal/ingest/{run_id}/spec` (xem `routers/internal_ingest.py`), và đó là
+    tín hiệu DUY NHẤT trong bảng này về việc pod đã chạy. Hệ quả mà Task 13 phải
+    xử lý: một pod bị OOMKill (hoặc node chết, hoặc pod bị xoá) SAU khi lấy spec
+    nằm ở `running` VĨNH VIỄN — không có heartbeat, và `/complete` sẽ không bao
+    giờ tới. Vòng reconcile vì vậy KHÔNG được tin cột này một mình; nó phải đối
+    chiếu với `JobLauncher.status(run_id)` (`jobs.py`), thứ trả về
+    `exists`/`active`/`succeeded`/`failed` đọc từ chính Kubernetes. Điều đó khả
+    thi mà không cần thêm cột nào: `job_name` tất định theo `run_id`, nên trạng
+    thái Job của một run luôn tra được. "`running` + Job không còn tồn tại" là
+    một run đã chết và phải thành `failed`.
+
+    **KHOẢNG TRỐNG ĐÃ BIẾT, ghi tên chứ không xây ở 3a: `start_ingest` không
+    chống trùng.** Không gì ngăn hai hàng `ingest_run` cùng sống cho cùng
+    `(lakehouse_id, connection_id, stream)`, và `job_name` tất định theo
+    `run_id` chứ không theo stream — nên hai lần bấm Nạp cho ra HAI Job cùng
+    đọc nguồn và cùng ghi vào một bảng bronze. `_advance_watermark` đã được làm
+    an toàn với đua nên không ai 500 và watermark không lùi (xem docstring của
+    nó), nhưng đó chỉ chữa phần watermark: CÔNG VIỆC vẫn bị làm hai lần và dữ
+    liệu trùng vẫn vào bronze bất kể ai thắng. Cách chữa đúng chỗ là một 409 ở
+    `start_ingest` khi stream đó đã có run `pending`/`running` — giá trị cao
+    hơn hẳn cái khoá, và nó thuộc đường TẠO run, không thuộc đường callback.
+
+    Pod nạp KHÔNG có credential Postgres nào: nó chỉ lấy spec và báo tiến độ
+    qua `/internal/ingest/*` (khuôn shared-secret đã dùng ở Giai đoạn 2b), nên
+    bảng này chỉ được `loom-api` đọc và ghi — pod không bao giờ đụng tới nó
+    trực tiếp.
+    """
+
+    __tablename__ = "ingest_run"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    lakehouse_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("item.id"), nullable=False, index=True
+    )
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("item.id"), nullable=False
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workspace.id"), nullable=False
+    )
+    # `schema.table` phía nguồn — xem StreamSchema.name ở loom_connector.protocol.
+    stream: Mapped[str] = mapped_column(String(255), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
+    rows_written: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StreamState(Base):
+    """Watermark của một stream — đúng MỘT hàng cho mỗi (lakehouse, connection, stream).
+
+    `cursor_value` là chuỗi, không phải cột có kiểu gốc — khớp `StreamState` ở
+    `loom_connector.protocol`: giá trị đi qua JSON tới pod nạp rồi quay lại, và
+    một timestamp đi vòng qua JSON thì đã mất kiểu. Ép về chuỗi ngay từ đây làm
+    điểm chuyển đổi duy nhất nằm ở connector — nơi biết kiểu gốc — thay vì rải
+    rác khắp nơi.
+
+    `cursor_type` (migration 0006) là thứ TRẢ LẠI kiểu đã mất đó, và nó không
+    phải siêu dữ liệu trang trí: không có nó, phép so "watermark chỉ được tiến"
+    chỉ so được CHUỖI, và trên một cursor `bigint` — trường hợp thường gặp
+    nhất — chuỗi làm watermark kẹt vĩnh viễn ở lần đầu vượt mốc đổi số chữ số
+    (`"1000" > "400"` là `False`), sinh trùng lặp không giới hạn mà không lỗi
+    nào báo ra. Xem `loom_core.cursor`.
+
+    `cursor_type` NULL ĐƯỢC, và null nghĩa là "hàng có từ trước 0006, không
+    biết kiểu". Nó không có mặc định đúng nào để điền: kiểu của một watermark
+    cũ không suy ra được từ bất cứ đâu trong bảng. Đường báo tiến độ vì vậy coi
+    null như một `cursor_type` KHÁC và ĐẶT LẠI watermark thay vì so sánh — cùng
+    lập luận với `cursor_column` đổi, ngay dưới đây.
+
+    UNIQUE trên (lakehouse_id, connection_id, stream) — CỐ Ý KHÔNG có
+    cursor_column trong khoá. Cho phép hai hàng tồn tại nghĩa là đổi
+    cursor_column sẽ để lại một hàng cũ mà lần nạp sau chọn bừa, và giá trị nó
+    mang là một con số thuộc về một thang đo khác hẳn — bỏ sót dữ liệu mà
+    không có lỗi nào báo ra.
+
+    """
+
+    __tablename__ = "stream_state"
+    __table_args__ = (
+        UniqueConstraint(
+            "lakehouse_id",
+            "connection_id",
+            "stream",
+            name="uq_stream_state_lakehouse_connection_stream",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    lakehouse_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("item.id"), nullable=False, index=True
+    )
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("item.id"), nullable=False
+    )
+    stream: Mapped[str] = mapped_column(String(255), nullable=False)
+    cursor_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Một trong `loom_core.cursor.CURSOR_TYPE_ALLOWLIST`, hoặc NULL cho hàng có
+    # từ trước migration 0006 — xem docstring lớp.
+    cursor_type: Mapped[str | None] = mapped_column(String(64))
+    cursor_value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -33,7 +33,16 @@ from .pg_support import POSTGRES_IMAGE, head_revision, run_alembic, sync_url
 pytestmark = pytest.mark.integration
 
 NEW_TABLES = frozenset(
-    {"domain", "workspace", "item", "item_version", "role_assignment", "audit_log"}
+    {
+        "domain",
+        "workspace",
+        "item",
+        "item_version",
+        "role_assignment",
+        "audit_log",
+        "ingest_run",
+        "stream_state",
+    }
 )
 
 # Năm index một phần và một index NULLS NOT DISTINCT — đúng những thứ mà một
@@ -121,6 +130,32 @@ def _new_workspace(conn: sa.Connection, actor: uuid.UUID, name: str) -> uuid.UUI
         {"id": ws_id, "tenant": DEFAULT_TENANT_ID, "name": name, "actor": actor},
     )
     return ws_id
+
+
+def _new_item(
+    conn: sa.Connection, actor: uuid.UUID, ws: uuid.UUID, item_type: str, name: str
+) -> uuid.UUID:
+    """Một item thật — `ingest_run`/`stream_state` có FK tới `item.id`, nên
+    `lakehouse_id`/`connection_id` phải trỏ vào hàng có thật, không phải chèn
+    được UUID bất kỳ."""
+    item_id = uuid.uuid4()
+    conn.execute(
+        sa.text(
+            "INSERT INTO item (id, tenant_id, workspace_id, type, name, display_name,"
+            " definition, definition_hash, created_by, updated_by)"
+            " VALUES (:id, :tenant, :ws, :type, :name, :name, '{}'::jsonb, :hash, :actor, :actor)"
+        ),
+        {
+            "id": item_id,
+            "tenant": DEFAULT_TENANT_ID,
+            "ws": ws,
+            "type": item_type,
+            "name": name,
+            "hash": "x" * 64,
+            "actor": actor,
+        },
+    )
+    return item_id
 
 
 # ---------------------------------------------------------------- lớp 1: schema
@@ -431,3 +466,75 @@ def test_exactly_one_principal_and_principal_type_matches_it(
         )
         is None
     )
+
+
+def test_stream_state_cursor_type_exists_and_stays_nullable(conn: sa.Connection) -> None:
+    """Migration 0006 thêm `cursor_type`, và nó phải NULLABLE trên schema THẬT.
+
+    Hai vế, cả hai đều là quyết định chứ không phải mặc định rơi ra:
+
+    - CÓ MẶT: không có cột này thì phép so "watermark chỉ tiến" chỉ so được
+      CHUỖI, và trên một cursor `bigint` chuỗi làm watermark kẹt vĩnh viễn ở lần
+      đầu vượt mốc đổi số chữ số (xem `loom_core.cursor`).
+    - NULLABLE: `ADD COLUMN ... NOT NULL` không kèm mặc định làm `alembic upgrade
+      head` HỎNG trên mọi database đã có dù chỉ một hàng, còn một mặc định điền
+      bừa (`'bigint'`) sẽ khiến lần báo tiến độ sau đọc một chuỗi ngày tháng như
+      một số nguyên. Null = "hàng có từ trước 0006, không biết kiểu", và đường
+      báo tiến độ ĐẶT LẠI watermark thay vì so sánh.
+
+    Đọc `information_schema` chứ không đọc model: điều đang được khẳng định là
+    migration đã chạy ra đúng schema đó, không phải là model khai đúng.
+    """
+    row = conn.execute(
+        sa.text(
+            "SELECT data_type, is_nullable, character_maximum_length"
+            " FROM information_schema.columns"
+            " WHERE table_name = 'stream_state' AND column_name = 'cursor_type'"
+        )
+    ).one_or_none()
+    assert row is not None, "migration 0006 chưa thêm `stream_state.cursor_type`"
+    assert (row[0], row[1]) == ("character varying", "YES")
+    # Giá trị dài nhất trong `CURSOR_TYPE_ALLOWLIST` là 'timestamp without time
+    # zone' (27 ký tự) — cột phải chứa nổi nó, nếu không một watermark hợp lệ bị
+    # Postgres từ chối ở đúng kiểu ÍT được kiểm nhất.
+    assert row[2] is not None and row[2] >= len("timestamp without time zone")
+
+
+def test_stream_state_allows_only_one_watermark_per_stream(
+    conn: sa.Connection, actor: uuid.UUID
+) -> None:
+    """Thiếu ràng buộc này thì hai watermark cùng tồn tại cho một stream, và lần
+    nạp sau chọn bừa một cái — bỏ sót dữ liệu tuỳ theo cái nào được chọn.
+
+    `uq_stream_state_lakehouse_connection_stream` CỐ Ý không có `cursor_column`
+    trong khoá — hai hàng dưới đây khác nhau đúng ở cột đó, để phép kiểm này cô
+    lập được chính điều đó: đổi cursor_column không được phép mở ra một hàng
+    thứ hai cho cùng một stream.
+    """
+    ws = _new_workspace(conn, actor, "ingest")
+    lakehouse = _new_item(conn, actor, ws, "lakehouse", "lh")
+    connection = _new_item(conn, actor, ws, "connection", "conn")
+
+    insert = (
+        "INSERT INTO stream_state (id, lakehouse_id, connection_id, stream,"
+        " cursor_column, cursor_value)"
+        " VALUES (gen_random_uuid(), :lh, :cid, 'public.orders', :cursor_column, '1')"
+    )
+    base: dict[str, object] = {"lh": lakehouse, "cid": connection}
+
+    assert _attempt(conn, insert, cursor_column="updated_at", **base) is None
+
+    duplicate = _attempt(conn, insert, cursor_column="id", **base)
+    assert duplicate == "uq_stream_state_lakehouse_connection_stream", (
+        "hai watermark cho cùng (lakehouse, connection, stream) phải bị chặn dù "
+        f"cursor_column khác nhau, thấy: {duplicate}"
+    )
+
+    # Đối chứng: cùng lakehouse/connection nhưng KHÁC stream vẫn phải được — ràng
+    # buộc chỉ chặn trùng đúng bộ ba, không chặn mọi hàng của cùng một connection.
+    other_stream = (
+        "INSERT INTO stream_state (id, lakehouse_id, connection_id, stream,"
+        " cursor_column, cursor_value)"
+        " VALUES (gen_random_uuid(), :lh, :cid, 'public.customers', 'updated_at', '1')"
+    )
+    assert _attempt(conn, other_stream, **base) is None

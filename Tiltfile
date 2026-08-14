@@ -35,11 +35,16 @@ BUILD_IGNORE = [
 ]
 
 
-def build_and_import(dockerfile):
+def build_and_import(dockerfile, ref='$EXPECTED_REF'):
     """Build image rồi nạp vào node k3d, và kiểm chứng là nó thật sự tới nơi.
 
     Starlark KHÔNG nối hai string literal đặt cạnh nhau như Python — 'a' 'b' là
     lỗi cú pháp ("got string literal, want ','"). Phải nối bằng '+' tường minh.
+
+    `ref` mặc định là `$EXPECTED_REF` — biến mà Tilt đặt cho lệnh của
+    `custom_build`. Một `local_resource` KHÔNG được Tilt đặt biến đó (nó không
+    theo dõi image nào cả), nên chỗ gọi từ local_resource phải truyền tag tường
+    minh; xem `loom-task-image` phía dưới cho lý do ảnh nạp đi đường đó.
 
     Ba chi tiết dưới đây đều là hậu quả của lỗi đã gặp thật, đừng gỡ:
 
@@ -66,11 +71,11 @@ def build_and_import(dockerfile):
     # về import — sai chỗ, và đi tìm nhầm hướng.
     return '\n'.join([
         'set -e',
-        'docker build -f %s -t $EXPECTED_REF .' % dockerfile,
+        'docker build -f %s -t %s .' % (dockerfile, ref),
         'flock /tmp/loom-k3d-image-import.lock' +
-        ' k3d image import $EXPECTED_REF -c %s -m direct' % K3D_CLUSTER,
-        'docker exec %s crictl inspecti -q docker.io/$EXPECTED_REF >/dev/null || {' % K3D_NODE,
-        '  echo "k3d báo import xong nhưng $EXPECTED_REF KHÔNG có trong %s' % K3D_NODE +
+        ' k3d image import %s -c %s -m direct' % (ref, K3D_CLUSTER),
+        'docker exec %s crictl inspecti -q docker.io/%s >/dev/null || {' % (K3D_NODE, ref),
+        '  echo "k3d báo import xong nhưng %s KHÔNG có trong %s' % (ref, K3D_NODE) +
         ' — xem ghi chú (1) trong Tiltfile" >&2',
         '  exit 1',
         '}',
@@ -159,6 +164,41 @@ k8s_resource('loom-web', port_forwards=['8080:8080'], labels=['app'])
 # Không port-forward: loom-query là ClusterIP nội bộ, không phải thứ trình
 # duyệt/`curl` từ host gọi thẳng — xem docstring `query-service.yaml`.
 k8s_resource('loom-query', labels=['app'])
+
+# Ảnh nạp (`loom-task`, Giai đoạn 3a) đi bằng `local_resource`, KHÔNG bằng
+# `custom_build`, và lý do là kiến trúc chứ không phải sở thích: `custom_build`
+# gắn một image vào các resource k8s tham chiếu nó, còn ảnh này KHÔNG được chart
+# triển khai — `loom-api` phóng một `Job` cho mỗi lần nạp và trỏ tới ảnh qua
+# `Settings.task_image` (xem `loom_api.jobs.JobLauncher`). Một `custom_build`
+# không có resource nào dùng tới là thứ Tilt phải tự xử lý bằng cách nào đó, và
+# "bằng cách nào đó" không phải một hợp đồng để dựa vào.
+#
+# Việc nó vẫn phải chạy ở `tilt up`: `k3d image import` là cách DUY NHẤT ảnh tới
+# được containerd của node (daemon docker của host không phải runtime của cụm —
+# xem ghi chú của hai cờ skips_local_docker/disable_push ở trên), và nếu node
+# không có ảnh thì pod nạp đầu tiên `ImagePullBackOff` đi hỏi docker.io. Nên
+# KHÔNG có `auto_init=False` ở đây, khác `migrate` phía dưới.
+#
+# Tag viết tường minh vì local_resource không có `$EXPECTED_REF`, và nó phải khớp
+# ảnh mà `loom-api` yêu cầu — lệch nhau thì Job hỏi một ảnh không có trong node.
+# Từ Task 15 chuỗi đó KHÔNG còn đến từ mặc định của `loom_core.config.Settings.
+# task_image` nữa: chart truyền `LOOM_TASK_IMAGE = task.image:task.tag` xuống env
+# của `loom-api` (xem `api-deployment.yaml`), nên bản sao phải giữ khớp ở đây là
+# `task.image`/`task.tag` trong `deploy/helm/loom/values.yaml` — hôm nay cả hai
+# đường đều cho ra `loom/task:dev`.
+local_resource(
+    'loom-task-image',
+    cmd=build_and_import('services/loom-task/Dockerfile', ref='loom/task:dev'),
+    # Hai package workspace mà Dockerfile COPY vào layer dependency
+    # (packages/core trực tiếp; packages/connectorkit — bản thân connectorkit lại
+    # phụ thuộc loom-core), CỘNG services/loom-task. Cùng cạm bẫy `loom/api` từng
+    # gặp với packages/core: thiếu một dòng ở đây thì sửa connector mà Tilt không
+    # build lại ảnh nạp, và lần nạp kế tiếp chạy mã cũ.
+    deps=['services/loom-task', 'packages/core', 'packages/connectorkit',
+          'pyproject.toml', 'uv.lock'],
+    ignore=BUILD_IGNORE,
+    labels=['app'],
+)
 
 # Ở local chart không sinh Job migration (values-local đặt migration.enabled=false),
 # vì Tilt áp dụng lại manifest liên tục còn Job thì bất biến. Đường Job vẫn được

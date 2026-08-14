@@ -7,6 +7,12 @@ query:
 web:
   tag: dev
   replicas: 2
+task:
+  # Không có `replicas`: ảnh này chạy dưới dạng Job một-lần do `loom-api` phóng,
+  # không phải một Deployment (xem values.yaml, mục `task`). Chỉ `tag` cần đè —
+  # thiếu dòng này thì dev phóng pod nạp bằng ảnh `:dev` của values.yaml, tình cờ
+  # đúng ở đây và SAI ở prod, đúng loại lỗi chỉ lộ ra ở một môi trường.
+  tag: dev
 ingress:
   host: loom-dev.internal
   # https:// ở dưới giả định TLS được chấm dứt phía trước Ingress này
@@ -21,10 +27,17 @@ oidc:
   redirectUrl: https://loom-dev.internal/api/v1/auth/callback
   # Dev là môi trường triển khai thật — không được kế thừa khoá ký công khai
   # trong values.yaml. `Settings` sẽ từ chối khởi động nếu quên (xem Task 2).
-  # PHẢI có đủ BA khoá: `oidc-client-secret`, `session-secret`, và (Task
-  # 10/11) `query-shared-secret` — thiếu khoá thứ ba làm pod `loom-api` VÀ
-  # `loom-query` đều CreateContainerConfigError (secretKeyRef không tìm thấy
-  # khoá), không phải một 401 âm thầm lúc runtime.
+  # PHẢI có đủ BỐN khoá: `oidc-client-secret`, `session-secret`, (Task 10/11)
+  # `query-shared-secret`, và (Giai đoạn 3a) `ingest-shared-secret` — thiếu
+  # bất kỳ khoá nào cũng làm pod CreateContainerConfigError (secretKeyRef
+  # không tìm thấy khoá), không phải một 401 âm thầm lúc runtime.
+  #
+  # `ingest-shared-secret` là khoá MỚI của Giai đoạn 3a và nó phải được thêm
+  # TRƯỚC khi nâng cấp: đặt `oidc.existingSecret` làm `secret.yaml` không
+  # render, nên chart KHÔNG tự tạo khoá này hộ — External Secrets/Vault phải
+  # đồng bộ nó vào, cùng đường với `query-shared-secret`. Nó phải là một giá
+  # trị KHÁC `query-shared-secret`, không phải bản sao: xem
+  # `loom_core.config.Settings.task_shared_secret_key`.
   existingSecret: loom-app-secrets
 storage:
   # dev/prod KHÔNG chạy MinIO trong cụm — deploy/infra/minio.yaml chỉ dành cho

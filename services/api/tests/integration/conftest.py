@@ -31,7 +31,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, event
+from sqlalchemy import delete, event, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -50,8 +50,10 @@ from loom_api.models import (
     AppUser,
     AuditLog,
     Domain,
+    IngestRun,
     Item,
     RoleAssignment,
+    StreamState,
     Workspace,
 )
 from loom_core.config import get_settings
@@ -619,6 +621,34 @@ async def api_world(
                     # app_user — thiếu dòng này thì lệnh xoá user vỡ vì khoá ngoại
                     # và fixture im lặng để lại dữ liệu, đúng lỗi Task 19 đã gặp.
                     await session.execute(delete(AuditLog).where(AuditLog.actor_user_id == user_id))
+                    # TRƯỚC mọi lệnh xoá `item`, và cho CẢ HAI workspace một
+                    # lượt: `ingest_run.lakehouse_id`/`connection_id` có khoá
+                    # ngoại tới `item.id` (migration 0005), và hai id đó KHÔNG
+                    # buộc phải cùng workspace với `ingest_run.workspace_id` —
+                    # một run hợp lệ có lakehouse ở ws_a và connection ở ws_b
+                    # (xem `test_ingest_api.py`). Xoá theo từng workspace bên
+                    # trong vòng lặp dưới đây sẽ đúng chỉ nhờ THỨ TỰ, không
+                    # nhờ lược đồ, và vỡ ngay khi ai đó đảo hai phần tử.
+                    await session.execute(
+                        delete(IngestRun).where(IngestRun.workspace_id.in_((ws_a, ws_b)))
+                    )
+                    # `stream_state` cũng phải đi TRƯỚC `item`, cùng lý do khoá
+                    # ngoại — nhưng KHÔNG lọc được theo workspace: bảng này cố
+                    # ý không có cột `workspace_id` (watermark thuộc về một
+                    # STREAM, xem `models.py`). Lọc theo chính hai cột khoá
+                    # ngoại của nó, và cho CẢ HAI workspace một lượt: một
+                    # lakehouse ở ws_a với một connection ở ws_b là cấu hình
+                    # hợp lệ (xem `test_ingest_api.py`), nên một hàng
+                    # `stream_state` bắc qua hai workspace tồn tại được.
+                    lakehouse_or_connection_here = select(Item.id).where(
+                        Item.workspace_id.in_((ws_a, ws_b))
+                    )
+                    await session.execute(
+                        delete(StreamState).where(
+                            StreamState.lakehouse_id.in_(lakehouse_or_connection_here)
+                            | StreamState.connection_id.in_(lakehouse_or_connection_here)
+                        )
+                    )
                     for ws_id in (ws_a, ws_b):
                         await session.execute(delete(Item).where(Item.workspace_id == ws_id))
                         await session.execute(

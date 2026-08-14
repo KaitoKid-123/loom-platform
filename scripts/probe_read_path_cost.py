@@ -1,0 +1,1612 @@
+"""Đo 4 của Giai đoạn 3a — TÁCH chi phí ĐƯỜNG TRUYỀN khỏi chi phí BIẾN ĐỔI trên đường đọc.
+
+Đây là một PHÉP ĐO, không phải một tính năng. Nó không có người dùng, không có
+đường vào từ API, và không có gì trong `services/` gọi tới nó.
+
+## Câu hỏi, và vì sao nó quyết định hướng đi
+
+ĐO 3 (`docs/measurements/2026-08-13-phase-3a-ingest-path.md`) đo giai đoạn ĐỌC
+NGUỒN của đường nạp ở trần **~7,3 MB/s** (149 MB byte Arrow / ~20,4 s ở
+`batch_rows=100.000`), và KHÔNG tách được hai nguyên nhân có thể — hai nguyên
+nhân chỉ về hai hướng NGƯỢC NHAU:
+
+  * **Chặn bởi MẠNG/TLS.** Đường internet tới Aiven. Không sửa được bằng mã, và
+    nếu đúng thì ngưỡng 14,7 MB/s (suy ra từ đường GHI 2c chạy HOÀN TOÀN cục bộ,
+    không có nguồn từ xa nào) chưa bao giờ là một phép so sánh công bằng — ngưỡng
+    phải viết lại. **Đã viết lại rồi:** phép đo này bác bỏ nó, và ĐO 4b đo trần
+    trong cụm 10,02 MB/s => ngưỡng 6,01 MB/s.
+  * **Chặn bởi BIẾN ĐỔI.** `PostgresConnector._read_rows` gom `list[dict]` từ
+    psycopg rồi mới dựng `RecordBatch`. Sửa được: dựng theo CỘT thay vì theo DÒNG.
+
+Script này đo bốn ô, cùng hình dạng dòng và cùng số dòng:
+
+    | nguồn  | COPY ... TO STDOUT (thuần dây)  | qua đường của connector      |
+    |--------|---------------------------------|------------------------------|
+    | Aiven  | 1. trần MẠNG                    | 2. phải dựng lại ~7,3 MB/s   |
+    | local  | 3. cùng đường dây, KHÔNG internet | 4. chi phí MÃ, bỏ mạng đi   |
+
+và hai ô phụ tách tiếp ô 2/ô 4 làm ba lớp, vì "dây + psycopg + Arrow" là BA thứ
+chứ không phải hai:
+
+    copy_text/copy_binary  dây thuần, gần như không dựng object Python nào
+    cursor_drain           dây + psycopg dựng một `dict` mỗi dòng, KHÔNG có Arrow
+    connector              dây + dict + `_rows_to_record_batch`  <- đường ĐO 3 đo
+
+Hiệu `connector - cursor_drain` là chi phí Arrow THUẦN; hiệu
+`cursor_drain - copy_text` là chi phí dựng object psycopg thuần.
+
+## ĐO 4c — thêm hai ô NHỊ PHÂN, vì lớp psycopg mới là lớp phải trả lời
+
+ĐO 4b tách được đồng hồ tường TRONG CỤM làm ba: `dây 14,48s + psycopg 10,32s +
+Arrow 2,46s = 27,25s`. Lớp GIỮA — psycopg dựng object Python — chiếm 10,32 giây,
+tức connector cộng thêm 88% lên trên `COPY` thô, trong khi ngưỡng đã sửa (60%
+của trần trong cụm 10,02 MB/s = 6,01 MB/s) chỉ cho phép cộng thêm 67%. Nên
+giai đoạn 3a trượt ở ĐÚNG lớp đó, và không phép tối ưu nào ở phía sau (commit
+catalog, báo tiến độ) gỡ lại được.
+
+`PostgresConnector._read_rows` mở cursor có tên KHÔNG có `binary=True`, nên kết
+quả về ở ĐỊNH DẠNG TEXT và psycopg phải phân tích từng trường thành object
+Python: 500.000 dòng x 7 cột = 3,5 triệu phép chuyển. Định dạng nhị phân bỏ
+bước phân tích text đó (server gửi thẳng biểu diễn nhị phân, loader chỉ giải
+gói). Hai ô mới đo xem nó đáng bao nhiêu:
+
+    cursor_drain_binary    cursor có tên + binary=True, KHÔNG dựng Arrow
+    connector_binary       cùng thế + `_rows_to_record_batch`
+
+Ô thứ hai KHÔNG thừa: nhị phân đổi KIỂU OBJECT psycopg trả ra, nên bước dựng
+Arrow có thể nhanh hơn HOẶC chậm hơn, và chỉ đo mới biết chiều nào.
+
+**Nhanh hơn mà đổi GIÁ TRỊ thì không phải một thắng lợi.** libpq nhận đúng MỘT
+`resultFormat` cho cả tập kết quả, còn psycopg thì tra loader theo (oid, định
+dạng) — kiểu nào KHÔNG có loader nhị phân rơi về loader mặc định, thứ trả
+`bytes` THÔ. Đó là một phép đổi giá trị âm thầm, đúng loại lỗi mà
+`_needs_text_cast` vừa được viết ra để xoá. Nên `--binary-typecheck` đọc CÙNG
+một hàng qua cả hai định dạng và so từng giá trị, cộng với định dạng dây THẬT
+của từng cột (`PGresult.fformat(i)`) — đo, không đoán.
+
+## TUYỆT ĐỐI KHÔNG GHI VÀO AIVEN — và điều đó được THI HÀNH, không phải hứa
+
+Service Aiven nguồn là gói nhỏ (1 CPU / 1 GB RAM / 1 GB đĩa) và nó chở CONTROL
+PLANE ĐANG SỐNG của Loom cùng database của Lakekeeper. ĐO 3 đã đẩy nó qua mép
+một lần: seed 1,2 triệu dòng làm cả service chuyển sang CHỈ-ĐỌC trong lúc control
+plane đang chạy, và chính lệnh dọn dẹp cũng bị từ chối.
+
+Nên ở đây KHÔNG có `CREATE TABLE`, `INSERT`, `COPY FROM`, `DROP`, bảng tạm, hay
+bất cứ thứ gì tiêu đĩa/sinh WAL. Dòng được sinh SERVER-SIDE bằng
+`generate_series` — nó không chạm một page nào trên đĩa và không sinh một byte
+WAL nào.
+
+Và điều đó không nằm ở thiện chí của người viết: mọi connection tới Aiven mở với
+`-c default_transaction_read_only=on` (xem `_aiven_dsn`), nên nếu một dòng nào đó
+trong file này lỡ tay ghi, Postgres TỪ CHỐI nó thay vì thực hiện. Script cũng đọc
+`sum(pg_database_size(...))` TRƯỚC và SAU cả lần chạy và in cả hai — bằng chứng
+số, không phải lời khẳng định.
+
+## "BYTE" ở đây là gì — hai đại lượng, KHÔNG được trộn
+
+  * **byte Arrow** — `RecordBatch.nbytes`, biểu diễn trong RAM. Đây là đại lượng
+    của ĐO 3 và của 2c, nên nó là MẪU SỐ CHÍNH ở mọi ô, kể cả các ô COPY (ở đó
+    nó là "byte Arrow mà ngần ấy dòng SẼ dựng ra" = số dòng nhân byte/dòng đã hiệu
+    chỉnh). Chỉ như thế bốn ô mới so được với nhau VÀ với 7,3 MB/s của ĐO 3.
+  * **byte dây** — số byte thật sự nhận từ socket ở các ô COPY. In RIÊNG, không
+    bao giờ thay chỗ byte Arrow. Hai con số khác nhau ~5-10% ở hình dạng này và
+    trộn chúng là cách dễ nhất để rút ra một kết luận sai.
+
+`cursor_drain`/`connector` KHÔNG đếm được byte dây (psycopg không phơi bộ đếm
+socket nào), nên cột đó để trống ở hai ô đó — `copy_text` là ước lượng tốt nhất
+cho khối lượng dây mà chúng chở, vì psycopg 3 nhận kết quả ở ĐỊNH DẠNG TEXT cho
+cursor có tên (đã kiểm lúc chạy, in ra ở phần đầu báo cáo).
+
+## Hình dạng dòng — giống ĐO 3 để số so được
+
+Bảy cột y hệt bảng bench của ĐO 3 (và của 2c): `id bigint`, `event_time
+timestamptz`, `region text` (16 giá trị), `status text` (5 giá trị), `amount
+float8`, `customer_id text`, `payload text` 220 ký tự. ĐO 3 đo 500.000 dòng =
+0,149 GB byte Arrow => ~298 byte/dòng; script này hiệu chỉnh lại con số đó từ dữ
+liệu THẬT của chính nó và in ra để đối chiếu.
+
+Cả bảy cột đi đường NHANH của connector (không cột nào bị `::text` — xem
+`_needs_text_cast`), đúng như bảng của ĐO 3.
+
+## Ba nhiễu ĐÃ BIẾT, và cách script này chặn/định lượng từng cái
+
+  1. **`generate_series` tốn CPU server mà đọc một bảng đã lưu thì không.**
+     Định lượng bằng `EXPLAIN (ANALYZE, TIMING OFF)` trên chính câu SELECT đó:
+     nó chạy plan tới cùng, đánh giá ĐỦ mọi biểu thức trong target list, nhưng
+     KHÔNG gửi dòng nào qua dây. Đó là CẬN DƯỚI của phần CPU server (nó bỏ qua
+     chi phí hàm output kết xuất giá trị ra dạng dây), và cận dưới là đủ: nếu nó
+     đã nhỏ so với đồng hồ tường thì nhiễu này không đổi được kết luận.
+  2. **`md5()` mỗi dòng không miễn phí.** `explain_nomd5` chạy CÙNG câu đó với
+     `customer_id`/`payload` thay bằng HẰNG chuỗi. Hiệu hai lần EXPLAIN là chi
+     phí md5+rpad thuần.
+  3. **Container local và Aiven khác phiên bản/phần cứng.** Container ghim
+     `postgres:17-alpine` (Aiven chạy 17.10 — đã đọc `version()` lúc chạy và in
+     ra). Phần cứng thì KHÔNG khử được và không được giả vờ là khử được: ô 3/ô 4
+     chạy trên CPU của chính máy này, chia sẻ CPU với tiến trình client. Xem mục
+     "nhiễu" của báo cáo.
+
+Nhiễu thứ tư, đo được nên đo: ô 4 chạy `generate_series`, còn đường THẬT đọc một
+BẢNG. `connector_real_table` (chỉ local — local ghi được) seed một bảng THẬT
+đúng bảy cột đó rồi chạy `PostgresConnector.read()` NGUYÊN BẢN trên nó. Nó vừa
+định lượng chênh lệch generate_series/bảng-thật, vừa là phép KIỂM CHÉO cho việc
+lắp lại vòng lặp ở `_connector_path` bên dưới.
+
+## Vì sao lắp lại vòng lặp thay vì gọi `PostgresConnector.read()` ở Aiven
+
+`read()` đọc `information_schema.columns` để biết cột, rồi dựng
+`SELECT ... FROM schema.table` — nó chỉ đọc được một BẢNG CÓ THẬT, và trên Aiven
+không được phép tạo bảng nào. Nên `_connector_path` lắp lại ĐÚNG vòng lặp của
+`_read_rows` (cursor CÓ TÊN, `dict_row`, `itersize == batch_rows`, gom
+`list[dict]`, gọi `_rows_to_record_batch`) và chỉ đổi mệnh đề FROM.
+
+Phần ĐẮT không bị chép lại — `_rows_to_record_batch` và `_ColumnInfo` được
+IMPORT thẳng từ `loom_connector.postgres`, nên bước biến đổi đang đo LÀ mã
+production chứ không phải một bản mô phỏng của nó. Phần bị viết lại chỉ là năm
+dòng gom lô, và `connector_real_table` ở trên tồn tại để chứng minh năm dòng đó
+không lệch.
+
+## Chạy
+
+    make probe-read-cost                        # cả bốn ô, 3 lần lặp
+    make probe-read-cost ARGS="--rows 100000"   # chạy thử nhanh
+    make probe-read-cost ARGS="--report-only"   # in lại tổng kết từ progress.json
+    make probe-read-cost ARGS="--fresh"         # bỏ progress.json cũ, chạy lại từ đầu
+
+Chạy từ HOST, không phải trong cụm (khác ĐO 3 — xem mục nhiễu của báo cáo): tên
+miền Aiven phân giải được từ host (`make migrate` vẫn làm thế), và bỏ lớp mạng
+của k3d ra khỏi phép đo là điều ta MUỐN ở đây, vì câu hỏi là "đường internet
+đáng bao nhiêu", không phải "CNI của k3d đáng bao nhiêu".
+
+## Nối lại được
+
+`--state-dir/progress.json` ghi ATOMIC sau MỖI mẫu (`.tmp` rồi `rename`), đúng
+cơ chế của `scripts/measure_write_path.py`. Đứt giữa chừng thì chạy lại đúng lệnh
+cũ sẽ bỏ qua các ô đã đo xong. Thứ tự chạy là LẶP-TRƯỚC (rep 0 của mọi ô, rồi rep
+1...) chứ không phải ô-trước: nhiễu mạng tới theo từng đợt, và đo ba lần liên
+tiếp cùng một ô sẽ báo cáo một độ tản mát nhỏ hơn sự thật.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import json
+import resource
+import statistics
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import psycopg
+import pyarrow as pa  # type: ignore[import-untyped]
+
+# `_aiven_guard` nằm CÙNG thư mục và được nạp vào cụm qua CÙNG ConfigMap (xem
+# target `probe-read-cost-pod`): `python /scripts/probe_read_path_cost.py` đặt
+# `/scripts` làm `sys.path[0]`, nên import này chạy được ở cả host lẫn trong pod.
+from _aiven_guard import (
+    StorageHeadroom,
+    aiven_dsn,
+    connect_read_only,
+    connection_slots,
+    read_env_file,
+    read_secret_dir,
+    verify_read_only,
+)
+from _aiven_guard import total_database_bytes as _guard_total_database_bytes
+from psycopg import sql
+from psycopg.rows import dict_row
+
+from loom_connector.postgres import (
+    PostgresConnector,
+    _arrow_type_for,
+    _ColumnInfo,
+    _needs_text_cast,
+    _rows_to_record_batch,
+)
+from loom_connector.protocol import StreamState
+
+__all__ = ["aiven_dsn", "read_env_file", "read_secret_dir", "total_database_bytes"]
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# ─────────────────────────── hình dạng dòng ────────────────────────────
+
+# Tên cột + chuỗi `information_schema.columns.data_type` NGUYÊN VĂN — đúng thứ
+# `PostgresConnector._columns_for` đọc được từ bảng bench của ĐO 3. Giữ chuỗi
+# nguồn (chứ không giữ sẵn kiểu Arrow) để `_ColumnInfo` dựng dưới đây đi qua
+# CHÍNH `_arrow_type_for`/`_needs_text_cast` của production: nếu một ngày ánh xạ
+# kiểu đổi, phép đo đổi theo, không âm thầm đo một hình dạng đã lỗi thời.
+BENCH_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("id", "bigint"),
+    ("event_time", "timestamp with time zone"),
+    ("region", "text"),
+    ("status", "text"),
+    ("amount", "double precision"),
+    ("customer_id", "text"),
+    ("payload", "text"),
+)
+
+# 220 ký tự hex/dòng — cùng con số với `_PAYLOAD_HEX_CHARS` của
+# `scripts/measure_write_path.py`, nên byte/dòng của ba phép đo (2c, ĐO 3, cái
+# này) là cùng một đại lượng.
+PAYLOAD_CHARS = 220
+
+# DDL của bảng THẬT dùng cho `connector_real_table` — CHỈ chạy trên container
+# local. Không có đường nào cho DDL này chạm Aiven: `_seed_local_table` chỉ được
+# gọi từ nhánh `local`, và connection Aiven mở ở chế độ chỉ-đọc.
+_REAL_TABLE_SCHEMA = "probe_read_cost"
+_REAL_TABLE_NAME = "read_path"
+
+
+def _row_expression(*, with_md5: bool) -> sql.Composable:
+    """Bảy biểu thức sinh dòng, SERVER-SIDE, không chạm đĩa.
+
+    `with_md5=False` thay hai cột dùng `md5()` bằng HẰNG chuỗi cùng độ dài —
+    dùng cho phép trừ định lượng chi phí md5 (nhiễu #2 ở docstring đầu file).
+    Độ dài giữ nguyên nên byte Arrow và byte dây không đổi; chỉ CPU server đổi.
+    """
+    customer_id: sql.Composable
+    payload: sql.Composable
+    if with_md5:
+        customer_id = sql.SQL("'cust-' || substr(md5(i::text), 1, 16)")
+        # rpad(<32 hex>, 220, <32 hex khác>): đúng 220 ký tự, 32 ký tự đầu khác
+        # nhau từng dòng. Hai lời gọi md5 mỗi dòng thay vì bảy (220/32 = 6,875)
+        # — chi phí md5 là NHIỄU của phép đo này, nên giữ nó nhỏ rồi định lượng,
+        # chứ không phóng đại nó lên rồi phải trừ một số lớn.
+        payload = sql.SQL("rpad(md5(i::text), {}, md5((i * 7 + 13)::text))").format(
+            sql.Literal(PAYLOAD_CHARS)
+        )
+    else:
+        customer_id = sql.Literal("cust-" + "0" * 16)
+        payload = sql.Literal("a" * PAYLOAD_CHARS)
+    return sql.SQL(" ").join(
+        [
+            sql.SQL("SELECT i::bigint AS id,"),
+            sql.SQL("TIMESTAMPTZ '2024-01-01 00:00:00+00' + (i * INTERVAL '1 second')"),
+            sql.SQL("AS event_time,"),
+            sql.SQL("'region-' || lpad((i % 16)::text, 2, '0') AS region,"),
+            sql.SQL("(ARRAY['pending','processing','completed','failed','refunded'])"),
+            sql.SQL("[1 + (i % 5)] AS status,"),
+            sql.SQL("((i % 2500000)::float8) / 100.0 AS amount,"),
+            customer_id,
+            sql.SQL("AS customer_id,"),
+            payload,
+            sql.SQL("AS payload"),
+        ]
+    )
+
+
+def generate_series_query(rows: int, *, with_md5: bool = True) -> sql.Composed:
+    """Câu SELECT sinh `rows` dòng đúng hình dạng bench, KHÔNG chạm bảng nào."""
+    return sql.SQL("{} FROM generate_series(1, {}) AS i").format(
+        _row_expression(with_md5=with_md5), sql.Literal(rows)
+    )
+
+
+def bench_column_infos() -> tuple[_ColumnInfo, ...]:
+    """`_ColumnInfo` dựng qua CHÍNH `_arrow_type_for`/`_needs_text_cast` của
+    production — xem chú thích ở `BENCH_COLUMNS`. `nullable=False` cho cả bảy:
+    `generate_series` không sinh NULL nào, và bảng bench của ĐO 3 cũng NOT NULL,
+    nên bitmap hợp lệ không xuất hiện ở cả hai bên."""
+    return tuple(
+        _ColumnInfo(
+            name=name,
+            arrow_type=_arrow_type_for(pg_type),
+            nullable=False,
+            text_cast=_needs_text_cast(pg_type),
+        )
+        for name, pg_type in BENCH_COLUMNS
+    )
+
+
+# ─────────────────────────── bốn (sáu) phép đo ────────────────────────────
+
+
+@dataclass
+class Measured:
+    """Kết quả THÔ của một lần đo, chưa quy ra MB/s."""
+
+    seconds: float
+    rows: int
+    wire_bytes: int = 0
+    arrow_bytes: int = 0
+    server_ms: float = 0.0
+
+
+def _copy_path(
+    conn: psycopg.Connection[Any], rows: int, *, binary: bool, with_md5: bool = True
+) -> Measured:
+    """Ô 1 và ô 3 — `COPY (SELECT ...) TO STDOUT`, ĐẾM BYTE DÂY.
+
+    Gần như không có object Python nào được dựng: vòng lặp chỉ cộng độ dài của
+    từng khối `memoryview` mà psycopg đưa ra.
+
+    `with_md5=False` là biến thể quan trọng nhất của cả script, không phải một
+    tuỳ chọn phụ. `COPY` với `md5()` đo GỘP hai thứ: CPU sinh dòng phía server
+    và đường truyền. Biến thể hằng-chuỗi sinh **ĐÚNG CÙNG SỐ BYTE DÂY** (21 ký
+    tự `customer_id`, 220 ký tự `payload` — đếm được, in ra ở tổng kết) với chi
+    phí sinh gần bằng 0, nên nó là ước lượng SẠCH nhất cho trần ĐƯỜNG TRUYỀN
+    thuần. Hiệu hai biến thể là chi phí sinh dòng nhìn XUYÊN QUA cả pipeline
+    (khác `EXPLAIN ANALYZE`, thứ chỉ nhìn phía server).
+    """
+    fmt = sql.SQL(" (FORMAT binary)") if binary else sql.SQL("")
+    statement = sql.SQL("COPY ({}) TO STDOUT{}").format(
+        generate_series_query(rows, with_md5=with_md5), fmt
+    )
+    wire = 0
+    t0 = time.perf_counter()
+    with conn.cursor() as cur, cur.copy(statement) as copy:
+        for chunk in copy:
+            wire += len(chunk)
+    seconds = time.perf_counter() - t0
+    return Measured(seconds=seconds, rows=rows, wire_bytes=wire)
+
+
+def _cursor_drain(
+    conn: psycopg.Connection[Any], rows: int, *, batch_rows: int, binary: bool = False
+) -> Measured:
+    """Lớp GIỮA — cursor CÓ TÊN + `dict_row` như connector, nhưng KHÔNG dựng
+    Arrow. Hiệu với `_copy_path` là chi phí dựng object Python của psycopg;
+    hiệu với `_connector_path` là chi phí Arrow thuần.
+
+    `binary=True` là ô ĐO 4c: cùng một vòng lặp, chỉ đổi định dạng dây. Tên
+    cursor mang theo định dạng để hai biến thể không bao giờ dùng lại một tên
+    đang mở nếu một lần chạy trước chết giữa chừng.
+    """
+    n = 0
+    name = "probe_cursor_drain_binary" if binary else "probe_cursor_drain"
+    t0 = time.perf_counter()
+    with conn.cursor(name=name, row_factory=dict_row, binary=binary) as cur:
+        cur.itersize = batch_rows
+        cur.execute(generate_series_query(rows))
+        for _row in cur:
+            n += 1
+    seconds = time.perf_counter() - t0
+    return Measured(seconds=seconds, rows=n)
+
+
+def _connector_path(
+    conn: psycopg.Connection[Any],
+    rows: int,
+    *,
+    batch_rows: int,
+    columns: tuple[_ColumnInfo, ...],
+    binary: bool = False,
+) -> Measured:
+    """Ô 2 và ô 4 — ĐÚNG vòng lặp của `PostgresConnector._read_rows`.
+
+    Cursor CÓ TÊN (server-side), `dict_row`, `itersize == batch_rows`, gom
+    `list[dict]` rồi gọi `_rows_to_record_batch` — hàm được IMPORT từ
+    production, không chép lại. Chỉ mệnh đề FROM là khác, và lý do nằm ở
+    docstring đầu file.
+
+    `binary=True` là ĐÚNG MỘT thay đổi so với production hôm nay, và nó là thứ
+    ĐO 4c tồn tại để định giá. Bước dựng Arrow giữ NGUYÊN (cùng
+    `_rows_to_record_batch` của production), nên hiệu hai ô connector là chi
+    phí của định dạng dây và chỉ của nó.
+    """
+    arrow_bytes = 0
+    n = 0
+    name = "loom_connector_read_binary" if binary else "loom_connector_read"
+    t0 = time.perf_counter()
+    with conn.cursor(name=name, row_factory=dict_row, binary=binary) as cur:
+        cur.itersize = batch_rows
+        cur.execute(generate_series_query(rows))
+        batch: list[dict[str, object]] = []
+        for row in cur:
+            batch.append(row)
+            if len(batch) >= batch_rows:
+                arrow_bytes += _rows_to_record_batch(batch, columns).nbytes
+                n += len(batch)
+                batch = []
+        if batch:
+            arrow_bytes += _rows_to_record_batch(batch, columns).nbytes
+            n += len(batch)
+    seconds = time.perf_counter() - t0
+    return Measured(seconds=seconds, rows=n, arrow_bytes=arrow_bytes)
+
+
+def _explain_path(conn: psycopg.Connection[Any], rows: int, *, with_md5: bool) -> Measured:
+    """Nhiễu #1/#2 — CPU SERVER của chính câu SELECT đó, KHÔNG có dây.
+
+    `EXPLAIN (ANALYZE, TIMING OFF)` chạy plan tới cùng và đánh giá đủ target
+    list (nên md5/rpad/lpad đều thật sự chạy), nhưng DestReceiver là "none" nên
+    không dòng nào được kết xuất ra dạng dây và không byte nào rời server. Vì
+    thế nó là CẬN DƯỚI của phần CPU server, không phải con số chính xác — đủ để
+    bound một nhiễu, không đủ để trừ thẳng ra khỏi đồng hồ tường, và báo cáo
+    phải nói đúng thế.
+    """
+    statement = sql.SQL("EXPLAIN (ANALYZE, TIMING OFF, FORMAT JSON) {}").format(
+        generate_series_query(rows, with_md5=with_md5)
+    )
+    t0 = time.perf_counter()
+    with conn.cursor() as cur:
+        cur.execute(statement)
+        row = cur.fetchone()
+    seconds = time.perf_counter() - t0
+    plan: list[dict[str, Any]] = row[0] if row else []
+    server_ms = 0.0
+    if plan:
+        server_ms = float(plan[0].get("Execution Time", 0.0)) + float(
+            plan[0].get("Planning Time", 0.0)
+        )
+    return Measured(seconds=seconds, rows=rows, server_ms=server_ms)
+
+
+def _connector_real_table(dsn: str, rows: int, *, batch_rows: int) -> Measured:
+    """Phép KIỂM CHÉO, CHỈ local — `PostgresConnector` NGUYÊN BẢN trên một BẢNG THẬT.
+
+    Hai việc cùng lúc: (a) chứng minh vòng lặp lắp lại ở `_connector_path` không
+    lệch khỏi `_read_rows` thật, (b) định lượng chênh lệch giữa đọc
+    `generate_series` và đọc một bảng đã lưu — nhiễu thứ tư ở docstring đầu file.
+    """
+    connector = PostgresConnector(dsn, batch_rows=batch_rows, schema=_REAL_TABLE_SCHEMA)
+    stream = f"{_REAL_TABLE_SCHEMA}.{_REAL_TABLE_NAME}"
+    arrow_bytes = 0
+    n = 0
+    t0 = time.perf_counter()
+    for record_batch in connector.read(stream, StreamState()):
+        arrow_bytes += record_batch.nbytes
+        n += record_batch.num_rows
+    seconds = time.perf_counter() - t0
+    if n != rows:
+        raise RuntimeError(f"bảng thật trả {n} dòng, chờ {rows}")
+    return Measured(seconds=seconds, rows=n, arrow_bytes=arrow_bytes)
+
+
+# ─────────────────────────── trạng thái / nối lại ────────────────────────────
+
+KINDS_WIRE = ("copy_text", "copy_text_nomd5", "copy_binary")
+# Bốn ô client, hai định dạng dây nhân hai lớp. Thứ tự giữ cặp text/binary CẠNH
+# nhau ở tổng kết, vì mọi phép trừ đáng đọc đều là hiệu của một cặp như thế.
+KINDS_CLIENT = ("cursor_drain", "cursor_drain_binary", "connector", "connector_binary")
+KINDS_SERVER = ("explain_full", "explain_nomd5")
+KINDS_LOCAL_ONLY = ("connector_real_table",)
+ALL_KINDS = KINDS_WIRE + KINDS_CLIENT + KINDS_SERVER + KINDS_LOCAL_ONLY
+
+
+@dataclass
+class Sample:
+    source: str
+    kind: str
+    rep: int
+    rows: int
+    seconds: float
+    wire_bytes: int
+    arrow_bytes: int
+    server_ms: float
+    completed_at: str
+
+
+@dataclass
+class Environment:
+    """Những gì phải ghi lại để một lần chạy sau ĐỌC ĐƯỢC bối cảnh của lần này."""
+
+    aiven_version: str = ""
+    aiven_tls: str = ""
+    aiven_db_bytes_before: int = 0
+    aiven_db_bytes_after: int = 0
+    aiven_read_only: str = ""
+    local_version: str = ""
+    local_image: str = ""
+    cursor_result_format: str = ""
+    aiven_rtt_ms: float = 0.0
+    local_rtt_ms: float = 0.0
+
+
+@dataclass
+class Progress:
+    rows: int
+    batch_rows: int
+    reps: int
+    arrow_bytes_per_row: float
+    env: Environment
+    samples: list[Sample] = field(default_factory=list)
+    peak_rss_kb: int = 0
+
+
+def save_progress(path: Path, progress: Progress) -> None:
+    """Ghi ATOMIC (`.tmp` rồi `rename`) — cùng cơ chế `measure_write_path.py`."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(dataclasses.asdict(progress), indent=2, ensure_ascii=False))
+    tmp.replace(path)
+
+
+def load_progress(path: Path) -> Progress:
+    raw: dict[str, Any] = json.loads(path.read_text())
+    return Progress(
+        rows=raw["rows"],
+        batch_rows=raw["batch_rows"],
+        reps=raw["reps"],
+        arrow_bytes_per_row=raw["arrow_bytes_per_row"],
+        env=Environment(**raw["env"]),
+        samples=[Sample(**s) for s in raw["samples"]],
+        peak_rss_kb=raw.get("peak_rss_kb", 0),
+    )
+
+
+class Logger:
+    """In ra stdout VÀ ghi file — `tail -f` theo dõi được một lần chạy dài."""
+
+    def __init__(self, path: Path) -> None:
+        self._fh = path.open("a", encoding="utf-8")
+
+    def line(self, msg: str) -> None:
+        print(msg)
+        self._fh.write(msg + "\n")
+        self._fh.flush()
+
+    def close(self) -> None:
+        self._fh.close()
+
+
+# ─────────────────────────── kết nối ────────────────────────────
+
+
+# `read_env_file`, `read_secret_dir`, `verify_read_only`, `aiven_dsn` và
+# `total_database_bytes` TỪNG được định nghĩa ngay ở đây. Chúng đã chuyển sang
+# `_aiven_guard` vì bản chép thứ hai trong `measure_ingest_path.py` đã TRÔI khỏi
+# bản này: bản đó kiểm đĩa sau MỖI khối nhưng mở connection GHI ĐƯỢC, bản này mở
+# chỉ-đọc nhưng chỉ kiểm đĩa MỘT lần cho cả lần chạy. Mỗi bản giữ đúng một nửa
+# bài học của một sự cố khác nhau — xem docstring đầu `_aiven_guard.py`.
+
+
+def total_database_bytes(conn: psycopg.Connection[Any]) -> int:
+    """Bọc `_aiven_guard.total_database_bytes` cho hình dạng `conn` của file này."""
+    with conn.cursor() as cur:
+        return _guard_total_database_bytes(cur)
+
+
+def _scalar(conn: psycopg.Connection[Any], statement: str) -> str:
+    with conn.cursor() as cur:
+        cur.execute(statement)
+        row = cur.fetchone()
+    return str(row[0]) if row else "?"
+
+
+def describe_tls(conn: psycopg.Connection[Any]) -> str:
+    """Giao thức + cipher + NÉN của TLS trên chính connection này.
+
+    Đọc `pg_stat_ssl` chứ không hỏi libpq: psycopg 3.3.4 (bản trong workspace
+    này — đã kiểm `dir(pq.PGconn)`) chỉ phơi `ssl_in_use`, không có
+    `ssl_attribute`.
+
+    KHÔNG chọn cột `compression`, và sự vắng mặt của nó chính là câu trả lời cho
+    câu hỏi mà nó lẽ ra dùng để trả lời: PostgreSQL đã BỎ HẲN cột đó khỏi
+    `pg_stat_ssl` (đã đo trên chính 17.10 ở đây: `column "compression" does not
+    exist`), vì libpq không còn hỗ trợ nén TLS. Nên "byte dây đo được là byte
+    THẬT, không phải byte đã nén" không cần một cột để chứng minh — không có
+    đường nào cho nén tồn tại.
+    """
+    if not conn.pgconn.ssl_in_use:
+        return "không dùng TLS"
+    with conn.cursor() as cur:
+        cur.execute("SELECT version, cipher, bits FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
+        row = cur.fetchone()
+    if not row:
+        return "TLS bật, pg_stat_ssl không trả dòng nào"
+    return f"{row[0]} / {row[1]} / {row[2]} bit (nén: PostgreSQL không còn hỗ trợ)"
+
+
+def round_trip_ms(conn: psycopg.Connection[Any], samples: int = 25) -> float:
+    """Trung vị của một lượt đi-về `SELECT 1` — ĐỘ TRỄ, tách khỏi BĂNG THÔNG.
+
+    Hai đại lượng khác nhau và chỉ một trong hai đặt trần cho phép đo này. Với
+    `itersize=100.000`, 500.000 dòng chỉ tốn 5 vòng `FETCH FORWARD`, nên độ trễ
+    nhân 5 phải NHỎ so với đồng hồ tường — nếu không thì con số đang đo là số
+    vòng chứ không phải băng thông, và báo cáo phải nói thế. In ra để câu đó
+    kiểm chứng được thay vì phải tin.
+    """
+    timings: list[float] = []
+    with conn.cursor() as cur:
+        for _ in range(samples):
+            t0 = time.perf_counter()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            timings.append((time.perf_counter() - t0) * 1000.0)
+    return statistics.median(timings)
+
+
+def cursor_result_format(conn: psycopg.Connection[Any]) -> str:
+    """psycopg trả kết quả của cursor CÓ TÊN ở định dạng text hay binary?
+
+    Quan trọng vì cả phép quy "byte dây của `copy_text` ≈ byte dây mà
+    `cursor_drain`/`connector` chở" dựa vào câu trả lời. ĐO chứ không nhớ:
+    `PGresult.fformat(0)` trả 0 = text, 1 = binary.
+    """
+    with conn.cursor(name="probe_fmt", row_factory=dict_row) as cur:
+        cur.execute(sql.SQL("SELECT 1 AS one"))
+        cur.fetchone()
+        result = cur.pgresult
+        fformat = result.fformat(0) if result is not None else -1
+    return {0: "text", 1: "binary"}.get(fformat, f"? ({fformat})")
+
+
+# ─────────────────────── kiểm ĐÚNG SAI của định dạng nhị phân ───────────────────────
+
+# (nhãn, biểu thức SQL sinh MỘT giá trị, chuỗi `information_schema.columns.data_type`)
+#
+# Cột thứ ba là thứ quyết định, không phải cột thứ hai: nó đi thẳng vào
+# `_arrow_type_for`/`_needs_text_cast` của production, nên hàng nào cần `::text`
+# thì cần vì CÙNG một lý do câu SELECT thật cần, chứ không vì một danh sách chép
+# tay ở đây. Chuỗi phải khớp NGUYÊN VĂN cái `information_schema` trả về — mảng
+# về `'ARRAY'` chứ không về `'integer[]'`, và đó chính là lý do mảng rơi vào
+# nhánh `::text`.
+#
+# Danh sách phủ đủ năm kiểu ĐÃ TỪNG HỎNG (`uuid`, `json`/`jsonb`, mảng, `inet`,
+# `numeric`) cộng với mọi kiểu đi đường NHANH (không cast) — vì đúng những kiểu
+# đó mới có loader nhị phân riêng, tức đúng những kiểu định dạng nhị phân có thể
+# làm đổi giá trị.
+_TYPE_ZOO: tuple[tuple[str, sql.SQL, str], ...] = (
+    ("bigint", sql.SQL("9223372036854775807::bigint"), "bigint"),
+    ("integer", sql.SQL("(-2147483648)::integer"), "integer"),
+    ("smallint", sql.SQL("32767::smallint"), "smallint"),
+    ("double precision", sql.SQL("(1.0/3.0)::float8"), "double precision"),
+    ("real", sql.SQL("(1.0/3.0)::real"), "real"),
+    ("boolean", sql.SQL("true"), "boolean"),
+    ("date", sql.SQL("DATE '2024-02-29'"), "date"),
+    (
+        "timestamp",
+        sql.SQL("TIMESTAMP '2024-01-01 12:34:56.789012'"),
+        "timestamp without time zone",
+    ),
+    (
+        "timestamptz",
+        sql.SQL("TIMESTAMPTZ '2024-06-30 23:59:59.999999+07'"),
+        "timestamp with time zone",
+    ),
+    ("text (unicode)", sql.SQL("'xin chào ☕ dấu'::text"), "text"),
+    ("character varying", sql.SQL("'abc '::varchar(10)"), "character varying"),
+    # `character(8)` chứa 'abc': đọc thẳng ra 'abc     ' (còn đệm), đọc qua
+    # `::text` ra 'abc'. Nó nằm trong `_NATIVE_TEXT_TYPES` nên KHÔNG bị cast —
+    # hàng này canh đúng điều đó, ở cả hai định dạng.
+    ("character(8)", sql.SQL("'abc'::character(8)"), "character"),
+    ("uuid", sql.SQL("'550e8400-e29b-41d4-a716-446655440000'::uuid"), "uuid"),
+    ("json", sql.SQL('\'{"b": 1, "a": 2.50}\'::json'), "json"),
+    ("jsonb", sql.SQL('\'{"b": 1, "a": 2.50}\'::jsonb'), "jsonb"),
+    ("numeric (1e-20)", sql.SQL("0.00000000000000000001::numeric"), "numeric"),
+    ("numeric (19.90)", sql.SQL("19.90::numeric"), "numeric"),
+    ("numeric (NaN)", sql.SQL("'NaN'::numeric"), "numeric"),
+    ("integer[]", sql.SQL("ARRAY[1,2,3]::integer[]"), "ARRAY"),
+    ("text[]", sql.SQL("ARRAY['a','b']::text[]"), "ARRAY"),
+    ("inet", sql.SQL("'192.168.0.1'::inet"), "inet"),
+    ("interval", sql.SQL("INTERVAL '1 day 02:03:04'"), "interval"),
+    ("bytea", sql.SQL("'\\xdeadbeef'::bytea"), "bytea"),
+    ("NULL bigint", sql.SQL("NULL::bigint"), "bigint"),
+    ("NULL uuid", sql.SQL("NULL::uuid"), "uuid"),
+)
+
+
+def _zoo_columns() -> tuple[_ColumnInfo, ...]:
+    """`_ColumnInfo` cho vườn kiểu, dựng qua CHÍNH hai hàm của production."""
+    return tuple(
+        _ColumnInfo(
+            name=f"c{i:02d}",
+            arrow_type=_arrow_type_for(pg_type),
+            nullable=True,
+            text_cast=_needs_text_cast(pg_type),
+        )
+        for i, (_, _, pg_type) in enumerate(_TYPE_ZOO)
+    )
+
+
+def _zoo_query(columns: tuple[_ColumnInfo, ...]) -> sql.Composed:
+    """Một hàng, mọi kiểu — dựng ĐÚNG như `_read_rows` dựng select list.
+
+    Không có `FROM`, nên không có bảng nào: câu này đọc được trên một
+    connection chỉ-đọc và không chạm một page đĩa nào.
+    """
+    parts = [
+        sql.SQL("({})::text AS {}").format(expr, sql.Identifier(col.name))
+        if col.text_cast
+        else sql.SQL("({}) AS {}").format(expr, sql.Identifier(col.name))
+        for (_, expr, _), col in zip(_TYPE_ZOO, columns, strict=True)
+    ]
+    return sql.SQL("SELECT {}").format(sql.SQL(", ").join(parts))
+
+
+def _read_zoo_once(
+    conn: psycopg.Connection[Any], columns: tuple[_ColumnInfo, ...], *, binary: bool
+) -> tuple[dict[str, Any], list[int]]:
+    """Đọc vườn kiểu qua CURSOR CÓ TÊN — cùng loại cursor `_read_rows` dùng.
+
+    Cursor có tên đi đường `DECLARE` + `FETCH FORWARD`, và định dạng kết quả
+    được yêu cầu ở lệnh FETCH chứ không ở `DECLARE`. Một cursor THƯỜNG vì thế
+    KHÔNG chứng minh được gì cho `_read_rows` — phải đo trên đúng loại cursor
+    mà production mở.
+
+    Trả về cả `fformat` TỪNG CỘT: libpq chỉ nhận MỘT `resultFormat` cho cả tập
+    kết quả, nên nếu một cột nào đó về text trong lúc phần còn lại về nhị phân
+    thì giả định nền đã sai và báo cáo phải nói ra.
+    """
+    name = f"probe_zoo_{'binary' if binary else 'text'}"
+    with conn.cursor(name=name, row_factory=dict_row, binary=binary) as cur:
+        cur.itersize = 1
+        cur.execute(_zoo_query(columns))
+        row = cur.fetchone()
+        result = cur.pgresult
+        formats = [result.fformat(i) for i in range(len(columns))] if result is not None else []
+    conn.rollback()
+    if row is None:
+        raise RuntimeError("vườn kiểu không trả dòng nào")
+    return row, formats
+
+
+def _describe(value: object) -> str:
+    """`type(x).__name__` + `repr(x)` — hai thứ, vì một mình `repr` không phân
+    biệt được `'19.90'` (str, đúng) với `Decimal('19.90')` (sai kiểu, cùng chữ)."""
+    text = repr(value)
+    if len(text) > 46:
+        text = text[:43] + "..."
+    return f"{type(value).__name__}:{text}"
+
+
+def binary_typecheck(conn: psycopg.Connection[Any], log: Logger) -> bool:
+    """Định dạng nhị phân có làm ĐỔI GIÁ TRỊ nào không? Trả True nếu KHÔNG.
+
+    Nhanh hơn mà đổi giá trị thì không phải một thắng lợi, nên hàm này chạy
+    TRƯỚC mọi phép đo và kết quả của nó đứng ngang hàng với con số MB/s trong
+    báo cáo — không phải một phụ lục.
+
+    So HAI tầng, vì hỏng ở tầng nào cũng đủ để bác bỏ:
+
+      1. **Giá trị psycopg trả ra.** Kiểu Python VÀ `repr`. Một kiểu không có
+         loader nhị phân rơi về loader mặc định và trả `bytes` thô; điều đó lộ
+         ra ở tầng này.
+      2. **Giá trị sau `_rows_to_record_batch`.** Hàm THẬT của production, gọi
+         một lần cho cả hàng — vì đó mới là thứ đường nạp ghi xuống Parquet.
+         Bắt cả ngoại lệ: `pa.array` từ chối một object sai kiểu bằng cách NÉM,
+         và một ô "NÉM" cũng là một câu trả lời.
+    """
+    columns = _zoo_columns()
+    text_row, text_fmts = _read_zoo_once(conn, columns, binary=False)
+    bin_row, bin_fmts = _read_zoo_once(conn, columns, binary=True)
+
+    def arrow_values(row: dict[str, Any]) -> dict[str, str]:
+        try:
+            batch = _rows_to_record_batch([row], columns)
+        except Exception as exc:  # "nó ném" LÀ một kết quả cần ghi, không phải một sự cố
+            return {c.name: f"<NÉM {type(exc).__name__}>" for c in columns}
+        return {c.name: _describe(batch.column(i)[0].as_py()) for i, c in enumerate(columns)}
+
+    text_arrow = arrow_values(text_row)
+    bin_arrow = arrow_values(bin_row)
+
+    log.line("")
+    log.line("=== KIỂM ĐÚNG SAI: text so với nhị phân, CÙNG một hàng ===")
+    log.line(
+        f"Định dạng dây từng cột — text: {sorted(set(text_fmts))}  "
+        f"nhị phân: {sorted(set(bin_fmts))}   (0 = text, 1 = nhị phân)"
+    )
+    header = (
+        f"{'kiểu nguồn':<20} {'cast':<5} {'fmt':<4} {'psycopg (text)':<50} "
+        f"{'psycopg (nhị phân)':<50} {'khớp?':<6}"
+    )
+    log.line(header)
+    log.line("-" * len(header))
+    # HAI danh sách, không một, và phân biệt đó là toàn bộ giá trị của phép
+    # kiểm này. Thứ đường nạp GHI XUỐNG là `RecordBatch`, không phải object
+    # psycopg trung gian — nên chỉ `arrow_changed` mới là một lỗi ĐÚNG SAI.
+    # `raw_only` là một khác biệt CÓ THẬT nhưng bị `pa.array(..., type=...)`
+    # quy về cùng một giá trị; nó phải được nêu tên chứ không được làm tròn
+    # thành "ok", vì nó là một khác biệt thật ở một chỗ khác của hệ thống.
+    arrow_changed: list[str] = []
+    raw_only: list[str] = []
+    for (label, _, _), col, wire_fmt in zip(_TYPE_ZOO, columns, bin_fmts, strict=True):
+        raw_t, raw_b = text_row[col.name], bin_row[col.name]
+        same_raw = type(raw_t) is type(raw_b) and raw_t == raw_b
+        # NaN != NaN, và cả hai bên đều là NaN thì đó là KHỚP, không phải lệch.
+        if not same_raw and _describe(raw_t) == _describe(raw_b):
+            same_raw = True
+        same_arrow = text_arrow[col.name] == bin_arrow[col.name]
+        if not same_arrow:
+            arrow_changed.append(label)
+            verdict = "ARROW"
+        elif not same_raw:
+            raw_only.append(label)
+            verdict = "chỉ thô"
+        else:
+            verdict = "ok"
+        log.line(
+            f"{label:<20} {'::text' if col.text_cast else '—':<5} {wire_fmt:<4} "
+            f"{_describe(raw_t):<50} {_describe(raw_b):<50} {verdict:<8}"
+        )
+
+    log.line("")
+    log.line("=== SAU `_rows_to_record_batch` (hàm THẬT của production) ===")
+    for (label, _, _), col in zip(_TYPE_ZOO, columns, strict=True):
+        flag = "ok" if text_arrow[col.name] == bin_arrow[col.name] else "LỆCH"
+        log.line(
+            f"{label:<20} {col.arrow_type!s:<26} "
+            f"{text_arrow[col.name]:<50} {bin_arrow[col.name]:<50} {flag}"
+        )
+
+    bulk_ok = _bulk_float_check(conn, log)
+
+    log.line("")
+    if arrow_changed:
+        log.line(f"KẾT LUẬN KIỂM: {len(arrow_changed)} kiểu ĐỔI GIÁ TRỊ ARROW: {arrow_changed}")
+    else:
+        log.line(f"KẾT LUẬN KIỂM: {len(_TYPE_ZOO)} kiểu, KHÔNG kiểu nào đổi giá trị SAU Arrow.")
+    if raw_only:
+        log.line(
+            f"  (đổi object psycopg thô nhưng Arrow quy về CÙNG giá trị: {raw_only} "
+            "— xem mục float của báo cáo)"
+        )
+    return not arrow_changed and bulk_ok
+
+
+# Hai kiểu dấu phẩy động là chỗ DUY NHẤT mà "text so với nhị phân" không phải
+# một phép so bằng tầm thường, nên chúng được kiểm HÀNG LOẠT chứ không bằng một
+# giá trị mẫu. Lý do cụ thể: định dạng text chở chuỗi thập phân NGẮN NHẤT mà
+# Postgres in ra, còn nhị phân chở đúng 4/8 byte IEEE754. Với `real`, psycopg
+# phân tích chuỗi ngắn nhất đó thành một `float` 64 bit — một số KHÁC với số
+# thu được khi mở rộng float32 gốc lên 64 bit. Hai đường chỉ gặp lại nhau ở
+# `pa.array(..., type=pa.float32())`, chỗ cả hai bị thu về đúng float32 ban
+# đầu. Một giá trị mẫu không chứng minh được điều đó đúng cho MỌI giá trị, nên
+# đây là 50.000 giá trị trải 60 bậc độ lớn.
+_FLOAT_BULK_ROWS = 50_000
+
+
+def _bulk_float_check(conn: psycopg.Connection[Any], log: Logger) -> bool:
+    """`real`/`double precision`: 50.000 giá trị, so BUFFER Arrow, không so mẫu.
+
+    So `pa.array(...).equals(...)` chứ không so từng `float` Python: đó là phép
+    so đúng đại lượng — thứ ghi xuống Parquet là mảng Arrow, và `equals` so cả
+    kiểu lẫn từng bit của buffer.
+    """
+    query = sql.SQL(
+        "SELECT (sin(i::float8) * power(10::float8, mod(i, 60) - 30))::real AS r4, "
+        "(sin(i::float8) * power(10::float8, mod(i, 600) - 300))::float8 AS r8 "
+        "FROM generate_series(1, {}) AS i"
+    ).format(sql.Literal(_FLOAT_BULK_ROWS))
+    got: dict[str, dict[str, list[Any]]] = {}
+    for mode, binary in (("text", False), ("binary", True)):
+        with conn.cursor(name=f"probe_float_{mode}", row_factory=dict_row, binary=binary) as cur:
+            cur.itersize = _FLOAT_BULK_ROWS
+            cur.execute(query)
+            rows = cur.fetchall()
+        conn.rollback()
+        got[mode] = {
+            "r4": [r["r4"] for r in rows],
+            "r8": [r["r8"] for r in rows],
+        }
+    log.line("")
+    log.line(f"=== KIỂM HÀNG LOẠT dấu phẩy động ({_FLOAT_BULK_ROWS:,} giá trị) ===")
+    all_ok = True
+    for key, arrow_type, label in (
+        ("r4", pa.float32(), "real -> float32"),
+        ("r8", pa.float64(), "double precision -> float64"),
+    ):
+        raw_same = got["text"][key] == got["binary"][key]
+        arr_t = pa.array(got["text"][key], type=arrow_type)
+        arr_b = pa.array(got["binary"][key], type=arrow_type)
+        arrow_same = arr_t.equals(arr_b)
+        all_ok = all_ok and arrow_same
+        differing = sum(
+            1 for a, b in zip(got["text"][key], got["binary"][key], strict=True) if a != b
+        )
+        log.line(
+            f"{label:<28} float Python khớp: {raw_same!s:<5} "
+            f"({differing:,} giá trị lệch)   mảng Arrow khớp: {arrow_same}"
+        )
+    return all_ok
+
+
+# ─────────────────────────── nguồn local ────────────────────────────
+
+
+@contextmanager
+def local_postgres(image: str, log: Logger) -> Iterator[str]:
+    """Container Postgres local — cùng image `postgres:17-alpine` mà bộ test của
+    connectorkit dùng, để mọi Postgres trong repo này là MỘT bản."""
+    from testcontainers.community.postgres import PostgresContainer
+
+    log.line(f"Khởi động Postgres local ({image})...")
+    with PostgresContainer(image=image) as container:
+        dsn = (
+            f"postgresql://{container.username}:{container.password}"
+            f"@{container.get_container_host_ip()}:{container.get_exposed_port(5432)}"
+            f"/{container.dbname}"
+        )
+        yield dsn
+
+
+def seed_local_table(dsn: str, rows: int, log: Logger) -> None:
+    """Bảng THẬT bảy cột trên container LOCAL — chỉ để `connector_real_table`
+    có một bảng để `PostgresConnector.read()` đọc. KHÔNG BAO GIỜ chạy trên Aiven
+    (xem docstring đầu file); đường gọi duy nhất nằm trong nhánh `local`."""
+    log.line(f"Seed bảng thật local {_REAL_TABLE_SCHEMA}.{_REAL_TABLE_NAME} ({rows:,} dòng)...")
+    t0 = time.perf_counter()
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(_REAL_TABLE_SCHEMA))
+        )
+        cur.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(_REAL_TABLE_SCHEMA)))
+        cur.execute(
+            sql.SQL(
+                "CREATE TABLE {}.{} ("
+                "id bigint NOT NULL, event_time timestamptz NOT NULL, region text NOT NULL, "
+                "status text NOT NULL, amount double precision NOT NULL, "
+                "customer_id text NOT NULL, payload text NOT NULL)"
+            ).format(sql.Identifier(_REAL_TABLE_SCHEMA), sql.Identifier(_REAL_TABLE_NAME))
+        )
+        cur.execute(
+            sql.SQL("INSERT INTO {}.{} {}").format(
+                sql.Identifier(_REAL_TABLE_SCHEMA),
+                sql.Identifier(_REAL_TABLE_NAME),
+                generate_series_query(rows),
+            )
+        )
+        # Bảng NÓNG, không phải nguội — ĐO 3 đo trên một bảng lọt trong cache
+        # của Aiven, nên phép so sánh chỉ công bằng nếu bảng này cũng nóng.
+        cur.execute(
+            sql.SQL("SELECT count(*) FROM {}.{}").format(
+                sql.Identifier(_REAL_TABLE_SCHEMA), sql.Identifier(_REAL_TABLE_NAME)
+            )
+        )
+    log.line(f"  seed xong sau {time.perf_counter() - t0:.1f}s")
+
+
+# ─────────────────────────── hiệu chỉnh + vòng chạy ────────────────────────────
+
+
+def calibrate_bytes_per_row(conn: psycopg.Connection[Any], sample_rows: int) -> float:
+    """Byte Arrow trên MỖI DÒNG cho hình dạng này — MẪU SỐ của mọi ô.
+
+    Hiệu chỉnh trên nguồn RẺ (local nếu có), vì biểu thức sinh dòng giống hệt
+    nhau ở hai nguồn nên byte/dòng cũng giống hệt. Các lần chạy `connector`
+    THẬT vẫn ghi `arrow_bytes` đo được của chính chúng, và tổng kết đối chiếu
+    hai con số — lệch nghĩa là giả định trên sai và báo cáo phải nói ra.
+    """
+    columns = bench_column_infos()
+    measured = _connector_path(conn, sample_rows, batch_rows=sample_rows, columns=columns)
+    return measured.arrow_bytes / measured.rows
+
+
+def run_one(
+    kind: str,
+    *,
+    conn: psycopg.Connection[Any] | None,
+    dsn: str,
+    rows: int,
+    batch_rows: int,
+    columns: tuple[_ColumnInfo, ...],
+) -> Measured:
+    if kind in KINDS_WIRE:
+        assert conn is not None
+        return _copy_path(
+            conn,
+            rows,
+            binary=(kind == "copy_binary"),
+            with_md5=(kind != "copy_text_nomd5"),
+        )
+    if kind in ("cursor_drain", "cursor_drain_binary"):
+        assert conn is not None
+        return _cursor_drain(conn, rows, batch_rows=batch_rows, binary=kind.endswith("_binary"))
+    if kind in ("connector", "connector_binary"):
+        assert conn is not None
+        return _connector_path(
+            conn,
+            rows,
+            batch_rows=batch_rows,
+            columns=columns,
+            binary=kind.endswith("_binary"),
+        )
+    if kind in ("explain_full", "explain_nomd5"):
+        assert conn is not None
+        return _explain_path(conn, rows, with_md5=(kind == "explain_full"))
+    if kind == "connector_real_table":
+        return _connector_real_table(dsn, rows, batch_rows=batch_rows)
+    raise ValueError(f"kind lạ: {kind}")
+
+
+# ─────────────────────────── tổng kết ────────────────────────────
+
+
+def _stats(values: list[float]) -> tuple[float, float, float, float]:
+    """(trung vị, nhỏ nhất, lớn nhất, độ lệch chuẩn mẫu). Độ lệch chuẩn cần ít
+    nhất hai mẫu — một mẫu trả 0,0 và cột "tản mát" của báo cáo phải đọc con số
+    đó là "chưa đo được", không phải "ổn định tuyệt đối"."""
+    if not values:
+        return (0.0, 0.0, 0.0, 0.0)
+    stdev = statistics.stdev(values) if len(values) > 1 else 0.0
+    return (statistics.median(values), min(values), max(values), stdev)
+
+
+def print_summary(
+    progress: Progress, log: Logger, replayed: set[tuple[str, str, int]] | None = None
+) -> None:
+    """In tổng kết, và NÓI RÕ mẫu nào đo lần này, mẫu nào phát lại từ đĩa.
+
+    Nối lại được là đúng cho một phép đo dài — nhưng bản trước in mẫu PHÁT LẠI
+    y hệt mẫu VỪA ĐO, không một dấu hiệu nào. Một lần chạy không đo gì cả (mọi
+    ô đã có trong `progress.json`) vẫn in ra một bảng đầy đủ trông như vừa đo
+    xong, và đã suýt được báo cáo như một mốc nền mới. Một con số cũ trình bày
+    như số mới là một lỗi ĐỌC, và chỗ sửa nó là chỗ in ra.
+    """
+    replayed = replayed or set()
+    env = progress.env
+    bpr = progress.arrow_bytes_per_row
+    arrow_mb = progress.rows * bpr / 1e6
+
+    log.line("")
+    log.line("=== MÔI TRƯỜNG ===")
+    log.line(f"Aiven      : {env.aiven_version}")
+    log.line(f"  TLS      : {env.aiven_tls}")
+    log.line(f"  chỉ-đọc  : default_transaction_read_only = {env.aiven_read_only}")
+    log.line(
+        f"  đĩa      : {env.aiven_db_bytes_before:,} byte TRƯỚC -> "
+        f"{env.aiven_db_bytes_after:,} byte SAU "
+        f"(chênh {env.aiven_db_bytes_after - env.aiven_db_bytes_before:+,})"
+    )
+    log.line(f"  RTT      : {env.aiven_rtt_ms:.2f} ms (trung vị 25 lượt SELECT 1)")
+    log.line(f"Local      : {env.local_version} (image {env.local_image})")
+    log.line(f"  RTT      : {env.local_rtt_ms:.2f} ms")
+    log.line(f"Định dạng kết quả cursor có tên: {env.cursor_result_format}")
+    log.line(
+        f"Hình dạng  : {progress.rows:,} dòng x {bpr:.1f} byte Arrow/dòng = "
+        f"{arrow_mb:.1f} MB Arrow   (batch_rows={progress.batch_rows:,})"
+    )
+    log.line(f"RSS đỉnh tiến trình đo: {progress.peak_rss_kb / 1024:.0f} MiB")
+
+    log.line("")
+    n_replayed = sum(1 for x in progress.samples if (x.source, x.kind, x.rep) in replayed)
+    n_fresh = len(progress.samples) - n_replayed
+    stamps = [x.completed_at for x in progress.samples if x.completed_at]
+    when = f"{min(stamps)} .. {max(stamps)}" if stamps else "không có dấu thời gian"
+    if n_fresh == 0 and n_replayed:
+        log.line("*** TOÀN BỘ SỐ DƯỚI ĐÂY LÀ PHÁT LẠI TỪ ĐĨA — LẦN CHẠY NÀY KHÔNG ĐO GÌ. ***")
+        log.line(f"*** Đo lúc: {when}. Muốn số mới: --fresh, hoặc một --state-dir khác. ***")
+    elif n_replayed:
+        log.line(
+            f"*** TRỘN: {n_fresh} mẫu đo lần này, {n_replayed} mẫu PHÁT LẠI từ đĩa. "
+            "Cột 'nguồn mẫu' bên dưới nói từng ô thuộc loại nào. ***"
+        )
+        log.line(f"*** Toàn bộ mẫu đo trong khoảng: {when}. ***")
+    else:
+        log.line(f"Mọi mẫu đo trong LẦN CHẠY NÀY, khoảng {when}.")
+    log.line("=== SỐ ĐO (mẫu số = byte Arrow, ĐÚNG đại lượng của ĐO 3 và 2c) ===")
+    header = (
+        f"{'nguồn':<6} {'phép đo':<20} {'n':>2} {'trung vị s':>11} "
+        f"{'min-max s':>15} {'sd s':>7} {'MB/s Arrow':>11} {'MB/s dây':>10} "
+        f"{'nguồn mẫu':>10}"
+    )
+    log.line(header)
+    log.line("-" * len(header))
+    for source in ("aiven", "local"):
+        for kind in ALL_KINDS:
+            picked = [s for s in progress.samples if s.source == source and s.kind == kind]
+            if not picked:
+                continue
+            secs = [s.seconds for s in picked]
+            median, lo, hi, sd = _stats(secs)
+            # Ô này đo lần này, phát lại, hay pha trộn? Một ô TRỘN là ô nguy
+            # hiểm nhất: trung vị của nó gộp hai điều kiện mạng khác nhau.
+            n_old = sum(1 for x in picked if (x.source, x.kind, x.rep) in replayed)
+            if n_old == 0:
+                origin = "đo lần này"
+            elif n_old == len(picked):
+                origin = "PHÁT LẠI"
+            else:
+                origin = f"TRỘN {len(picked) - n_old}/{n_old}"
+            if kind in KINDS_SERVER:
+                server = [s.server_ms / 1000.0 for s in picked]
+                m_srv, lo_srv, hi_srv, sd_srv = _stats(server)
+                log.line(
+                    f"{source:<6} {kind:<20} {len(picked):>2} {m_srv:>11.3f} "
+                    f"{lo_srv:>6.3f}-{hi_srv:<8.3f} {sd_srv:>7.3f} "
+                    f"{'(CPU server, không có dây)':>22} {origin:>10}"
+                )
+                continue
+            arrow_rate = arrow_mb / median if median > 0 else 0.0
+            wire = statistics.median([s.wire_bytes for s in picked])
+            wire_rate = (wire / 1e6) / median if median > 0 and wire else 0.0
+            wire_cell = f"{wire_rate:>10.2f}" if wire_rate else f"{'—':>10}"
+            log.line(
+                f"{source:<6} {kind:<20} {len(picked):>2} {median:>11.3f} "
+                f"{lo:>6.3f}-{hi:<8.3f} {sd:>7.3f} {arrow_rate:>11.2f} {wire_cell} "
+                f"{origin:>10}"
+            )
+
+    log.line("")
+    log.line("=== BYTE DÂY THẬT (trung vị, chỉ các ô COPY) ===")
+    for source in ("aiven", "local"):
+        for kind in KINDS_WIRE:
+            picked = [s for s in progress.samples if s.source == source and s.kind == kind]
+            if not picked:
+                continue
+            wire = statistics.median([s.wire_bytes for s in picked])
+            log.line(
+                f"{source:<6} {kind:<16} {wire / 1e6:8.1f} MB dây  "
+                f"= {wire / progress.rows:6.1f} byte/dòng  "
+                f"(byte Arrow/dòng = {bpr:.1f}, tỉ lệ dây/Arrow = {wire / progress.rows / bpr:.3f})"
+            )
+
+    _print_split(progress, log)
+
+
+def _median_seconds(progress: Progress, source: str, kind: str) -> float:
+    picked = [s.seconds for s in progress.samples if s.source == source and s.kind == kind]
+    return statistics.median(picked) if picked else 0.0
+
+
+def _print_binary_verdict(progress: Progress, log: Logger) -> None:
+    """Phép trừ mà ĐO 4c tồn tại để làm: nhị phân mua được bao nhiêu ở LỚP GIỮA.
+
+    Ba con số, và chỉ ba, vì thêm nữa là diễn giải chứ không phải đo:
+    lớp psycopg của mỗi định dạng (hiệu với ô COPY có-md5), phần trăm đồng hồ
+    tường nó chiếm, và MB/s của cả ô connector so với ngưỡng.
+
+    Ngưỡng lấy từ ô `copy_text_nomd5` ĐO ĐƯỢC TRONG CHÍNH LẦN CHẠY NÀY, không
+    phải hằng số 6,01 chép từ ĐO 4b: trần là đại lượng phải đo lại (hai khối
+    cách nhau 20 phút đã lệch 8%), và một ngưỡng suy ra từ nó phải trôi theo.
+    Con số của ĐO 4b vẫn in cạnh bên để so.
+    """
+    arrow_mb = progress.rows * progress.arrow_bytes_per_row / 1e6
+    source = "aiven"
+    copy_s = _median_seconds(progress, source, "copy_text")
+    ceiling_s = _median_seconds(progress, source, "copy_text_nomd5")
+    if not (copy_s and ceiling_s):
+        return
+    log.line("")
+    log.line("=== ĐO 4c: NHỊ PHÂN mua được gì ở LỚP psycopg ===")
+    ceiling_mbs = arrow_mb / ceiling_s
+    threshold = 0.60 * ceiling_mbs
+    log.line(
+        f"Trần COPY hằng-chuỗi lần chạy NÀY: {ceiling_s:6.3f}s = {ceiling_mbs:5.2f} MB/s "
+        f"=> ngưỡng 60% = {threshold:.2f} MB/s   (ĐO 4b đo 10,02 => 6,01)"
+    )
+    for label, drain_kind, conn_kind in (
+        ("text     ", "cursor_drain", "connector"),
+        ("nhị phân ", "cursor_drain_binary", "connector_binary"),
+    ):
+        drain_s = _median_seconds(progress, source, drain_kind)
+        conn_s = _median_seconds(progress, source, conn_kind)
+        if not (drain_s and conn_s):
+            continue
+        psycopg_s = drain_s - copy_s
+        log.line(
+            f"{label} lớp psycopg={psycopg_s:+6.2f}s ({100 * psycopg_s / conn_s:4.1f}% đồng hồ "
+            f"tường)  cả ô={conn_s:6.2f}s = {arrow_mb / conn_s:5.2f} MB/s  "
+            f"{'ĐẠT' if arrow_mb / conn_s >= threshold else 'KHÔNG ĐẠT'} ngưỡng "
+            f"{threshold:.2f}  (cộng thêm {100 * (conn_s - copy_s) / copy_s:4.1f}% lên COPY)"
+        )
+    t_drain = _median_seconds(progress, source, "cursor_drain")
+    b_drain = _median_seconds(progress, source, "cursor_drain_binary")
+    t_conn = _median_seconds(progress, source, "connector")
+    b_conn = _median_seconds(progress, source, "connector_binary")
+    if t_drain and b_drain:
+        # Nền dây `copy_s` TRIỆT TIÊU trong hiệu hai lớp psycopg, nên hiệu đó
+        # BẰNG hiệu hai ô drain — và viết thẳng như thế thì con số không phụ
+        # thuộc vào một ô COPY thứ ba có độ tản mát riêng của nó.
+        log.line(f"chênh LỚP psycopg (nhị phân - text) = {b_drain - t_drain:+6.2f}s")
+    if t_conn and b_conn:
+        log.line(f"chênh CẢ Ô connector (nhị phân - text) = {b_conn - t_conn:+6.2f}s")
+    if t_drain and b_drain and t_conn and b_conn:
+        # Nhị phân đổi KIỂU object psycopg trả ra, nên bước Arrow có thể đi
+        # theo chiều ngược lại với lớp psycopg. In riêng để chiều đó nhìn thấy
+        # được thay vì bị hiệu tổng nuốt mất.
+        log.line(
+            f"chênh riêng bước Arrow (nhị phân - text) = "
+            f"{(b_conn - b_drain) - (t_conn - t_drain):+6.2f}s"
+        )
+
+
+def _print_split(progress: Progress, log: Logger) -> None:
+    """Phép TRỪ mà cả script này tồn tại để làm được."""
+    arrow_mb = progress.rows * progress.arrow_bytes_per_row / 1e6
+    log.line("")
+    log.line("=== TÁCH BA LỚP (giây, trung vị) ===")
+    # Lớp DÂY của cả hai định dạng đọc từ `copy_text` (biến thể CÓ md5), không
+    # từ `copy_text_nomd5`: `cursor_drain`/`connector` chở md5 trong câu SELECT
+    # của chúng, nên chỉ ô COPY có-md5 mới cùng khối lượng công việc phía server.
+    # `copy_text_nomd5` là TRẦN đường truyền, một đại lượng khác và in ở chỗ khác.
+    for source in ("aiven", "local"):
+        copy_s = _median_seconds(progress, source, "copy_text")
+        if not copy_s:
+            continue
+        for label, drain_kind, conn_kind in (
+            ("text  ", "cursor_drain", "connector"),
+            ("nhịphân", "cursor_drain_binary", "connector_binary"),
+        ):
+            drain_s = _median_seconds(progress, source, drain_kind)
+            conn_s = _median_seconds(progress, source, conn_kind)
+            if not (drain_s and conn_s):
+                continue
+            log.line(
+                f"{source:<6} {label} dây={copy_s:6.2f}s  "
+                f"+psycopg={drain_s - copy_s:+6.2f}s  "
+                f"+Arrow={conn_s - drain_s:+6.2f}s  = {conn_s:6.2f}s "
+                f"({arrow_mb / conn_s:.2f} MB/s Arrow)"
+            )
+    _print_binary_verdict(progress, log)
+    log.line("")
+    log.line("=== NHIỄU ĐÃ ĐỊNH LƯỢNG: chi phí SINH DÒNG (generate_series + md5) ===")
+    for source in ("aiven", "local"):
+        full = _median_seconds(progress, source, "copy_text")
+        plain = _median_seconds(progress, source, "copy_text_nomd5")
+        srv_full = statistics.median(
+            [
+                s.server_ms
+                for s in progress.samples
+                if s.source == source and s.kind == "explain_full"
+            ]
+            or [0.0]
+        )
+        srv_plain = statistics.median(
+            [
+                s.server_ms
+                for s in progress.samples
+                if s.source == source and s.kind == "explain_nomd5"
+            ]
+            or [0.0]
+        )
+        if not full:
+            continue
+        log.line(
+            f"{source:<6} COPY có-md5={full:6.2f}s  COPY hằng-chuỗi={plain:6.2f}s  "
+            f"chênh={full - plain:+6.2f}s  ({100 * (full - plain) / full:4.1f}% của ô COPY)"
+        )
+        log.line(
+            f"{'':<6} EXPLAIN ANALYZE: đủ={srv_full / 1000:6.2f}s  không-md5="
+            f"{srv_plain / 1000:6.2f}s  chênh={(srv_full - srv_plain) / 1000:+6.2f}s "
+            "(chỉ CPU server, không có dây)"
+        )
+
+    aiven_conn = _median_seconds(progress, "aiven", "connector")
+    local_conn = _median_seconds(progress, "local", "connector")
+    local_real = _median_seconds(progress, "local", "connector_real_table")
+    aiven_copy = _median_seconds(progress, "aiven", "copy_text")
+    aiven_wire = _median_seconds(progress, "aiven", "copy_text_nomd5")
+    if aiven_conn and local_conn:
+        log.line("")
+        log.line("=== VERDICT (số thô — diễn giải nằm ở báo cáo) ===")
+        log.line(
+            f"Aiven qua connector, generate_series : {aiven_conn:6.2f}s = "
+            f"{arrow_mb / aiven_conn:5.2f} MB/s Arrow   <- ô so với 7,3 MB/s của ĐO 3"
+        )
+        log.line(
+            f"Local qua connector, generate_series : {local_conn:6.2f}s = "
+            f"{arrow_mb / local_conn:5.2f} MB/s Arrow"
+        )
+        if local_real:
+            log.line(
+                f"Local qua connector, BẢNG THẬT       : {local_real:6.2f}s = "
+                f"{arrow_mb / local_real:5.2f} MB/s Arrow   <- chi phí MÃ, sạch nhiễu sinh dòng"
+            )
+        if aiven_copy:
+            log.line(
+                f"Aiven COPY có-md5 (trần dây + sinh)  : {aiven_copy:6.2f}s = "
+                f"{arrow_mb / aiven_copy:5.2f} MB/s Arrow-tương-đương"
+            )
+        if aiven_wire:
+            log.line(
+                f"Aiven COPY hằng-chuỗi (TRẦN MẠNG)    : {aiven_wire:6.2f}s = "
+                f"{arrow_mb / aiven_wire:5.2f} MB/s Arrow-tương-đương  "
+                "<- trần cho MỌI cài đặt đọc từ service này"
+            )
+            log.line("")
+            log.line(
+                f"Phần đồng hồ tường của ô Aiven mà TRẦN MẠNG đã chiếm: "
+                f"{100 * aiven_wire / aiven_conn:5.1f}%"
+            )
+            if local_real:
+                log.line(
+                    f"Phần đồng hồ tường của ô Aiven mà MÃ CLIENT chiếm (bảng thật local): "
+                    f"{100 * local_real / aiven_conn:5.1f}%"
+                )
+
+
+# ─────────────────────────── CLI ────────────────────────────
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--rows", type=int, default=500_000, help="Số dòng mỗi phép đo (ĐO 3 dùng 500.000)"
+    )
+    parser.add_argument(
+        "--batch-rows",
+        type=int,
+        default=100_000,
+        help="Dòng mỗi lô Arrow = itersize (ĐO 3 rút trần 7,3 MB/s từ cấu hình C4 = 100.000)",
+    )
+    parser.add_argument("--reps", type=int, default=3, help="Số lần lặp mỗi ô")
+    parser.add_argument("--sources", default="aiven,local")
+    parser.add_argument("--kinds", default=",".join(ALL_KINDS))
+    parser.add_argument("--calibration-rows", type=int, default=20_000)
+    parser.add_argument("--pg-image", default="postgres:17-alpine")
+    parser.add_argument("--aiven-env", type=Path, default=REPO_ROOT / "deploy/local/aiven.env")
+    parser.add_argument("--aiven-ca", type=Path, default=REPO_ROOT / "deploy/local/aiven-ca.pem")
+    parser.add_argument(
+        "--aiven-secret-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Thư mục Secret Kubernetes đã mount (một file mỗi khoá) thay cho --aiven-env. "
+            "Dùng khi chạy TRONG CỤM — xem read_secret_dir()."
+        ),
+    )
+    parser.add_argument(
+        "--verify-read-only",
+        action="store_true",
+        help="CỐ Ý thử CREATE TEMP TABLE/CREATE TABLE trước khi đo, để chứng minh server TỪ CHỐI",
+    )
+    parser.add_argument(
+        "--binary-typecheck",
+        action="store_true",
+        help=(
+            "Đọc CÙNG một hàng đủ kiểu qua text và qua nhị phân rồi so từng giá trị "
+            "(xem binary_typecheck). Chạy TRƯỚC mọi phép đo tốc độ."
+        ),
+    )
+    parser.add_argument(
+        "--storage-slack-mb",
+        type=int,
+        default=50,
+        help=(
+            "Khe cho phép TRÊN dung lượng đang dùng, kiểm lại sau MỖI khối. "
+            "Phép đo này đúng ra tăng 0 byte, nên khe hẹp là chủ ý."
+        ),
+    )
+    parser.add_argument(
+        "--state-dir", type=Path, default=REPO_ROOT / ".bench-state" / "probe-read-cost"
+    )
+    parser.add_argument("--fresh", action="store_true", help="Bỏ progress.json cũ, chạy lại từ đầu")
+    parser.add_argument(
+        "--report-only", action="store_true", help="Chỉ in tổng kết từ progress.json đã lưu"
+    )
+    return parser.parse_args(argv)
+
+
+def _peak_rss_kb() -> int:
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    state_dir: Path = args.state_dir
+    state_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = state_dir / "progress.json"
+    log = Logger(state_dir / "run.log")
+
+    try:
+        if args.fresh and progress_path.exists():
+            progress_path.unlink()
+            log.line(f"--fresh: đã xoá {progress_path}")
+
+        if args.report_only:
+            if not progress_path.exists():
+                log.line(f"Không có {progress_path} — chưa có lần chạy nào để in.")
+                return 1
+            replayed_only = load_progress(progress_path)
+            print_summary(
+                replayed_only,
+                log,
+                {(x.source, x.kind, x.rep) for x in replayed_only.samples},
+            )
+            return 0
+
+        sources = [s.strip() for s in args.sources.split(",") if s.strip()]
+        kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
+        unknown = [k for k in kinds if k not in ALL_KINDS]
+        if unknown:
+            log.line(f"--kinds có tên lạ: {unknown}. Hợp lệ: {list(ALL_KINDS)}")
+            return 1
+
+        columns = bench_column_infos()
+        progress = (
+            load_progress(progress_path)
+            if progress_path.exists()
+            else Progress(
+                rows=args.rows,
+                batch_rows=args.batch_rows,
+                reps=args.reps,
+                arrow_bytes_per_row=0.0,
+                env=Environment(),
+            )
+        )
+        if progress_path.exists():
+            log.line(f"Tiếp tục từ {progress_path} ({len(progress.samples)} mẫu đã có).")
+            if (progress.rows, progress.batch_rows) != (args.rows, args.batch_rows):
+                log.line(
+                    f"TỪ CHỐI: progress.json đo {progress.rows:,} dòng / "
+                    f"{progress.batch_rows:,} dòng-lô, lần này xin {args.rows:,} / "
+                    f"{args.batch_rows:,}. Trộn hai hình dạng vào một tổng kết là "
+                    "cách chắc chắn nhất để ra một con số vô nghĩa — dùng --fresh "
+                    "hoặc một --state-dir khác."
+                )
+                return 1
+            progress.reps = max(progress.reps, args.reps)
+
+        done = {(s.source, s.kind, s.rep) for s in progress.samples}
+
+        aiven_conn: psycopg.Connection[Any] | None = None
+        local_conn: psycopg.Connection[Any] | None = None
+        headroom: StorageHeadroom | None = None
+        local_dsn = ""
+
+        with (
+            local_postgres(args.pg_image, log) if "local" in sources else _null_context()
+        ) as maybe_dsn:
+            if "local" in sources:
+                assert maybe_dsn is not None
+                local_dsn = maybe_dsn
+                # KHÔNG autocommit — cursor CÓ TÊN đòi một transaction block
+                # (`DECLARE CURSOR can only be used in transaction blocks`), và
+                # `PostgresConnector` production cũng mở connection ở đúng chế
+                # độ này (`psycopg.connect(dsn)` không truyền autocommit).
+                local_conn = psycopg.connect(local_dsn)
+                progress.env.local_version = _scalar(local_conn, "SELECT version()")[:70]
+                progress.env.local_image = args.pg_image
+                progress.env.local_rtt_ms = round_trip_ms(local_conn)
+                if "connector_real_table" in kinds:
+                    seed_local_table(local_dsn, args.rows, log)
+
+            if "aiven" in sources:
+                # `connect_read_only` chứ không `psycopg.connect`: nó ĐỌC LẠI
+                # `SHOW default_transaction_read_only` từ chính server trước khi
+                # trả connection. Một `options` sai chính tả vẫn cho connect
+                # thành công và im lặng bỏ qua tham số, nên chuỗi DSN một mình
+                # không chứng minh được gì.
+                aiven_conn = connect_read_only(
+                    aiven_dsn(args.aiven_env, args.aiven_ca, args.aiven_secret_dir),
+                    verify=args.verify_read_only,
+                )
+                with aiven_conn.cursor() as slot_cur:
+                    used_slots, max_slots = connection_slots(slot_cur)
+                aiven_conn.rollback()
+                log.line(
+                    f"  connection slot: {used_slots}/{max_slots} đang dùng "
+                    "(service này dùng CHUNG với control plane đang sống)"
+                )
+                progress.env.aiven_version = _scalar(aiven_conn, "SELECT version()")[:70]
+                progress.env.aiven_tls = describe_tls(aiven_conn)
+                progress.env.aiven_read_only = _scalar(
+                    aiven_conn, "SHOW default_transaction_read_only"
+                )
+                progress.env.cursor_result_format = cursor_result_format(aiven_conn)
+                progress.env.aiven_rtt_ms = round_trip_ms(aiven_conn)
+                if not progress.env.aiven_db_bytes_before:
+                    progress.env.aiven_db_bytes_before = total_database_bytes(aiven_conn)
+                # Trần = dung lượng ĐANG dùng cộng một khe hẹp. Phép đo này
+                # KHÔNG được ghi gì (chỉ-đọc + `generate_series`), nên mức tăng
+                # đúng của nó là 0 byte và bất cứ mức tăng nào cũng là một giả
+                # định đã vỡ. Trần hẹp làm nó vỡ NGAY ở khối kế tiếp, thay vì
+                # sau vài phút như lần `check_source_disk` bản đầu đã để lọt.
+                slack = args.storage_slack_mb * 1_000_000
+                headroom = StorageHeadroom(ceiling_bytes=progress.env.aiven_db_bytes_before + slack)
+                log.line(f"Aiven: {progress.env.aiven_version}")
+                log.line(f"  TLS: {progress.env.aiven_tls}")
+                log.line(f"  default_transaction_read_only = {progress.env.aiven_read_only}")
+                log.line(f"  tổng đĩa mọi database TRƯỚC: {progress.env.aiven_db_bytes_before:,} B")
+                # `connect_read_only` đã TỪ CHỐI mở nếu tham số không phải `on`,
+                # và với `--verify-read-only` nó đã thử GHI thật rồi. Dòng dưới
+                # chỉ ghi lại BẰNG CHỨNG vào báo cáo — nó không còn là phép kiểm.
+                if args.verify_read_only:
+                    for line in verify_read_only(aiven_conn):
+                        log.line(f"  {line}")
+            elif local_conn is not None:
+                progress.env.cursor_result_format = cursor_result_format(local_conn)
+
+            if args.binary_typecheck:
+                # TRƯỚC phép đo tốc độ, và KHÔNG dừng nếu lệch: một kiểu đổi
+                # giá trị làm hỏng KẾT LUẬN ("nhị phân là một thắng lợi"),
+                # không làm hỏng PHÉP ĐO. Số vẫn cần đo để báo cáo nói được
+                # "nhanh hơn ngần này NHƯNG sai ở kiểu kia".
+                #
+                # Ưu tiên Aiven khi có: câu hỏi là về CHÍNH server nguồn (bản
+                # dựng, phiên bản, tập kiểu của nó), nên chạy trên container
+                # local chỉ là phép thử nguội cho mã, không phải câu trả lời.
+                zoo_conn = aiven_conn or local_conn
+                assert zoo_conn is not None
+                binary_typecheck(zoo_conn, log)
+
+            if not progress.arrow_bytes_per_row:
+                calib_conn = local_conn or aiven_conn
+                assert calib_conn is not None
+                progress.arrow_bytes_per_row = calibrate_bytes_per_row(
+                    calib_conn, args.calibration_rows
+                )
+                calib_conn.rollback()
+                log.line(
+                    f"Hiệu chỉnh: {progress.arrow_bytes_per_row:.2f} byte Arrow/dòng "
+                    f"=> {args.rows:,} dòng = "
+                    f"{args.rows * progress.arrow_bytes_per_row / 1e6:.1f} MB Arrow"
+                )
+                save_progress(progress_path, progress)
+
+            # LẶP-TRƯỚC, không ô-trước: xem docstring đầu file (nhiễu mạng theo đợt).
+            for rep in range(progress.reps):
+                for source in sources:
+                    conn = aiven_conn if source == "aiven" else local_conn
+                    for kind in kinds:
+                        if kind in KINDS_LOCAL_ONLY and source != "local":
+                            continue
+                        if (source, kind, rep) in done:
+                            continue
+                        measured = run_one(
+                            kind,
+                            conn=conn,
+                            dsn=local_dsn,
+                            rows=args.rows,
+                            batch_rows=args.batch_rows,
+                            columns=columns,
+                        )
+                        progress.samples.append(
+                            Sample(
+                                source=source,
+                                kind=kind,
+                                rep=rep,
+                                rows=measured.rows,
+                                seconds=measured.seconds,
+                                wire_bytes=measured.wire_bytes,
+                                arrow_bytes=measured.arrow_bytes,
+                                server_ms=measured.server_ms,
+                                completed_at=datetime.now(UTC).isoformat(),
+                            )
+                        )
+                        # ĐÓNG transaction ngay sau mỗi mẫu. Connection không
+                        # autocommit nên mỗi phép đo mở một transaction ngầm, và
+                        # để nó treo `idle in transaction` trên Aiven giữ một
+                        # snapshot sống — trên một service 1 CPU đang chở control
+                        # plane thật, đó là thứ chặn autovacuum, không phải một
+                        # chi tiết vệ sinh. `rollback` chứ không `commit`: mọi
+                        # thứ ở đây là đọc, và connection Aiven vốn chỉ-đọc.
+                        if conn is not None:
+                            conn.rollback()
+                        # SAU MỖI KHỐI, không một lần lúc đầu. Đây là đúng dòng
+                        # mà bản đầu của hàng rào bên `measure_ingest_path.py`
+                        # thiếu, và thiếu nó là lý do cả service Aiven lật sang
+                        # chỉ-đọc giữa một lần chạy — xem `_aiven_guard`.
+                        if source == "aiven" and headroom is not None and conn is not None:
+                            with conn.cursor() as hr_cur:
+                                headroom.check(hr_cur, f"rep {rep} / {kind}")
+                            conn.rollback()
+                        progress.peak_rss_kb = max(progress.peak_rss_kb, _peak_rss_kb())
+                        save_progress(progress_path, progress)
+                        extra = ""
+                        if measured.wire_bytes:
+                            extra = f" dây={measured.wire_bytes / 1e6:.1f}MB"
+                        if measured.arrow_bytes:
+                            extra += f" arrow={measured.arrow_bytes / 1e6:.1f}MB"
+                        if measured.server_ms:
+                            extra += f" cpu_server={measured.server_ms / 1000:.2f}s"
+                        log.line(
+                            f"[rep {rep}] {source:<6} {kind:<20} "
+                            f"{measured.seconds:7.3f}s dòng={measured.rows:,}{extra}"
+                        )
+
+            if aiven_conn is not None:
+                progress.env.aiven_db_bytes_after = total_database_bytes(aiven_conn)
+                save_progress(progress_path, progress)
+                log.line(f"tổng đĩa mọi database SAU: {progress.env.aiven_db_bytes_after:,} B")
+                if headroom is not None:
+                    log.line(
+                        f"hàng rào đĩa: {len(headroom.checks)} lần kiểm SAU KHỐI, "
+                        f"chênh {headroom.delta:+,} byte (phép đo chỉ-đọc phải cho ra 0)"
+                    )
+                aiven_conn.close()
+            if local_conn is not None:
+                local_conn.close()
+
+        print_summary(progress, log, done)
+        return 0
+    finally:
+        log.close()
+
+
+@contextmanager
+def _null_context() -> Iterator[str | None]:
+    yield None
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

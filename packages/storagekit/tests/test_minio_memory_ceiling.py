@@ -31,9 +31,21 @@ MANIFEST = Path(__file__).resolve().parents[3] / "deploy" / "infra" / "minio.yam
 # có thể đang tuân thủ hoàn hảo mà tiến trình vẫn bị giết.
 MIN_HEADROOM_MIB = 64
 
-# Heap (`anon`) đo thật được trong lúc ghi, xem khối giải thích trong minio.yaml.
+# Heap (`anon`) đo thật được DƯỚI TẢI, xem khối giải thích trong minio.yaml.
 # Limit cứng phải trên nó, nếu không thì không lượng GC nào cứu được.
-MEASURED_ANON_MIB = 271
+#
+# 271 -> 374: con số cũ là của tải GHI ở Giai đoạn 2c. ĐO 3 (đường NẠP, Giai
+# đoạn 3a) đo lại trên cùng cgroup và thấy 374 Mi — 446/448 Mi tổng, 84% không
+# thu hồi được, chưa OOM kill. Con số cũ không SAI lúc nó được đo; nó chỉ không
+# còn là mốc cao nhất, và một hằng số "đo được" mà không ai đo lại thì mô tả một
+# hệ thống đã không còn tồn tại.
+#
+# Vì sao nó phải đi kèm một lần nâng GOMEMLIMIT: với 374, bất biến
+# `soft > MEASURED_ANON_MIB` bên dưới VỠ ở GOMEMLIMIT=352MiB cũ. Đó không phải
+# một phép canh khó tính — một giới hạn mềm nằm dưới working set thật là một
+# đích GC không bao giờ tới được, tức là trả CPU liên tục mà không mua được an
+# toàn nào. Phép canh đỏ đúng chỗ nó phải đỏ.
+MEASURED_ANON_MIB = 374
 
 
 def _quantity_to_mib(value: str) -> int:

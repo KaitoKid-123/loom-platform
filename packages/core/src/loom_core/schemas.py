@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from loom_core.cursor import parse_cursor_value
 from loom_core.item_definitions import ItemType
 
 
@@ -321,6 +322,243 @@ class QuerySubmitRequest(BaseModel):
     lakehouse_id: uuid.UUID
     sql: str
     workspace_id: uuid.UUID | None = None
+
+
+class IngestStartRequest(BaseModel):
+    """Body của `POST /api/v1/lakehouses/{lakehouse_id}/ingest` (Giai đoạn 3a).
+
+    `lakehouse_id` CỐ Ý không có mặt ở đây: nó nằm trên đường dẫn, và cổng
+    quyền (`item.update`) hỏi đúng giá trị đó. Nhận thêm một bản sao trong thân
+    request là mở đường cho hai giá trị lệch nhau — và khi chúng lệch, một bên
+    đã đi qua cổng quyền còn bên kia thì chưa. Cùng lớp lỗi mà
+    `QuerySubmitRequest.workspace_id` mô tả ở trên, chỉ khác là ở đây tránh
+    được hẳn bằng cách không khai trường nào.
+
+    `mode` là `Literal` chứ không `str`: một mode lạ phải là 422 ở BIÊN, trước
+    khi có hàng `ingest_run` nào được tạo và trước khi có Job nào được phóng.
+    Một `if mode not in (...)` trong handler cho cùng kết quả hôm nay và lặng
+    lẽ thôi bảo vệ vào ngày ai đó thêm mode thứ ba ở một chỗ mà quên chỗ kia.
+
+    `stream` giới hạn 255 ký tự để khớp cột `ingest_run.stream` — dài hơn thì
+    hỏng ở Postgres dưới dạng một 500, còn ở đây nó là một 422 chỉ đúng ô sai.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: uuid.UUID
+    stream: str = Field(min_length=1, max_length=255)
+    mode: Literal["full", "incremental"]
+
+
+class IngestRunAccepted(BaseModel):
+    """202 của `POST .../ingest` — chỉ `run_id`, và đó là đủ.
+
+    202 chứ không 201: hàng `ingest_run` đã tồn tại thật, nhưng việc nó mô tả
+    thì chưa xong — Job vừa mới được yêu cầu. Mọi thứ khác (trạng thái, số
+    dòng, lỗi) đọc qua `GET /ingest/{run_id}` ở Task 13; trả một bản chụp
+    trạng thái ngay tại đây chỉ là trả lại chuỗi `"pending"` mà người gọi đã
+    biết trước.
+    """
+
+    run_id: uuid.UUID
+
+
+class IngestRunStatus(BaseModel):
+    """`GET /api/v1/ingest/{run_id}` — bản chụp một hàng `ingest_run`.
+
+    `status` và `mode` là `str` chứ KHÔNG `Literal`, dù cả hai chỉ có bốn/hai
+    giá trị hợp lệ. Đây là một phản hồi dựng từ DỮ LIỆU ĐÃ LƯU, nên một
+    `Literal` ở đây biến một hàng lạ (sửa tay, một migration cũ, một phiên bản
+    sau thêm trạng thái mà quên chỗ này) thành lỗi validate PHẢN HỒI — tức là
+    500 cho đúng người đang cố tìm hiểu run của họ bị gì. Chỗ từ chối một
+    `mode` lạ là BIÊN NHẬN (`IngestStartRequest.mode`, một `Literal`), không
+    phải biên trả về. Cùng lập luận `IngestSpec.connection_slug` đã ghi.
+
+    `error` là `None` cho một run chưa hỏng, và đó là trường mang nhiều thông
+    tin nhất ở đây: nó thường chứa tên host nguồn và tên bảng (xem
+    `IngestCompletionReport.error`). Vì vậy đường đọc phải qua cổng `item.read`
+    trên LAKEHOUSE của run — xem `routers/ingest.py::get_ingest_run`.
+
+    KHÔNG có `workspace_id`: người gọi đã phải thấy được lakehouse để đọc tới
+    đây, và `lakehouse_id` là thứ dẫn họ tới mọi thứ khác. Thêm một id nữa chỉ
+    để "đầy đủ" là mở thêm một trường phải giữ đúng.
+    """
+
+    run_id: uuid.UUID
+    lakehouse_id: uuid.UUID
+    connection_id: uuid.UUID
+    stream: str
+    mode: str
+    status: str
+    rows_written: int
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
+class IngestSourceSpec(BaseModel):
+    """Cách TỚI nguồn, và KHÔNG BAO GIỜ cách MỞ nó.
+
+    Đây là bản chiếu có chủ đích của `ConnectionDefinition` với đúng một trường
+    bị bỏ đi: `secret_ref`. Pod nạp đã nhận credential nguồn qua `envFrom` từ
+    k8s Secret (xem `JobLauncher.launch`), nên nó KHÔNG cần gì thêm ở đây — và
+    lời hứa "control plane không đọc credential nguồn" (spec mục 5.2) sụp đổ
+    ÂM THẦM nếu spec bắt đầu mang theo dù chỉ là con trỏ tới nó: mọi thứ vẫn
+    chạy y nguyên, chỉ là bí mật đã đi qua một đường nó không cần đi qua.
+    `test_the_spec_never_mentions_a_password_or_a_secret` canh đúng điều đó.
+
+    KHÔNG dùng thẳng `ConnectionDefinition` rồi `exclude={"secret_ref"}` lúc
+    serialize: `exclude` là một tham số ở CHỖ GỌI, nên nó vắng mặt ở lần gọi
+    thứ hai mà không ai thấy. Một kiểu riêng không có ô đó thì không có gì để
+    quên loại trừ.
+    """
+
+    kind: str
+    host: str
+    port: int
+    database: str | None = None
+
+
+class IngestSpec(BaseModel):
+    """`GET /internal/ingest/{run_id}/spec` — mọi thứ pod nạp cần, không hơn.
+
+    `cursor_*` là watermark ĐANG lưu cho stream này, hoặc cả ba đều `None` khi
+    chưa có lần nạp nào (hoặc khi `mode="full"`). Ba trường đi CÙNG NHAU và
+    luôn cùng nhau: một `cursor_value` không kèm `cursor_type` là một chuỗi
+    không so sánh được (xem `loom_core.cursor`), còn không kèm `cursor_column`
+    thì không biết áp vào cột nào.
+
+    `workspace_id` có mặt để pod ghi vào đúng prefix storage; nó lấy TỪ hàng
+    `ingest_run` (được điền từ lakehouse lúc tạo run), không phải từ pod.
+
+    `connection_id` có mặt vì cột bronze `_source` LÀ nó (spec 3a mục 5.5: "biết
+    dòng tới từ nguồn nào"), và pod không có đường nào khác để biết: nó chỉ được
+    cấp `run_id`, và bảng `ingest_run` thì nó không đọc được (không có credential
+    Postgres control plane — xem `routers/internal_ingest.py`). Một id, không
+    phải một bí mật: `test_the_spec_never_mentions_a_password_or_a_secret` quét
+    toàn bộ thân phản hồi và trường này nằm trong phạm vi quét đó.
+
+    **`connection_slug` là `item.name` của connection, và nó đi CẠNH
+    `connection_id` chứ không thay nó.** Hai trường cho hai việc khác nhau, và
+    gộp lại thì một trong hai việc sai:
+
+    - `connection_slug` đi vào TÊN BẢNG bronze (`bronze.<slug>__<schema>_<bảng>`,
+      spec 3a mục 5) vì tên bảng phải đọc được — `bronze.pos_aiven__public_orders`
+      nói ngay dữ liệu tới từ đâu, còn một `connection_id.hex` trong tên bảng thì
+      không ai đọc ngược ra nguồn được.
+    - `connection_id` đi vào CỘT `_source` vì nó KHÔNG ĐỔI. `item.name` đổi được
+      (và `uq_item_active_name` chỉ giữ tên duy nhất trong phạm vi các item còn
+      `active`, nên một connection bị xoá mềm còn nhả tên nó ra cho một
+      connection khác dùng lại), nên một cột `_source` mang slug sẽ nói sai về
+      những dòng đã nằm đó hàng tháng.
+
+    Trường này BẮT BUỘC phải đi qua spec: pod không đọc được bảng `item` (không
+    có credential Postgres control plane), nên đây là đường DUY NHẤT để tên
+    connection tới được nó.
+
+    Chỉ `min_length`/`max_length`, KHÔNG lặp lại `pattern` của `ItemCreate.name`:
+    hình dạng tên đã được canh ở BIÊN nơi tên được đặt, và một `pattern` ở đây
+    biến một cái tên lạ (dữ liệu đã lưu) thành lỗi validate PHẢN HỒI — tức là 500
+    từ `/spec`, rồi một run `failed` mang lý do "HTTP 500". Chỗ từ chối đúng là
+    `loom_task.runner.bronze_table_name`: nó biết vì sao nó không mã hoá nổi cái
+    tên đó, và nói ra được trong `ingest_run.error`.
+    """
+
+    run_id: uuid.UUID
+    lakehouse_id: uuid.UUID
+    workspace_id: uuid.UUID
+    connection_id: uuid.UUID
+    connection_slug: str = Field(min_length=1, max_length=128)
+    stream: str
+    mode: Literal["full", "incremental"]
+    source: IngestSourceSpec
+    cursor_column: str | None = None
+    cursor_type: str | None = None
+    cursor_value: str | None = None
+
+
+class IngestProgressReport(BaseModel):
+    """`POST /internal/ingest/{run_id}/progress` — một lô đã hạ cánh.
+
+    **`cursor_type` đi CÙNG `cursor_value`, và đó là điều kiện để luật "watermark
+    chỉ tiến" có nghĩa.** `stream_state.cursor_value` là `Text`, nên không có
+    `cursor_type` thì so sánh duy nhất làm được là so CHUỖI — và so chuỗi trên
+    một cursor `bigint` làm watermark kẹt vĩnh viễn ở lần đầu vượt mốc đổi số
+    chữ số (`"1000" > "400"` là `False`). Xem docstring `loom_core.cursor`.
+
+    Cả ba phép kiểm dưới đây nằm Ở BIÊN, không trong handler: một `cursor_type`
+    lạ hay một `cursor_value` không đọc được phải là 422 kèm `errors[]` chỉ
+    đúng ô sai, TRƯỚC khi chạm database — cùng lý do `IngestStartRequest.mode`
+    là `Literal` chứ không một `if` trong handler.
+
+    `rows` là số dòng của LÔ NÀY, không phải tổng tích luỹ: pod không đọc lại
+    `ingest_run.rows_written` nên nó không biết tổng, và bắt nó tự cộng dồn
+    biến một lần gửi lại thành một lần đếm đè lên nhau.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rows: int = Field(ge=0)
+    cursor_column: str | None = Field(default=None, max_length=255)
+    cursor_type: str | None = None
+    cursor_value: str | None = None
+
+    @model_validator(mode="after")
+    def _cursor_fields_travel_together(self) -> "IngestProgressReport":
+        present = [
+            name
+            for name, value in (
+                ("cursor_column", self.cursor_column),
+                ("cursor_type", self.cursor_type),
+                ("cursor_value", self.cursor_value),
+            )
+            if value is not None
+        ]
+        if present and len(present) != 3:
+            raise ValueError(
+                "cursor_column, cursor_type and cursor_value must be sent together "
+                f"or not at all; got only {sorted(present)}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _cursor_value_matches_its_type(self) -> "IngestProgressReport":
+        if self.cursor_type is None or self.cursor_value is None:
+            return self
+        # Cả hai ngoại lệ đều là lớp con của `ValueError`, nên pydantic gom
+        # chúng vào `errors[]` như mọi lỗi validate khác — thông báo của chúng
+        # (kiểu nào hợp lệ / vì sao giá trị không đọc được) đi thẳng tới người
+        # gọi thay vì bị thay bằng một câu chung chung.
+        parse_cursor_value(self.cursor_type, self.cursor_value)
+        return self
+
+
+class IngestCompletionReport(BaseModel):
+    """`POST /internal/ingest/{run_id}/complete` — run đã kết thúc, theo hướng nào.
+
+    `error` BẮT BUỘC khi `status="failed"`. Một run `failed` không kèm lý do
+    không dẫn người vận hành đi đâu cả: pod đã bị dọn (`ttl_seconds_after_
+    finished=3600`, xem `jobs.py`) nên log của nó cũng không còn, và hàng
+    `ingest_run` là thứ duy nhất còn lại. Bắt buộc ở BIÊN chứ không "nên có"
+    trong handler.
+
+    Và `error` bị CẤM khi `status="succeeded"` — không phải sự khắt khe vô cớ:
+    cột `ingest_run.error` là thứ giao diện Task 13 hiển thị, và một run thành
+    công mang theo một dòng lỗi là một mâu thuẫn mà người đọc phải tự phân xử.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["succeeded", "failed"]
+    error: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _failure_says_why_and_success_does_not(self) -> "IngestCompletionReport":
+        if self.status == "failed" and not (self.error or "").strip():
+            raise ValueError("a failed run must carry a non-empty error")
+        if self.status == "succeeded" and self.error is not None:
+            raise ValueError("a succeeded run must not carry an error")
+        return self
 
 
 class LakehouseResolveResponse(BaseModel):

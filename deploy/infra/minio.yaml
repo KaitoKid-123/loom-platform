@@ -5,7 +5,8 @@
 # chuyển MinIO sang một VPS riêng (spec Giai đoạn 2 mục 2.0), lúc đó file này
 # không còn được apply và chart chỉ đổi `storage.endpoint`.
 #
-# Ngân sách RAM: cụm có trần 1,8 GB. Limit ở dưới là 448Mi, KHÔNG phải 320Mi như
+# Ngân sách RAM: cụm có NGÂN SÁCH TỰ ĐẶT 4 GiB (không phải giới hạn được thi hành —
+# xem đầu target `ram` trong Makefile). Limit ở dưới là 448Mi, KHÔNG phải 320Mi như
 # Giai đoạn 2a đặt — xem khối giải thích ở `resources` bên dưới trước khi hạ nó.
 # Vẫn phải đo lại tổng cả node (`make ram`) sau mỗi lần đổi con số đó.
 ---
@@ -125,8 +126,15 @@ spec:
             # KHÔNG do runtime Go quản (stack của thread hệ điều hành, vùng mmap,
             # buffer của cgo) — GOMEMLIMIT chỉ tính phần bộ nhớ Go tự quản, không
             # phải RSS.
+            #
+            # 352MiB ĐÃ HẾT ĐÚNG: ĐO 3 của Giai đoạn 3a đo `anon` 374 Mi dưới tải
+            # NẠP (446/448 Mi tổng, 84% không thu hồi được, chưa OOM kill). Một
+            # giới hạn MỀM nằm DƯỚI working set thật là một đích GC KHÔNG BAO GIỜ
+            # tới được: GC chạy cật lực suốt và vẫn không xuống dưới được, tức là
+            # trả CPU liên tục mà không mua được an toàn nào. Nâng lên 448MiB để
+            # nó lại nằm TRÊN working set đo được.
             - name: GOMEMLIMIT
-              value: "352MiB"
+              value: "448MiB"
           ports:
             - { containerPort: 9000, name: s3 }
             - { containerPort: 9001, name: console }
@@ -152,11 +160,33 @@ spec:
             # heap trên trần 320Mi thì chỉ còn ~49Mi cho mọi đợt tăng đột biến, và
             # một đợt upload multipart là đủ.
             #
-            # 448Mi = 271Mi đo được, cộng chỗ cho GOMEMLIMIT 352MiB làm việc, cộng
-            # biên. Cả node sau khi đổi vẫn phải dưới 1843Mi — `make ram` là trọng
-            # tài, đừng suy ra trên giấy.
+            # CẬP NHẬT Giai đoạn 3a: con số 271 Mi ở trên là của tải GHI 2c và nó
+            # KHÔNG còn là mốc cao nhất. ĐO 3 (đường NẠP) đo lại trên cùng cgroup:
+            #
+            #     anon    374 Mi   <- heap thật, KHÔNG thu hồi được
+            #     file     64 Mi   <- page cache
+            #     tổng    446 Mi trên trần 448 Mi  (99,6%)
+            #     oom_kill 0       <- chưa chết, nhưng không còn biên nào
+            #
+            # 374 Mi heap NẰM TRÊN GOMEMLIMIT 352MiB cũ, nên bất biến mà
+            # `test_minio_memory_ceiling.py` canh (`soft > anon đo được`) đã VỠ:
+            # giới hạn mềm thành một đích không tới được. Bộ ba số phải đi cùng
+            # nhau, và đây là phép tính:
+            #
+            #     anon đo được   374 Mi
+            #     GOMEMLIMIT     448 MiB  (trên working set, để GC có đích thật)
+            #     limit cứng     576 Mi   (448 + 128 biên, tối thiểu 64 theo phép canh)
+            #
+            # Đo tại chỗ ngày 2026-08-14 với bộ số CŨ, để thấy nó sát tới mức nào:
+            # `anon 263 Mi, current 301/448 Mi, memory.events max = 2528` — tức
+            # cgroup đã chạm trần 2528 lần rồi phải thu hồi, ở trạng thái GẦN NGHỈ.
+            #
+            # Cả node sau khi đổi vẫn phải trong ngân sách — `make ram` là trọng
+            # tài, đừng suy ra trên giấy. Đo sau khi đổi: node 1404 Mi / 4096 Mi.
+            # Lưu ý limit là TRẦN chứ không phải chỗ chiếm trước: nâng nó không
+            # làm MinIO dùng thêm một byte nào, nó chỉ dời chỗ hạt nhân ra tay.
             requests: { cpu: 50m, memory: 320Mi }
-            limits: { memory: 448Mi }
+            limits: { memory: 576Mi }
           securityContext:
             # Đã kiểm với đúng image pin: MinIO khởi động sạch dưới uid 1000 với
             # rootfs read-only. `/data` là PVC nên vẫn ghi được, và MinIO không

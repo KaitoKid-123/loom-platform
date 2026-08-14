@@ -4,6 +4,8 @@ from pydantic import ValidationError
 from loom_core.item_definitions import (
     DEFAULT_DEFINITION,
     DEFINITION_BY_TYPE,
+    K8S_SECRET_REF_RE,
+    SECRET_REF_RE,
     ConnectionDefinition,
     ItemType,
     canonical_hash,
@@ -127,6 +129,48 @@ def test_invalid_secret_ref_rejected(ref):
         ConnectionDefinition(
             schema_version=1, kind="postgres", host="db.local", port=5432, secret_ref=ref
         )
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "k8s://loom/loom-db-app#password",
+        "k8s://a/b#c",
+        "k8s://loom-prod-01/pg.credentials-1#POSTGRES_PASSWORD",
+        "k8s://x9-y/z.9-a#K_e-y.1",
+    ],
+)
+def test_every_k8s_ref_the_ingest_path_accepts_is_one_items_would_store(ref):
+    """`K8S_SECRET_REF_RE` phải là tập CON của `SECRET_REF_RE`.
+
+    Đường nạp (`loom_api.ingest_service.resolve_secret_ref`) dựa vào quan hệ
+    bao hàm này: nó chỉ bao giờ nhìn thấy những `secret_ref` mà
+    `ConnectionDefinition` đã nhận và đã lưu. Nếu bản `k8s://` có nhóm bắt hẹp
+    hơn ở một chỗ nào đó, hậu quả không phải là một lỗi cú pháp mà là một
+    connection ĐANG SỐNG bỗng không nạp được, với một 400 nói "not usable" về
+    đúng dữ liệu mà API đã chấp thuận. Hai regex dựng từ cùng các lớp ký tự
+    (xem `item_definitions.py`) nên hôm nay quan hệ đó là hiển nhiên — phép
+    kiểm này tồn tại để nó vẫn hiển nhiên sau lần ai đó nới một trong hai bên.
+    """
+    assert K8S_SECRET_REF_RE.match(ref), ref
+    assert SECRET_REF_RE.match(ref), ref
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "vault://loom/prod/db#password",  # nhánh vault: hợp lệ, nhưng không phải k8s
+        "k8s://loom/db#password\n",
+        "k8s://LOOM/db#password",  # namespace hoa: cả hai đều từ chối
+        "k8s://loom/db",  # thiếu #key
+    ],
+)
+def test_the_k8s_only_pattern_never_accepts_what_the_general_one_rejects(ref):
+    """Chiều còn lại của quan hệ bao hàm: không có chuỗi nào lọt qua bản hẹp mà
+    bản chung từ chối. `vault://...` có mặt ở đây vì nó là trường hợp DUY NHẤT
+    hợp lệ với bản chung nhưng phải trượt bản hẹp — đường nạp dựa vào đúng điều
+    đó để đưa ra thông báo "cụm này không tới được Vault"."""
+    assert not K8S_SECRET_REF_RE.match(ref) or SECRET_REF_RE.match(ref)
 
 
 def test_parse_definition_dispatches_on_type():
