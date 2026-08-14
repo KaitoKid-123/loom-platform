@@ -42,7 +42,7 @@ from loom_connector.postgres import PostgresConnector
 from loom_core.schemas import IngestSourceSpec, IngestSpec
 from loom_iceberg import Lakehouse, build_catalog
 from loom_task.client import IngestClient, IngestClientLike
-from loom_task.config import LakehouseSettings, Settings, SourceCredentials
+from loom_task.config import LakehouseSettings, ReadTuning, Settings, SourceCredentials
 from loom_task.runner import (
     bronze_table_name,
     check_schema,
@@ -148,8 +148,21 @@ def _build_sink(spec: IngestSpec) -> IcebergSink:
 
 
 def _build_connector(spec: IngestSpec) -> Connector:
+    """Nguồn ĐÃ MỞ ĐƯỢC, với đúng cỡ lô mà cấu hình nói — không phải cỡ lô mặc
+    định của connector.
+
+    `batch_rows` phải được truyền TƯỜNG MINH: `PostgresConnector` có mặc định
+    riêng là 10 000, nên bỏ tham số này ra không phải là "không cấu hình" mà là
+    "cấu hình bằng một con số khác, im lặng". Đúng lỗi đó đã chạy thật trong
+    production tới trước commit này, và ĐO 3 định giá nó ở 1,5 MB/s thay vì 3,6
+    MB/s — hơn một nửa thông lượng bị mất mà không có dòng log nào nhắc tới. Xem
+    `ReadTuning` cho gốc của con số và cho trần RAM chặn nó ở 40 000.
+    """
     credentials = SourceCredentials()
-    connector = PostgresConnector(dsn=_source_dsn(spec.source, credentials))
+    connector = PostgresConnector(
+        dsn=_source_dsn(spec.source, credentials),
+        batch_rows=ReadTuning().batch_rows,
+    )
     # `check()` TRƯỚC `discover()`: cả hai đều mở kết nối, nhưng chỉ `check()` trả
     # về một thông báo người vận hành đọc được thay vì một traceback psycopg —
     # xem docstring của nó. Một nguồn không nối được phải thành `error` của run,

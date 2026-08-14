@@ -85,6 +85,51 @@ class LakehouseSettings(BaseSettings):
     s3_endpoint: str = "http://minio.loom.svc.cluster.local:9000"
 
 
+class ReadTuning(BaseSettings):
+    """Số dòng mỗi lô ĐỌC từ nguồn — lớp thứ TƯ, và là lớp duy nhất chỉ để CHỈNH.
+
+    Ba lớp kia trả lời "làm sao nói/mở/ghi được"; lớp này không mở thêm đường nào
+    cả, nó chỉ đổi TỐC ĐỘ của đường đã có. Tách riêng vì đúng lý do đó: một giá
+    trị sai ở đây không làm pod mất khả năng báo lỗi, nó chỉ làm lần nạp chậm đi
+    hoặc tốn RAM hơn — một loại hỏng khác hẳn ba lớp trên, và trộn nó vào
+    `SourceCredentials` sẽ biến một con số chỉnh được thành một khoá bắt buộc
+    phải có trong Secret của connection.
+
+    **Mặc định 40 000 đến từ ĐO 3, không phải từ cảm giác.** Cùng đường nạp,
+    cùng nguồn, chỉ đổi số dòng/lô (0,149 GB, 50 lô ở cấu hình 10 000):
+
+        10 000 dòng/lô -> 1,5 MB/s, RSS đỉnh 402 MiB
+        40 000 dòng/lô -> 3,6 MB/s, RSS đỉnh 385 MiB   (+135% thông lượng)
+
+    RSS đỉnh THẤP HƠN chứ không cao hơn, nên đây không phải một phép đánh đổi
+    RAM lấy tốc độ ở khoảng này: commit catalog là chi phí CỐ ĐỊNH mỗi lô (~0,83s
+    bất kể lô lớn cỡ nào, ĐO 3), nên lô lớn gấp bốn nghĩa là số lần commit giảm
+    bốn lần trong khi phần dữ liệu sống trong RAM vẫn chỉ là MỘT lô.
+
+    **Vì sao KHÔNG nâng tiếp — đây là trần, không phải một con số bỏ dở.** ĐO 3
+    đo 100 000 dòng/lô ở RSS đỉnh 587 MiB, VƯỢT `limits.memory` 512Mi của pod nạp
+    (`task.memory` trong `deploy/helm/loom/values.yaml`). Vượt limit là OOMKill,
+    và một pod bị OOMKill không báo được gì cả — `main.run_reporting_the_outcome`
+    nói rõ SIGKILL là một trong ba lớp trường hợp nó KHÔNG phủ — nên hàng
+    `ingest_run` nằm lại ở `running` cho tới vòng đối chiếu của Task 13. Đổi một
+    lần nạp chậm lấy một lần nạp chết-im-lặng là một cuộc đổi tồi.
+
+    **Vì sao là biến môi trường chứ không phải một hằng số trong mã.** Con số
+    trên chỉ đúng cho HÌNH DẠNG DÒNG đã đo; một bảng nguồn có cột rộng hơn đẩy
+    bức tường RAM xuống thấp hơn 40 000, và lúc đó người vận hành cần hạ nó
+    xuống ĐƯỢC mà không phải build lại ảnh — cùng lập luận với `task.memory` ở
+    `values.yaml`. `JobLauncher` không đặt biến này (khác ba trường của
+    `Settings`), nên mặc định ở đây là giá trị chạy thật của production.
+
+    `gt=0`: `PostgresConnector` cũng từ chối số không dương, nhưng nó từ chối
+    SAU khi DSN đã được ghép — một cấu hình vô nghĩa nên chết ở chỗ nó được đọc.
+    """
+
+    model_config = _ENV_ONLY
+
+    batch_rows: int = Field(default=40_000, gt=0)
+
+
 class SourceCredentials(BaseSettings):
     """Cách MỞ nguồn — cặp duy nhất mà `IngestSourceSpec` cố ý KHÔNG mang.
 
