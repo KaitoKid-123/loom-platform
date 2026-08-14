@@ -1166,3 +1166,148 @@ ram: check-context  ## Tổng RAM cụm đang dùng, so với NGÂN SÁCH tự �
 	if [ "$$node_mib" -gt 4096 ]; then \
 	  echo "  VƯỢT NGÂN SÁCH — cụm vẫn chạy, nhưng đây là tăng trưởng cần giải thích."; \
 	  echo "  Đừng nâng con số này cho hết đỏ mà chưa biết cái gì đang ăn thêm."; exit 1; fi
+
+# ─────────────────────── ĐO 5 GĐ3d: RSS của đường nạp ───────────────────────
+
+.PHONY: bench-source-up
+bench-source-up: check-context  ## Dựng Postgres NGUỒN dùng-một-lần trong cụm cho ĐO 5
+	@# Vì sao một Postgres TRONG CỤM chứ không Aiven: bảng bench trên Aiven không
+	@# còn tồn tại, và nó KHÔNG được dựng lại. ĐO 3 đã seed 1,2 triệu dòng lên
+	@# service gói 1 GB đĩa của chủ dự án và lật CẢ SERVICE sang chỉ-đọc trong lúc
+	@# control plane đang sống — chính lệnh dọn dẹp sau đó cũng bị từ chối. Một
+	@# Postgres trong cụm không chia đĩa với ai và bị xoá cùng deployment.
+	@#
+	@# Mật khẩu SINH TẠI ĐÂY và chỉ sống trong một Secret của cụm: nó không đi vào
+	@# file nào trong repo, nên nó không có đường nào tới một commit. (Repo là
+	@# public và `scripts/git-hooks` chặn credential — nhưng cách chắc chắn nhất là
+	@# không bao giờ ghi nó ra đĩa.)
+	@#
+	@# `postgres:17-alpine` KHÔNG pin trong deploy/versions.env, có chủ đích: đây
+	@# là Postgres của một phép đo, không phải của cụm — cùng lập luận đã ghi ở
+	@# `services/loom-task/tests/integration/conftest.py`, và cùng tag mà bốn bộ
+	@# integration test dùng, nên ảnh thường đã có sẵn trong docker của máy.
+	@#
+	@# Ảnh phải tới containerd của NODE — daemon docker của host KHÔNG phải runtime
+	@# của cụm (xem Tiltfile). Thiếu bước này thì pod `ImagePullBackOff` đi hỏi
+	@# docker.io.
+	@#
+	@# `docker save | ctr images import` chứ KHÔNG `k3d image import`, và đây là
+	@# một lỗi đã gặp THẬT trên máy này với đúng ảnh này: `k3d image import
+	@# postgres:17-alpine` (cả `-m direct` lẫn chế độ tools-node) chết với
+	@# `ctr: content digest sha256:3d424e6a...: not found` — ảnh trong docker của
+	@# máy này là một manifest INDEX đa kiến trúc, và đường tarball của k3d không
+	@# mang theo mọi blob mà index đó trỏ tới. Đáng chú ý hơn: chế độ tools-node in
+	@# lỗi đó rồi VẪN kết thúc bằng "Successfully imported image(s)" và thoát 0 —
+	@# đúng cạm bẫy mà Tiltfile ghi lại ở ghi chú (1), nên `crictl inspecti` dưới
+	@# đây không phải một phép kiểm cho đủ lệ.
+	@set -eo pipefail; \
+	docker image inspect postgres:17-alpine >/dev/null 2>&1 || docker pull postgres:17-alpine; \
+	docker save postgres:17-alpine \
+	  | docker exec -i k3d-$(CLUSTER)-server-0 ctr -n k8s.io images import - >/dev/null; \
+	docker exec k3d-$(CLUSTER)-server-0 \
+	  crictl inspecti -q docker.io/library/postgres:17-alpine >/dev/null || { \
+	  echo "postgres:17-alpine KHÔNG có trong node sau khi import"; exit 1; }; \
+	pw=$$(openssl rand -hex 16); \
+	kubectl -n $(NS) delete secret bench-source --ignore-not-found; \
+	kubectl -n $(NS) create secret generic bench-source \
+	  --from-literal=username=bench --from-literal=dbname=bench \
+	  --from-literal=password="$$pw"; \
+	kubectl -n $(NS) delete deployment bench-pg --ignore-not-found; \
+	kubectl -n $(NS) delete service bench-pg --ignore-not-found; \
+	kubectl -n $(NS) create deployment bench-pg --image=postgres:17-alpine \
+	  --port=5432 --dry-run=client -o json \
+	| jq '.spec.template.spec.containers[0].imagePullPolicy = "IfNotPresent" | .spec.template.spec.containers[0].env = [{"name":"POSTGRES_USER","valueFrom":{"secretKeyRef":{"name":"bench-source","key":"username"}}},{"name":"POSTGRES_DB","valueFrom":{"secretKeyRef":{"name":"bench-source","key":"dbname"}}},{"name":"POSTGRES_PASSWORD","valueFrom":{"secretKeyRef":{"name":"bench-source","key":"password"}}},{"name":"PGDATA","value":"/var/lib/postgresql/data/pgdata"}] | .spec.template.spec.containers[0].volumeMounts = [{"name":"data","mountPath":"/var/lib/postgresql/data"}] | .spec.template.spec.volumes = [{"name":"data","emptyDir":{}}]' \
+	| kubectl -n $(NS) apply -f -; \
+	kubectl -n $(NS) expose deployment bench-pg --port=5432 --target-port=5432; \
+	kubectl -n $(NS) rollout status deployment/bench-pg --timeout=180s
+	@# `pg_isready` chứ không một `sleep`: entrypoint của image khởi động Postgres
+	@# HAI lần (một lần tạm để chạy initdb, rồi restart), nên pod `Ready` KHÔNG
+	@# đồng nghĩa với "nhận connection".
+	@set -eo pipefail; \
+	for i in $$(seq 1 60); do \
+	  if kubectl -n $(NS) exec deploy/bench-pg -- pg_isready -U bench -d bench >/dev/null 2>&1; \
+	    then break; fi; \
+	  sleep 2; \
+	  [ "$$i" -lt 60 ] || { echo "bench-pg không nhận connection sau 120s"; exit 1; }; \
+	done
+	@# `kubectl exec -i` + redirect FILE, KHÔNG `psql -c "<SQL>"`: câu SQL có nháy
+	@# đơn, ngoặc vuông của mảng và dấu `%` — nhét nó qua recipe của Make (chỗ `%`
+	@# là ký tự đặc biệt) rồi qua shell rồi qua kubectl là ba tầng escape cho một
+	@# thứ đã là một file hợp lệ. `ON_ERROR_STOP=1` vì psql mặc định chạy tiếp sau
+	@# một câu hỏng và thoát 0 — một bảng nguồn seed nửa vời sẽ thành một phép đo
+	@# trên ít dòng hơn, không thành một lỗi.
+	@set -eo pipefail; \
+	kubectl -n $(NS) exec -i deploy/bench-pg -- \
+	  psql -U bench -d bench -v ON_ERROR_STOP=1 -f - < scripts/bench_source.sql
+
+.PHONY: bench-source-down
+bench-source-down: check-context  ## Xoá Postgres nguồn của ĐO 5 (đĩa đi cùng pod)
+	@# `emptyDir` nên xoá deployment là trả lại toàn bộ ~175 MB — không có PVC nào
+	@# sống sót, và đó là chủ đích: một bảng bench còn nằm đâu đó là một bảng bench
+	@# sẽ bị dùng lại bởi một phép đo tưởng rằng nó vừa tự dựng nguồn của mình.
+	kubectl -n $(NS) delete deployment bench-pg --ignore-not-found
+	kubectl -n $(NS) delete service bench-pg --ignore-not-found
+	kubectl -n $(NS) delete secret bench-source --ignore-not-found
+
+.PHONY: measure-ingest-rss
+measure-ingest-rss: check-context  ## ĐO 5 GĐ3d — RSS đỉnh đường nạp, add_files vs append
+	@# CÂU HỎI: lô 100.000 dòng có vừa trần 512Mi của pod nạp SAU khi có add_files
+	@# không. Nếu vừa thì việc lớn nhất còn lại của backlog ("dựng Arrow theo cột")
+	@# không cần làm. Xem docstring `scripts/measure_ingest_rss.py` cho lý do con
+	@# số này phải ĐO chứ không cộng ba phép đo cũ lại với nhau.
+	@#
+	@# Ảnh `loom/task:$(IMAGE_TAG)`, KHÔNG loom-query như bốn phép đo trước: đây là
+	@# ảnh pod nạp THẬT, và nó là ảnh DUY NHẤT có `loom_task` + `loom_connector`
+	@# cùng lúc. Build lại tại đây chứ không dùng ảnh có sẵn trong node: phép đo
+	@# này đo mã VỪA SỬA, và một ảnh cũ trong node sẽ đo mã cũ mà không nói gì.
+	@#
+	@# `resources` KHÔNG đặt trần RAM, có chủ đích và phải đọc kèm docstring của
+	@# script: mục đích là ĐỌC được `ru_maxrss`, còn một tiến trình bị OOMKill
+	@# không báo được con số nào cả (đúng bẫy ĐO 1 đã ăn). Trần pod không làm RSS
+	@# thấp đi — nó chỉ quyết định tiến trình có sống để kể lại hay không. Verdict
+	@# so con số đo được với 512 MiB, trong script.
+	@#
+	@# Cùng cách dựng Job như `probe-add-files`: script qua ConfigMap (KHÔNG
+	@# `python -c "$$(cat ...)"`, KHÔNG heredoc — cả hai đã vỡ THẬT, xem chú thích
+	@# dài ở `measure-ingest-pod`), credential MinIO GỐC + mật khẩu nguồn qua
+	@# secretKeyRef, `backoffLimit=0` để một lần chạy hỏng không sinh warehouse rác
+	@# thứ hai, và chờ `.status.succeeded`/`.status.failed` chứ không
+	@# `--for=condition=complete` (script thoát khác 0 khi không kết luận được).
+	@set -eo pipefail; \
+	kubectl -n $(NS) get deployment bench-pg >/dev/null 2>&1 || { \
+	  echo "Chưa có Postgres nguồn — chạy 'make bench-source-up' trước."; exit 1; }; \
+	docker build -f services/loom-task/Dockerfile -t loom/task:$(IMAGE_TAG) .; \
+	flock /tmp/loom-k3d-image-import.lock \
+	  k3d image import loom/task:$(IMAGE_TAG) -c $(CLUSTER) -m direct; \
+	kubectl -n $(NS) delete job measure-ingest-rss --ignore-not-found; \
+	kubectl -n $(NS) delete configmap measure-ingest-rss-script --ignore-not-found; \
+	kubectl -n $(NS) create configmap measure-ingest-rss-script \
+	  --from-file=measure_ingest_rss.py=scripts/measure_ingest_rss.py \
+	  --dry-run=client -o yaml | kubectl -n $(NS) apply -f -; \
+	kubectl -n $(NS) create job measure-ingest-rss --image=loom/task:$(IMAGE_TAG) \
+	  --dry-run=client -o json -- python /scripts/measure_ingest_rss.py $(ARGS) \
+	| jq '.spec.backoffLimit = 0 | .spec.template.spec.containers[0].imagePullPolicy = "IfNotPresent" | .spec.template.spec.containers[0].volumeMounts = [{"name":"script","mountPath":"/scripts"}] | .spec.template.spec.volumes = [{"name":"script","configMap":{"name":"measure-ingest-rss-script"}}] | .spec.template.spec.containers[0].env = [{"name":"MINIO_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-user"}}},{"name":"MINIO_SECRET_KEY","valueFrom":{"secretKeyRef":{"name":"minio-root","key":"root-password"}}},{"name":"BENCH_SOURCE_USER","valueFrom":{"secretKeyRef":{"name":"bench-source","key":"username"}}},{"name":"BENCH_SOURCE_DBNAME","valueFrom":{"secretKeyRef":{"name":"bench-source","key":"dbname"}}},{"name":"BENCH_SOURCE_PASSWORD","valueFrom":{"secretKeyRef":{"name":"bench-source","key":"password"}}},{"name":"BENCH_SOURCE_HOST","value":"bench-pg"}]' \
+	| kubectl -n $(NS) apply -f -; \
+	elapsed=0; phase=""; \
+	while [ "$$phase" != "Complete" ] && [ "$$phase" != "Failed" ]; do \
+	  if [ "$$elapsed" -ge 900 ]; then \
+	    echo "Job không kết thúc (Complete/Failed) sau 900s — xem trạng thái dưới:"; \
+	    kubectl -n $(NS) describe job measure-ingest-rss | tail -20; \
+	    kubectl -n $(NS) logs job/measure-ingest-rss --tail=40 || true; \
+	    kubectl -n $(NS) delete job measure-ingest-rss --ignore-not-found; \
+	    kubectl -n $(NS) delete configmap measure-ingest-rss-script --ignore-not-found; \
+	    exit 1; \
+	  fi; \
+	  sleep 5; elapsed=$$((elapsed + 5)); \
+	  succeeded=$$(kubectl -n $(NS) get job measure-ingest-rss \
+	    -o jsonpath='{.status.succeeded}' 2>/dev/null || true); \
+	  failed=$$(kubectl -n $(NS) get job measure-ingest-rss \
+	    -o jsonpath='{.status.failed}' 2>/dev/null || true); \
+	  if [ "$$succeeded" = "1" ]; then phase="Complete"; \
+	  elif [ "$$failed" = "1" ]; then phase="Failed"; \
+	  else phase=""; fi; \
+	done; \
+	kubectl -n $(NS) logs job/measure-ingest-rss; \
+	kubectl -n $(NS) delete job measure-ingest-rss --ignore-not-found; \
+	kubectl -n $(NS) delete configmap measure-ingest-rss-script --ignore-not-found; \
+	test "$$phase" = "Complete"
