@@ -228,3 +228,117 @@ def test_scan_size_bytes_matches_pyiceberg_manifest_stats_and_two_files_sum(
     assert all(task.file.file_size_in_bytes > 0 for task in tasks)
 
     assert lakehouse.scan_size_bytes(qualified) == expected_total
+
+
+def _snapshots(lakekeeper: str, warehouse_name: str, s3_endpoint: str, qualified: str) -> int:
+    """Số snapshot mà CATALOG thật sự đang lưu cho `qualified`.
+
+    Catalog RIÊNG, tải lại bảng: commit cập nhật metadata trên đối tượng `Table`
+    tại chỗ, nên con số đáng tin là con số catalog đã lưu chứ không phải bộ nhớ
+    cục bộ của một client đã giữ bảng từ trước (cùng lập luận với
+    `snapshot_count` trong `scripts/probe_iceberg_add_files.py`).
+    """
+    catalog = build_catalog(
+        catalog_uri=f"{lakekeeper}/catalog", warehouse=warehouse_name, s3_endpoint=s3_endpoint
+    )
+    return len(catalog.load_table(qualified).snapshots())
+
+
+def test_create_empty_makes_a_table_with_no_rows_and_no_snapshot(
+    lakehouse: Lakehouse, ns: str, lakekeeper: str, warehouse_name: str, s3_endpoint: str
+) -> None:
+    """`create_empty` cho ra một bảng CÓ schema, KHÔNG dòng, KHÔNG snapshot.
+
+    Ba vế, ba lý do:
+
+    * có schema — `register_files` sau đó nối cột theo tên, nên schema phải đúng
+      TRƯỚC file đầu tiên;
+    * không dòng — đây là chỗ `create_from` khác nó, và cả lý do nó tồn tại;
+    * không snapshot — điều kiện để `test_register_files_lands_n_files_in_one_
+      snapshot` đếm được "một snapshot" mà không phải trừ đi một snapshot khởi tạo.
+    """
+    qualified = f"{ns}.empty1"
+    schema = pa.schema([pa.field("i", pa.int64()), pa.field("s", pa.string())])
+
+    lakehouse.create_empty(qualified, schema)
+
+    assert lakehouse.exists(qualified) is True
+    assert lakehouse.schema(qualified).names == ["i", "s"]
+    assert lakehouse.scan(qualified).read_all().num_rows == 0
+    assert _snapshots(lakekeeper, warehouse_name, s3_endpoint, qualified) == 0
+
+
+def test_register_files_lands_n_files_in_one_snapshot(
+    lakehouse: Lakehouse, ns: str, lakekeeper: str, warehouse_name: str, s3_endpoint: str
+) -> None:
+    """BA file Parquet -> ĐÚNG một snapshot, và đọc lại đủ dòng.
+
+    Đây là tính chất mà cả Giai đoạn 3d dựa lên: `scripts/probe_iceberg_add_files.py`
+    đo nó ở N = 1, 5, 20 trên cụm thật, và bài này khoá nó lại qua CHÍNH hai hàm mà
+    `IcebergSink` gọi. Một `register_files` gọi `add_files` cho từng file trong một
+    vòng lặp vẫn cho đúng số dòng — chỉ phép đếm snapshot bắt được nó, và số commit
+    catalog chính là thứ đang được cắt.
+
+    Đọc lại dòng cũng là một phép canh chứ không trang trí: một snapshot không đăng
+    ký được dòng nào cũng là "một snapshot".
+    """
+    qualified = f"{ns}.reg1"
+    data = pa.table({"i": pa.array([1, 2], type=pa.int64())})
+    lakehouse.create_empty(qualified, data.schema)
+
+    writer = lakehouse.data_file_writer(qualified)
+    uris = [
+        writer.write(pa.table({"i": pa.array([n, n + 1], type=pa.int64())}), name=f"p{n}.parquet")
+        for n in (1, 3, 5)
+    ]
+    lakehouse.register_files(qualified, uris)
+
+    assert _snapshots(lakekeeper, warehouse_name, s3_endpoint, qualified) == 1
+    landed = lakehouse.scan(qualified).read_all().column("i").to_pylist()
+    assert sorted(landed) == [1, 2, 3, 4, 5, 6]
+
+
+def test_the_written_file_lands_inside_the_tables_own_location(
+    lakehouse: Lakehouse, ns: str
+) -> None:
+    """File phải nằm TRONG location của chính bảng — ràng buộc, không sở thích.
+
+    Thăm dò Q4b đã đo trên Lakekeeper thật: hai vị trí khác (trong warehouse nhưng
+    ngoài bảng, và ngoài warehouse) đều KHÔNG đăng ký được, vì credential STS mà
+    Lakekeeper vend hẹp theo TỪNG BẢNG. Bài này canh rằng `DataFileWriter` dựng
+    đường dẫn từ `table.location()` chứ không từ một tiền tố nào khác — nếu ai đó
+    "dọn dẹp" nó thành một thư mục dùng chung, `register_files` sẽ ném
+    `ACCESS_DENIED`, một câu không nhắc gì tới location.
+    """
+    qualified = f"{ns}.loc1"
+    data = pa.table({"i": pa.array([1], type=pa.int64())})
+    lakehouse.create_empty(qualified, data.schema)
+
+    uri = lakehouse.data_file_writer(qualified).write(data, name="inside.parquet")
+
+    assert uri.startswith("s3://")
+    assert uri.endswith("/data/inside.parquet")
+    lakehouse.register_files(qualified, [uri])
+    assert lakehouse.scan(qualified).read_all().num_rows == 1
+
+
+def test_registering_the_same_file_twice_is_refused_not_doubled(
+    lakehouse: Lakehouse, ns: str
+) -> None:
+    """`check_duplicate_files` phải chặn — nếu không, bảng nhân đôi trong IM LẶNG.
+
+    Thăm dò Q4c đã đo đúng điều đó với cờ TẮT: đăng ký lại một file đưa bảng từ
+    1000 lên 2000 dòng, không lỗi, không dấu vết. Bài này là phép canh cho dòng
+    `check_duplicate_files=True` trong `register_files` — tắt nó đi thì bài này đỏ
+    ở khẳng định cuối (2 dòng thay vì 1) chứ không ở `pytest.raises`.
+    """
+    qualified = f"{ns}.dup1"
+    data = pa.table({"i": pa.array([7], type=pa.int64())})
+    lakehouse.create_empty(qualified, data.schema)
+    uri = lakehouse.data_file_writer(qualified).write(data, name="once.parquet")
+    lakehouse.register_files(qualified, [uri])
+
+    with pytest.raises(ValueError, match="already referenced"):
+        lakehouse.register_files(qualified, [uri])
+
+    assert lakehouse.scan(qualified).read_all().num_rows == 1

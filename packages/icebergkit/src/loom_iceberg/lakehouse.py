@@ -6,6 +6,7 @@ làm cho việc đổi engine ở spec v1 mục 5.9 khả thi thay vì chỉ là
 chỗ gọi `Lakehouse` không cần biết PyIceberg tồn tại.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 # pyarrow (25.0.0, hiện đang dùng) không phát hành `py.typed` — khác với
@@ -13,7 +14,9 @@ from dataclasses import dataclass
 # `type: ignore` cục bộ ở đây thay vì thêm pyarrow vào danh sách bỏ qua toàn
 # workspace, vì chỉ file này chạm trực tiếp vào kiểu của pyarrow.
 import pyarrow as pa  # type: ignore[import-untyped]
+import pyarrow.parquet as pq  # type: ignore[import-untyped]
 from pyiceberg.catalog.rest import RestCatalog
+from pyiceberg.table import Table
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +27,58 @@ class TableInfo:
     @property
     def qualified(self) -> str:
         return f"{self.namespace}.{self.name}"
+
+
+class DataFileWriter:
+    """Ống ghi Parquet vào location của MỘT bảng, mở một lần rồi dùng lại.
+
+    Tồn tại vì `Lakehouse.register_files` (tức `Table.add_files`) chỉ nhận những
+    file ĐÃ GHI XONG, nên phải có một đường ghi Parquet TÁCH khỏi commit. Thăm dò
+    `scripts/probe_iceberg_add_files.py` (Q4b) đã đo trên Lakekeeper thật: file
+    chỉ đăng ký được khi nó nằm TRONG location của chính bảng — hai vị trí khác
+    (trong warehouse nhưng ngoài bảng, và ngoài warehouse) đều hỏng, vì Lakekeeper
+    vend credential STS hẹp theo TỪNG BẢNG. Vì vậy đường dẫn được dựng ở ĐÂY từ
+    `table.location()` chứ không do người gọi tự đặt: một người gọi chọn sai chỗ
+    sẽ nhận `ACCESS_DENIED`, một câu không nhắc gì tới location.
+
+    **Giữ một `Table` đã nạp, có chủ đích.** `table.io` mang credential STS mà
+    Lakekeeper VEND — đúng thứ pod nạp có trong tay, và cũng là thứ có HẠN. Nạp
+    lại bảng cho từng file (hình dạng của `Lakehouse.append`) sẽ làm mới credential
+    mỗi lô nhưng cộng một vòng REST cho mỗi lô, đúng loại chi phí cố định mà cả
+    việc dùng `add_files` tồn tại để cắt (ĐO 3: commit catalog chiếm 44% đồng hồ
+    tường). Nên writer được người gọi mở theo NHÓM và bỏ đi sau mỗi commit — xem
+    `IcebergSink.commit`, chỗ quyết định tuổi tối đa của credential.
+
+    Phần MÃ HOÁ Parquet là `pyarrow.parquet.write_table` THUẦN, nên file không có
+    field ID của Iceberg. Đó không phải chỗ bỏ sót: Q4a đã đo rằng chính
+    `add_files` ghi `schema.name-mapping.default` vào thuộc tính bảng, nên Iceberg
+    nối cột theo TÊN và người gọi không phải làm gì thêm.
+    """
+
+    def __init__(self, table: Table) -> None:
+        self._table = table
+
+    def write(self, data: pa.Table, *, name: str) -> str:
+        """Ghi MỘT file Parquet tên `name`, trả về URI để đưa cho `register_files`.
+
+        `close()` trong `finally` chứ không phó mặc cho `write_table`: pyarrow chỉ
+        đóng cái sink mà CHÍNH NÓ mở, nên một stream do người gọi đưa vào sẽ không
+        được flush nếu không ai đóng — và một file Parquet thiếu footer đọc ra là
+        "file quá ngắn", một câu không nhắc gì tới việc quên đóng.
+
+        `overwrite=True` KHÔNG phải một cách để ghi đè dữ liệu: hai lần chạy khác
+        nhau phải chọn hai `name` khác nhau (xem `IcebergSink._next_file_name`), và
+        cờ này chỉ để một lần chạy đứt rồi chạy lại không vấp vào file rác của
+        chính nó. Ghi đè một file ĐÃ ĐĂNG KÝ thì `add_files` không cứu được ai —
+        nên tên file là thứ phải đúng, không phải cờ này.
+        """
+        uri = f"{self._table.location()}/data/{name}"
+        out = self._table.io.new_output(uri).create(overwrite=True)
+        try:
+            pq.write_table(data, out)
+        finally:
+            out.close()
+        return uri
 
 
 class Lakehouse:
@@ -129,6 +184,51 @@ class Lakehouse:
 
     def append(self, qualified: str, data: pa.Table) -> None:
         self._catalog.load_table(qualified).append(data)
+
+    def create_empty(self, qualified: str, schema: pa.Schema) -> None:
+        """Tạo `qualified` KHÔNG có dòng nào, schema Iceberg sinh từ `schema` Arrow.
+
+        Khác `create_from` ở đúng một điểm, và điểm đó là cả lý do nó tồn tại:
+        `create_from` nối luôn dữ liệu (một commit), còn đường `add_files` cần bảng
+        có mặt TRƯỚC khi ghi file — `DataFileWriter` dựng đường dẫn từ
+        `table.location()`, và một bảng chưa tồn tại thì chưa có location.
+
+        Bảng rỗng ở đây KHÔNG có snapshot nào: `register_files` sau đó thêm ĐÚNG
+        MỘT snapshot cho cả nhóm file (đã đo với N = 1, 5, 20 —
+        `scripts/probe_iceberg_add_files.py` Q1).
+        """
+        self._catalog.create_table(qualified, schema=schema)
+
+    def data_file_writer(self, qualified: str) -> DataFileWriter:
+        """Mở một `DataFileWriter` cho `qualified` — MỘT vòng REST, dùng cho N file.
+
+        Xem `DataFileWriter` cho lý do người gọi nên giữ nó theo NHÓM lô thay vì
+        mở lại cho từng lô, và cho cái giá của việc giữ (credential STS có hạn).
+        """
+        return DataFileWriter(self._catalog.load_table(qualified))
+
+    def register_files(self, qualified: str, uris: Sequence[str]) -> None:
+        """Đăng ký N file Parquet đã ghi vào `qualified` bằng ĐÚNG MỘT commit.
+
+        Đây là phép thay cho "một `append` mỗi lô". Đã đo trên Lakekeeper v0.9.2 +
+        PyIceberg 0.11.1 thật (`scripts/probe_iceberg_add_files.py`): N file vào
+        ĐÚNG 1 snapshot với N = 1, 5, 20, và thời gian commit PHẲNG theo N
+        (0,56 / 0,62 / 0,61 s). So với 50 lần `append`: 3,2 s thay vì 47,9 s, đỉnh
+        RSS 173 thay vì 281 MiB.
+
+        **`check_duplicate_files=True` viết TƯỜNG MINH dù nó là mặc định của
+        PyIceberg.** Không phải để trang trí: cùng phép thăm dò (Q4c) đã đăng ký
+        LẠI một file với cờ tắt và bảng đi từ 1000 lên 2000 dòng, không lỗi, không
+        dấu vết. Một ngày nào đó có người thấy phép kiểm này tốn thời gian (nó đọc
+        MỌI manifest của bảng, nên giá của nó lớn dần theo bảng) và muốn tắt — dòng
+        này cùng đoạn chú thích này là thứ họ phải đọc trước.
+
+        KHÔNG nuốt lỗi: đăng ký lại một file đã có sẽ ném, và đó là hành vi mong
+        muốn — người gọi (`IcebergSink`) đặt tên file theo `run_id` + số thứ tự nên
+        một lần trùng tên là một lỗi trong cách đặt tên, không phải một sự cố cần
+        bỏ qua.
+        """
+        self._catalog.load_table(qualified).add_files(list(uris), check_duplicate_files=True)
 
     def scan(self, qualified: str) -> pa.RecordBatchReader:
         """Trả một reader theo LUỒNG, KHÔNG một bảng đã nạp hết vào RAM.
