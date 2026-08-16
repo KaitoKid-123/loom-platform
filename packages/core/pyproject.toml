@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Model và cấu hình dùng chung giữa control plane và task pod"
 requires-python = ">=3.12"
 dependencies = [
+    "croniter>=6.0",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
 ]
