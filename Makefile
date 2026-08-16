@@ -298,8 +298,19 @@ bootstrap:  ## Cài k3d, tilt, kubeconform và kiểm tra môi trường
 cluster-up:  ## Tạo cụm k3d nếu chưa có
 	@# --image đè lên config file: cluster.yaml không có trường `image:` nên nếu
 	@# không truyền cờ này thì K3S_IMAGE trong versions.env hoàn toàn vô tác dụng.
+	@# k3s ignore runtime.dns trong cluster.yaml — phải patch coredns trực tiếp
+	@# để cluster resolve được external DNS (Aiven, google, v.v.).
+	@# Idempotent: patch thành công cả khi coredns đã đúng. Rollout restart
+	@# cũng idempotent nếu coredns đang healthy.
 	@k3d cluster list -o json | jq -e '.[] | select(.name=="$(CLUSTER)")' >/dev/null 2>&1 \
 		|| k3d cluster create --config deploy/k3d/cluster.yaml --image "$(K3S_IMAGE)"
+	@# Sau khi cluster tồn tại (dù mới tạo hay đã có), patch coredns
+	@# idempotent-safe: sed thay thế đúng một lần; rollout restart thành công nếu
+	@# coredns đang healthy.
+	kubectl --context k3d-$(CLUSTER) get configmap -n kube-system coredns -o yaml \
+	  | sed 's|forward \. /etc/resolv.conf|forward . 8.8.8.8 1.1.1.1|' \
+	  | kubectl --context k3d-$(CLUSTER) apply -f -
+	kubectl --context k3d-$(CLUSTER) rollout restart deployment/coredns -n kube-system
 	@# `k3d cluster create` tự chuyển context, nhưng nhánh idempotent (cụm đã có)
 	@# thì không — mà máy này có sẵn kubeconfig trỏ vào một cụm thật khác. Chốt
 	@# context ở đây để `make infra` phía sau không cần người dùng nhớ đổi tay,
