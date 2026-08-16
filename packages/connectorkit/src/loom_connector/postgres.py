@@ -95,6 +95,20 @@ _ARROW_TYPE_MAP: dict[str, pa.DataType] = {
     "smallint": pa.int16(),
     "integer": pa.int32(),
     "bigint": pa.int64(),
+    # Chế độ nhị phân (`binary=True`): Postgres gửi giá trị `real` dưới dạng
+    # nhị phân IEEE 754 single-precision, và con số đó VỪA ĐỦ để lưu một giá trị
+    # float32 — float64 nhận 8 byte nhưng chỉ đọc 4 byte đầu, kết quả sai. Chế
+    # độ text (`::text` hoặc mặc định): Postgres gửi chuỗi `REPRESENTATION` dưới
+    # dạng decimal có thể mất độ chính xác (đã đo: `0.1 + 0.2` về `'0.30000000000000004'`).
+    # Nếu binary mode được kích hoạt trong tương lai, PHẢI có một phép canh:
+    #
+    #     assert _ARROW_TYPE_MAP["real"] is pa.float32(), (
+    #         "binary=True yêu cầu real -> float32; float64 nhận sai giá trị "
+    #         "vì đọc 4 byte nhị phân float32 bằng 8 byte"
+    #     )
+    #
+    # thay vì thêm bất kỳ bước ép kiểu nào khác — float32 là kiểu DUY NHẤT phù
+    # hợp ở cả hai đầu (Postgres phát, Arrow nhận).
     "real": pa.float32(),
     "double precision": pa.float64(),
     "boolean": pa.bool_(),

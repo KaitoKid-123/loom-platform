@@ -18,3 +18,9 @@ options:
       - arg: --disable=metrics-server
         nodeFilters:
           - server:*
+  runtime:
+    dns:
+      # Override Docker's default DNS (10.0.22.254 in this env is unreachable).
+      # CoreDNS in the cluster forwards to these via its forward plugin.
+      - 8.8.8.8
+      - 1.1.1.1
