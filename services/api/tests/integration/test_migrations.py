@@ -538,3 +538,102 @@ def test_stream_state_allows_only_one_watermark_per_stream(
         " VALUES (gen_random_uuid(), :lh, :cid, 'public.customers', 'updated_at', '1')"
     )
     assert _attempt(conn, other_stream, **base) is None
+
+
+def test_0007_rewrites_old_pipeline_definitions(
+    conn: sa.Connection, actor: uuid.UUID
+) -> None:
+    """Mot hang pipeline hinh dang CU phai doc duoc sau migration.
+
+    `PipelineDefinition` dat `extra="forbid"`, nen hai khoa `nodes`/`edges` con
+    sot lai lam `parse_definition` nem `ValidationError` — tuc 500 o moi route
+    doc item do.
+    """
+    ws = _new_workspace(conn, actor, "pipeline-test")
+
+    # Chen mot pipeline item voi dinh nghia dinh dang CU TRUOC khi upgrade
+    conn.execute(
+        sa.text(
+            "INSERT INTO item (id, tenant_id, workspace_id, name, type, display_name,"
+            " definition, definition_hash, created_by, updated_by)"
+            " VALUES (:id, :tenant, :ws, 'test-old-pipeline', 'pipeline',"
+            " 'test-old-pipeline',"
+            " '{\"schema_version\": 1, \"nodes\": [], \"edges\": []}'::jsonb,"
+            " :hash, :actor, :actor)"
+        ),
+        {
+            "id": uuid.uuid4(),
+            "tenant": DEFAULT_TENANT_ID,
+            "ws": ws,
+            "hash": "x" * 64,
+            "actor": actor,
+        },
+    )
+
+    # Doc lai definition cua pipeline vua chen — phai chua `steps`, khong chua `nodes`/`edges`
+    row = conn.execute(
+        sa.text(
+            "SELECT definition FROM item"
+            " WHERE workspace_id = :ws AND type = 'pipeline' AND name = 'test-old-pipeline'"
+        ),
+        {"ws": ws},
+    ).one_or_none()
+
+    assert row is not None, "pipeline item khong ton tai sau migration"
+    definition = row[0]
+    assert "steps" in definition, (
+        f"migration phai rewrite dinh nghia CU thanh `steps`, nhung nhan duoc: {definition}"
+    )
+    assert "nodes" not in definition, (
+        f"dinh nghia sau migration khong duoc con `nodes`, nhung nhan duoc: {definition}"
+    )
+    assert "edges" not in definition, (
+        f"dinh nghia sau migration khong duoc con `edges`, nhung nhan duoc: {definition}"
+    )
+
+
+def test_0007_pipeline_run_and_step_run_tables_exist(
+    engine: sa.Engine,
+) -> None:
+    """Hai bang moi phai ton tai tren schema DA migrate."""
+    with engine.connect() as connection:
+        tables = set(sa.inspect(connection).get_table_names())
+
+    assert "pipeline_run" in tables, "bang pipeline_run khong ton tai"
+    assert "pipeline_step_run" in tables, "bang pipeline_step_run khong ton tai"
+
+    # Kiem tra cac cot quan trong tren bang pipeline_run
+    with engine.connect() as connection:
+        columns = {
+            r[0]
+            for r in connection.execute(
+                sa.text(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_name = 'pipeline_run'"
+                )
+            )
+        }
+    assert "pipeline_id" in columns, "pipeline_run.phai co pipeline_id FK"
+    assert "workspace_id" in columns, "pipeline_run phai co workspace_id"
+    assert "scheduled_for" in columns, "pipeline_run phai co scheduled_for"
+    assert "status" in columns, "pipeline_run phai co status"
+    assert "run_as_user_id" in columns, "pipeline_run phai co run_as_user_id FK toi app_user"
+
+    # Kiem tra cac cot tren bang pipeline_step_run
+    with engine.connect() as connection:
+        columns = {
+            r[0]
+            for r in connection.execute(
+                sa.text(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_name = 'pipeline_step_run'"
+                )
+            )
+        }
+    assert "pipeline_run_id" in columns, "pipeline_step_run.phai co pipeline_run_id FK"
+    assert "step_index" in columns, "pipeline_step_run phai co step_index"
+    assert "step_type" in columns, "pipeline_step_run phai co step_type"
+    assert "status" in columns, "pipeline_step_run phai co status"
+    assert "ingest_run_id" in columns, (
+        "pipeline_step_run phai co ingest_run_id FK toi ingest_run (nap noi bang 3a)"
+    )

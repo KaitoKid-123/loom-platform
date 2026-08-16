@@ -378,9 +378,12 @@ class AuditLog(Base):
 class IngestRun(Base):
     """Một hàng cho mỗi lần thử nạp một stream nguồn vào bronze.
 
-    Trạng thái: `pending`, `running`, `succeeded`, `failed`. KHÔNG có
-    `cancelled` — chưa có gì tự sinh run nên chưa có gì để huỷ, và một nút Huỷ
-    dựng nửa vời còn tệ hơn là không có.
+    Trạng thái: `pending`, `running`, `succeeded`, `failed`. Ban đầu KHÔNG có
+    `cancelled` — chưa có gì tự sinh run nên chưa có gì để huỷ. Với Giai đoạn
+    3d (pipeline scheduling), `cancelled` trở nên có nghĩa: một pipeline run có
+    thể chủ động huỷ ingest run đang chạy trước khi nó xong. Một nút Huỷ dựng
+    nửa vời vẫn tệ hơn không có, nên huỷ chỉ được thực hiện khi Giai đoạn 3d
+    đã đủ để thực sự dừng được pod đang chạy.
 
     `pending` là khoảng trống giữa "hàng vừa được tạo" và "Job đã báo đang
     chạy". Một run kẹt mãi ở `pending` nghĩa là Job chưa bao giờ khởi động
@@ -501,3 +504,95 @@ class StreamState(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class PipelineRun(Base):
+    """Mot hang cho moi lan chay duoc lap lich mot pipeline.
+
+    `scheduled_for` la MOC NHIP cua scheduler, khong phai luc chay that su.
+    Mot run co the bi skip (neu tat ca cac step deu bi skip) hoac bi loi o bat
+    ky buoc nao.
+
+    Trang thai: `pending`, `running`, `succeeded`, `failed`, `skipped`.
+    """
+
+    __tablename__ = "pipeline_run"
+    __table_args__ = (
+        UniqueConstraint(
+            "pipeline_id",
+            "scheduled_for",
+            name="uq_pipeline_run_pipeline_scheduled_for",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    pipeline_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("item.id"), nullable=False, index=True
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workspace.id"), nullable=False
+    )
+    # MOC NHIP chu khong phai luc chay
+    scheduled_for: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="pending"
+    )
+    # Ly do skip, neu pipeline duoc lap lich nhung khong co gi de chay
+    skip_reason: Mapped[str | None] = mapped_column(Text)
+    run_as_user_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class PipelineStepRun(Base):
+    """Mot hang cho moi buoc trong mot pipeline run.
+
+    Cac buoc ingest NOI vao bang `ingest_run` (bang 3a), khong chep trang thai
+    sang day. Bang nay chi theo doi trang thai cua pipeline step thuan, con
+    trang thai ingest duoc doc truc tiep tu bang ingest_run qua FK.
+
+    Trang thai: `pending`, `running`, `succeeded`, `failed`.
+    """
+
+    __tablename__ = "pipeline_step_run"
+    __table_args__ = (
+        UniqueConstraint(
+            "pipeline_run_id",
+            "step_index",
+            name="uq_pipeline_step_run_run_index",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    pipeline_run_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_run.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="pending"
+    )
+    # FK toi ingest_run de theo doi trang thai buoc nap — KHONG chep trang
+    # thai sang day
+    ingest_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("ingest_run.id")
+    )
+    # query_id de truy van trang thai transform
+    query_id: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
