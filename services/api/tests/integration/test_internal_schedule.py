@@ -2,10 +2,12 @@
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_api.models import (
     DEFAULT_TENANT_ID,
@@ -18,16 +20,29 @@ from loom_api.models import (
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture
+async def session(api_world) -> AsyncIterator[AsyncSession]:
+    """Session RIÊNG của test, dựng trên cùng engine mà app dùng.
+
+    `Database` chỉ lộ ra `session()` — một async context manager — chứ KHÔNG có
+    `session_factory`, nên test phải tự dựng maker từ `api_world.engine`, đúng
+    khuôn `test_ingest_reconcile.py`. Mọi dữ liệu dựng sẵn phải được COMMIT:
+    app mở session riêng của nó và không thấy transaction của test.
+    """
+    maker = async_sessionmaker(api_world.engine, expire_on_commit=False)
+    async with maker() as s:
+        yield s
+
+
 async def test_tick_requires_the_shared_secret(api_world) -> None:
     """Khong co header secret -> 401."""
     response = await api_world.client.post("/internal/schedule/tick")
     assert response.status_code == 401
 
 
-async def test_a_due_schedule_creates_exactly_one_run(api_world) -> None:
+async def test_a_due_schedule_creates_exactly_one_run(api_world, session) -> None:
     """Mot lich den han -> mot pipeline_run duoc tao."""
     # Setup: create a workspace, user, and pipeline with schedule due now
-    session = api_world.app.state.db.session_factory()
 
     # Create a pipeline item
     pipeline_id = uuid.uuid4()
@@ -81,13 +96,17 @@ async def test_a_due_schedule_creates_exactly_one_run(api_world) -> None:
 
     # Verify ONE pipeline_run was created for this pipeline + tick moment
     runs = (
-        await session.execute(
-            select(PipelineRun).where(
-                PipelineRun.pipeline_id == pipeline_id,
-                PipelineRun.scheduled_for == due_at,
+        (
+            await session.execute(
+                select(PipelineRun).where(
+                    PipelineRun.pipeline_id == pipeline_id,
+                    PipelineRun.scheduled_for == due_at,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(runs) == 1
     assert runs[0].status == "pending"
 
@@ -98,9 +117,8 @@ async def test_a_due_schedule_creates_exactly_one_run(api_world) -> None:
     await session.commit()
 
 
-async def test_two_concurrent_ticks_create_exactly_one_run(api_world) -> None:
+async def test_two_concurrent_ticks_create_exactly_one_run(api_world, session) -> None:
     """Rang buoc UNIQUE thay the advisory lock — hai tick song song chi tao 1 run."""
-    session = api_world.app.state.db.session_factory()
 
     # Create a pipeline item
     pipeline_id = uuid.uuid4()
@@ -167,9 +185,8 @@ async def test_two_concurrent_ticks_create_exactly_one_run(api_world) -> None:
     await session.commit()
 
 
-async def test_a_pipeline_still_running_records_a_skipped_row(api_world) -> None:
+async def test_a_pipeline_still_running_records_a_skipped_row(api_world, session) -> None:
     """Mot run dang chay -> tick ghi hang skipped voi ly do."""
-    session = api_world.app.state.db.session_factory()
 
     # Create a pipeline item
     pipeline_id = uuid.uuid4()
@@ -233,14 +250,18 @@ async def test_a_pipeline_still_running_records_a_skipped_row(api_world) -> None
 
     # The skipped row should have a reason
     skip_runs = (
-        await session.execute(
-            select(PipelineRun).where(
-                PipelineRun.pipeline_id == pipeline_id,
-                PipelineRun.scheduled_for == due_at,
-                PipelineRun.status == "skipped",
+        (
+            await session.execute(
+                select(PipelineRun).where(
+                    PipelineRun.pipeline_id == pipeline_id,
+                    PipelineRun.scheduled_for == due_at,
+                    PipelineRun.status == "skipped",
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(skip_runs) == 1
     assert skip_runs[0].skip_reason is not None
 
@@ -251,9 +272,8 @@ async def test_a_pipeline_still_running_records_a_skipped_row(api_world) -> None
     await session.commit()
 
 
-async def test_the_next_step_starts_only_after_the_previous_succeeded(api_world) -> None:
+async def test_the_next_step_starts_only_after_the_previous_succeeded(api_world, session) -> None:
     """Buoc tiep theo chi bat dau khi buoc truoc da THANH CONG."""
-    session = api_world.app.state.db.session_factory()
 
     # Setup: create a pipeline with 2 steps
     pipeline_id = uuid.uuid4()
@@ -346,12 +366,16 @@ async def test_the_next_step_starts_only_after_the_previous_succeeded(api_world)
 
     # Verify step 1 (index 1) is now running
     steps = (
-        await session.execute(
-            select(PipelineStepRun)
-            .where(PipelineStepRun.pipeline_run_id == run_id)
-            .order_by(PipelineStepRun.step_index)
+        (
+            await session.execute(
+                select(PipelineStepRun)
+                .where(PipelineStepRun.pipeline_run_id == run_id)
+                .order_by(PipelineStepRun.step_index)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(steps) == 2
     assert steps[0].status == "succeeded"  # unchanged
     assert steps[1].status == "running"  # advanced by tick
@@ -365,9 +389,8 @@ async def test_the_next_step_starts_only_after_the_previous_succeeded(api_world)
     await session.commit()
 
 
-async def test_a_failed_step_stops_the_chain_and_fails_the_run(api_world) -> None:
+async def test_a_failed_step_stops_the_chain_and_fails_the_run(api_world, session) -> None:
     """Buoc hong -> DUNG chuoi, khong chay buoc tiep theo."""
-    session = api_world.app.state.db.session_factory()
 
     # Setup: create a pipeline with 2 steps
     pipeline_id = uuid.uuid4()
@@ -460,19 +483,21 @@ async def test_a_failed_step_stops_the_chain_and_fails_the_run(api_world) -> Non
 
     # Verify: step 1 is still pending, run is failed
     step_one = (
-        await session.execute(
-            select(PipelineStepRun).where(
-                PipelineStepRun.pipeline_run_id == run_id,
-                PipelineStepRun.step_index == 1,
+        (
+            await session.execute(
+                select(PipelineStepRun).where(
+                    PipelineStepRun.pipeline_run_id == run_id,
+                    PipelineStepRun.step_index == 1,
+                )
             )
         )
-    ).scalars().one()
+        .scalars()
+        .one()
+    )
 
     run = (
-        await session.execute(
-            select(PipelineRun).where(PipelineRun.id == run_id)
-        )
-    ).scalars().one()
+        (await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))).scalars().one()
+    )
 
     assert step_one.status == "pending"
     assert run.status == "failed"
