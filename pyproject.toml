@@ -14,6 +14,11 @@ dev = [
     "cryptography>=44.0",
     "psycopg2-binary>=2.9",  # driver sync chỉ dùng để verify schema trong test_migrations.py
     "boto3-stubs[s3,sts]>=1.35",
+    # croniter KHÔNG có py.typed, nhưng stub CHÍNH THỨC thì có — nên dùng stub
+    # thật thay vì một override `ignore_missing_imports`. Một override sẽ tắt
+    # kiểm type cho toàn bộ `loom_core.cron`, đúng module mà phép tính nhịp cron
+    # và luật DST nằm trong đó.
+    "types-croniter>=6.0",
     "duckdb>=1.1",
     "testcontainers[minio]>=4.9",
     # Đọc manifest trong deploy/infra/ để khẳng định tính chất của chúng
