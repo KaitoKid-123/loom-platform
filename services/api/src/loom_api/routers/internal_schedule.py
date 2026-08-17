@@ -8,8 +8,28 @@ lịch. Nó phải:
 3. Mỗi lịch gọi `decide()` (Task 5) để quyết định start/skip.
 4. Kiểm LẠI quyền của `run_as_user_id` (Task 8) — xem "Quyền" dưới.
 5. Tạo đúng MỘT `pipeline_run` cho mỗi nhịp (ràng buộc UNIQUE lo phần song song).
-6. Đẩy các run đang chạy sang bước tiếp theo (Task 7).
+6. Đối chiếu bước đang chạy rồi đẩy các run đang dở sang bước tiếp theo (Task 7).
 7. Trả nhanh — giới hạn trong `TICK_BUDGET_SECONDS`.
+
+## Vì sao một tick làm HAI việc, và vì sao nó POLL
+
+Không có callback nào báo cho tick biết một bước đã xong, và cả hai loại bước
+đều thiếu nó vì hai lý do khác nhau:
+
+- Bước `ingest`: pod nạp báo tiến độ vào hàng `ingest_run` qua
+  `/internal/ingest/*`. Nó không biết gì về pipeline — 3a có trước 3b — nên
+  `pipeline_step_run` không bao giờ được ai chạm tới từ phía đó.
+- Bước `sql`: `loom-query` trả `202 + query_id` rồi im lặng cho tới khi có
+  người `GET` (xem docstring `loom_query.routers.query`).
+
+Nên tick tự hỏi: nộp ở một nhịp, hỏi trạng thái ở các nhịp sau. Đó là cả lý do
+spec mục 2 gộp hai việc vào một tick thay vì dựng một đường callback thứ ba, và
+là lý do tick KHÔNG được đứng chờ — một câu SQL quét vài phút sẽ giữ một request
+và một session của pool 3+2 suốt thời gian đó.
+
+Hệ quả nhìn thấy được: một chuỗi `ingest → sql` cần vài nhịp để đi hết, mỗi nhịp
+một nấc. Với chu kỳ tick vài chục giây thì đó là độ trễ chấp nhận được cho một
+thứ vốn chạy theo cron.
 
 ## Lịch nằm ở đâu, và cái giá của chỗ đó
 
@@ -80,6 +100,7 @@ import uuid
 from datetime import UTC, datetime
 from time import monotonic
 
+import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ValidationError
@@ -101,7 +122,8 @@ from loom_api.models import (
     UserSession,
 )
 from loom_api.permissions import PermissionService
-from loom_api.routers.ingest import launch_ingest_job
+from loom_api.routers.ingest import launch_ingest_job, reconcile_ingest_run
+from loom_api.routers.query import query_request
 from loom_api.schedule_service import decide
 from loom_core.config import Settings
 from loom_core.cron import CronInvalid, TimezoneInvalid, next_tick
@@ -111,6 +133,7 @@ from loom_core.item_definitions import (
     PipelineDefinition,
     PipelineStep,
     ScheduleDefinition,
+    SqlStepConfig,
 )
 from loom_core.roles import Action
 from loom_core.schemas import Principal
@@ -339,6 +362,17 @@ async def _authority_failure(
 # ------------------------------------------------------------------ chạy bước
 
 
+def _clipped(text: str, limit: int = 400) -> str:
+    """Một dòng, cắt ngắn — thân phản hồi lỗi của một service đi vào cột `error`.
+
+    `pipeline_step_run.error` là `Text` nên không có giới hạn kỹ thuật, nhưng
+    một trang HTML lỗi của reverse proxy đổ nguyên vào đó thì cột này không còn
+    đọc được bằng mắt, và nó hiện lên giao diện 3c.
+    """
+    collapsed = " ".join(text.split())
+    return collapsed if len(collapsed) <= limit else collapsed[:limit] + " …"
+
+
 async def _fail_step(
     session: AsyncSession,
     run: PipelineRun,
@@ -357,6 +391,154 @@ async def _fail_step(
     await session.commit()
 
 
+async def _succeed_step(session: AsyncSession, step_run: PipelineStepRun) -> None:
+    """Đóng một bước ở trạng thái THÀNH CÔNG.
+
+    KHÔNG đụng tới `run.status`: một bước xong không có nghĩa run xong — quyết
+    định đó thuộc về `_advance_run`, nơi duy nhất nhìn thấy CẢ chuỗi. Hai chỗ
+    cùng đánh `succeeded` cho run là hai chỗ để một run kết thúc sớm khi còn bước
+    chưa chạy.
+    """
+    now = datetime.now(UTC)
+    step_run.status = "succeeded"
+    step_run.started_at = step_run.started_at or now
+    step_run.finished_at = now
+    await session.commit()
+
+
+async def _start_sql_step(
+    session: AsyncSession,
+    app_state: State,
+    settings: Settings,
+    run: PipelineRun,
+    step_run: PipelineStepRun,
+    config: SqlStepConfig,
+) -> None:
+    """Nộp câu SQL của một bước sang `loom-query`, và ghi lại `query_id`.
+
+    **Principal gửi đi là `run.run_as_user_id`, và đó là một quyết định về
+    QUYỀN, không phải một trường siêu dữ liệu.** `loom-query` không có OIDC: nó
+    nhận principal trong thân request và TIN nó, chỉ chặn bằng bí mật chia sẻ
+    (xem `loom_core.internal_auth`). Nên principal ta gửi CHÍNH LÀ thẩm quyền câu
+    SQL chạy dưới — `run_gate` của `loom-query` hỏi `/internal/authz/items` bằng
+    đúng principal đó. Gửi nhầm ai đó khác không phải một nhãn sai trong log; nó
+    là một câu SQL chạy bằng quyền của người không hề bấm nút nào.
+
+    `run.run_as_user_id` chứ không phải người tạo/sửa item: cùng lý do đã ghi ở
+    docstring module, và cột đó được ghi từ `ScheduleDefinition` lúc tạo run.
+
+    **`workspace_id` TRA TỪ lakehouse, không bao giờ nhận từ đâu khác** — cùng
+    luật mà `routers/query.py` ghi ở docstring của nó: nó là phạm vi phân giải
+    tên bảng ba phần, và một phạm vi sai làm cổng quyền chạy trên sai tập item.
+
+    **Hàng TRƯỚC, lời gọi mạng SAU** — cùng thứ tự với bước `ingest`, nhưng lý do
+    KHÔNG giống hệt và chỗ khác nhau đáng nói ra. Với `ingest`, phóng lại vô hại
+    vì `job_name` tất định theo `run_id`; với SQL thì KHÔNG: nộp lại một câu
+    `INSERT` là chèn hai lần. Nên nếu tiến trình chết giữa `commit()` và lời gọi
+    `POST`, bước nằm lại ở `running` mà không có `query_id` — và
+    `_reconcile_sql_step` đánh HỎNG đúng hình dạng đó thay vì nộp lại. Hỏng to
+    tiếng cho một câu SQL có-thể-đã-chạy là hướng đúng của hai hướng.
+    """
+    lakehouse = await _active_item(session, config.lakehouse_id, ItemType.lakehouse)
+    if lakehouse is None:
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            f"this step writes to lakehouse {config.lakehouse_id}, which no longer exists",
+        )
+        return
+
+    principal = await _run_as_principal(session, run.run_as_user_id)
+    if principal is None:
+        # `_authority_failure` đã hỏi đúng câu này lúc run được TẠO, nhưng bước
+        # SQL thường bắt đầu ở một tick SAU đó — và người kia có thể đã bị xoá
+        # trong khoảng giữa. Không có principal thì không có thẩm quyền nào để
+        # chạy câu SQL dưới danh nghĩa, và chạy nó dưới danh nghĩa "không ai" là
+        # đúng thứ không được phép xảy ra.
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            f"this run runs as user {run.run_as_user_id}, and that user no longer exists — "
+            "the SQL was not submitted. Set run_as_user_id in the pipeline definition to "
+            "someone who does.",
+        )
+        return
+
+    now = datetime.now(UTC)
+    step_run.status = "running"
+    step_run.started_at = now
+    run.status = "running"
+    await session.commit()
+
+    try:
+        response = await query_request(
+            app_state,
+            settings,
+            method="POST",
+            path="/query",
+            json_body={
+                "lakehouse_id": str(config.lakehouse_id),
+                "workspace_id": str(lakehouse.workspace_id),
+                "sql": config.sql,
+                "principal": principal.model_dump(mode="json"),
+            },
+        )
+    except httpx.HTTPError as exc:
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            f"loom-query could not be reached to run this step's SQL ({exc}); nothing was run.",
+        )
+        return
+
+    if response.status_code != 202:
+        # Thân phản hồi của `loom-query` đã đúng hình dạng người đọc cần (400 kèm
+        # dòng/cột SQL, 403 "thiếu quyền" — xem docstring `routers/query.py`),
+        # nên nó đi thẳng vào `error` thay vì bị dịch lại qua một câu chung chung.
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            f"loom-query refused this step's SQL with HTTP {response.status_code}: "
+            f"{_clipped(response.text)}",
+        )
+        return
+
+    query_id = _query_id_of(response)
+    if query_id is None:
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            "loom-query accepted this step's SQL but its reply carried no query_id, so there "
+            f"is nothing to poll: {_clipped(response.text)}",
+        )
+        return
+
+    step_run.query_id = query_id
+    await session.commit()
+
+
+def _query_id_of(response: httpx.Response) -> str | None:
+    """`query_id` trong thân một phản hồi 202, hoặc `None` nếu không đọc được.
+
+    Không để `response.json()` ném lên: một `loom-query` trả 202 kèm thân không
+    phải JSON (một proxy chen vào giữa, chẳng hạn) sẽ làm CẢ nhịp tick hỏng —
+    tức là mọi pipeline khác ngừng chạy vì một bước của một pipeline.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    query_id = body.get("query_id")
+    return str(query_id) if query_id else None
+
+
 async def _start_step(
     session: AsyncSession,
     app_state: State,
@@ -365,26 +547,26 @@ async def _start_step(
     step_run: PipelineStepRun,
     step: PipelineStep,
 ) -> None:
-    """Khởi động một bước: hàng Postgres TRƯỚC, Job SAU.
+    """Khởi động một bước: hàng Postgres TRƯỚC, việc thật SAU.
 
     Thứ tự đó là thứ tự của `start_ingest` và không đảo lại được — lý do đầy đủ
     ở docstring `routers/ingest.py`: hàng là *ý định*, Job chỉ là cách ý định
     thành sự thật, và `job_name` tất định theo `run_id` làm việc phóng lại vô
     hại. Đảo lại thì một commit hỏng để lại một pod đang chạy đi hỏi spec của
     một run không tồn tại.
+
+    Bước `sql` đi qua `_start_sql_step` (nộp sang `loom-query`); chỗ nó KHÁC
+    bước `ingest` — nộp lại một câu SQL KHÔNG vô hại — ghi ở docstring hàm đó.
     """
     now = datetime.now(UTC)
 
     if step.type == "sql":
-        # KHOẢNG TRỐNG ĐÃ BIẾT, ghi tên chứ không giấu: chạy câu SQL của một
-        # bước cần gọi `loom-query`, và đường đó chưa được nối (Task 11). Bước
-        # được đánh `running` và nằm đó — chuỗi KHÔNG tự đi tiếp. Nó không phải
-        # một lời nói dối trong bảng ("running" đúng là "đã bắt đầu, chưa xong")
-        # nhưng nó cũng chưa phải một bước chạy được.
-        step_run.status = "running"
-        step_run.started_at = now
-        run.status = "running"
-        await session.commit()
+        if step.sql is None:
+            # `PipelineStep._config_matches_type` chặn ở biên; ở đây là lớp phòng
+            # vệ cho JSONB ghi thẳng — cùng lập luận với nhánh `ingest` dưới.
+            await _fail_step(session, run, step_run, "this SQL step carries no sql configuration")
+            return
+        await _start_sql_step(session, app_state, settings, run, step_run, step.sql)
         return
 
     config = step.ingest
@@ -493,8 +675,13 @@ async def _process_due_pipeline(
     definition: PipelineDefinition,
     schedule: ScheduleDefinition,
     due_at: datetime,
-) -> str:
-    """Xử lý MỘT nhịp tới hạn. Trả `"started"` / `"skipped"` / `"failed"` / `"raced"`."""
+) -> tuple[str, uuid.UUID | None]:
+    """Xử lý MỘT nhịp tới hạn.
+
+    Trả kết cục (`"started"` / `"skipped"` / `"failed"` / `"raced"`) VÀ id của
+    run nếu nhịp này vừa khởi động một cái. Id đó dùng để đường đẩy bước bỏ qua
+    chính nó trong cùng một nhịp — xem `_advance_all_running_runs`.
+    """
     active_run = (
         (
             await session.execute(
@@ -561,7 +748,7 @@ async def _process_due_pipeline(
     )
     created_id = (await session.execute(statement)).scalar_one_or_none()
     if created_id is None:
-        return "raced"
+        return "raced", None
 
     if status == "failed":
         logger.warning(
@@ -571,11 +758,11 @@ async def _process_due_pipeline(
             scheduled_for=due_at.isoformat(),
         )
         await session.commit()
-        return "failed"
+        return "failed", None
 
     if status == "skipped":
         await session.commit()
-        return "skipped"
+        return "skipped", None
 
     run = (
         await session.execute(select(PipelineRun).where(PipelineRun.id == created_id))
@@ -585,7 +772,9 @@ async def _process_due_pipeline(
     # `secret_ref` không dùng được ở cụm này). Đọc lại trạng thái THẬT thay vì
     # báo "started" cho một run đã `failed` — con số trả về là thứ người vận
     # hành nhìn để biết đêm qua có gì chạy.
-    return "failed" if run.status == "failed" else "started"
+    if run.status == "failed":
+        return "failed", None
+    return "started", created_id
 
 
 async def _process_tick(
@@ -612,6 +801,7 @@ async def _process_tick(
 
     counts = {"started": 0, "skipped": 0, "failed": 0, "raced": 0}
     schedules_processed = 0
+    started_now: set[uuid.UUID] = set()
 
     for item in pipelines:
         if monotonic() >= deadline:
@@ -638,12 +828,14 @@ async def _process_tick(
             continue
 
         schedules_processed += 1
-        outcome = await _process_due_pipeline(
+        outcome, started_id = await _process_due_pipeline(
             session, app_state, settings, item, definition, schedule, due_at
         )
         counts[outcome] += 1
+        if started_id is not None:
+            started_now.add(started_id)
 
-    await _advance_all_running_runs(session, app_state, settings)
+    await _advance_all_running_runs(session, app_state, settings, deadline, started_now)
 
     await session.commit()
     return TickResponse(
@@ -658,9 +850,25 @@ async def _process_tick(
 
 
 async def _advance_all_running_runs(
-    session: AsyncSession, app_state: State, settings: Settings
+    session: AsyncSession,
+    app_state: State,
+    settings: Settings,
+    deadline: float,
+    started_now: set[uuid.UUID],
 ) -> None:
-    """Đẩy tất cả pipeline run đang chạy sang bước tiếp theo."""
+    """Đối chiếu rồi đẩy MỌI `pipeline_run` đang chạy — nửa thứ hai của một tick.
+
+    `started_now` là các run mà CHÍNH nhịp này vừa khởi động. Bỏ qua chúng: bước
+    0 của chúng bắt đầu cách đây vài mili giây, nên hỏi Kubernetes (hoặc
+    `loom-query`) về nó là một round trip mà câu trả lời đã biết trước. Chúng
+    được đối chiếu ở tick SAU, đúng nhịp polling mà cả đường này dựa vào.
+
+    `deadline` là CÙNG trần với vòng lặp lịch ở trên, không phải một trần thứ
+    hai: một tick chạy quá lâu là một request treo giữ một session của pool 3+2,
+    bất kể nửa nào của nó tiêu thời gian. Phần bỏ dở được tick sau nhặt lại —
+    an toàn vì mọi thao tác ở đây đọc-trạng-thái-rồi-quyết chứ không phải một
+    máy trạng thái nhớ mình đang ở đâu.
+    """
     running_runs = (
         (await session.execute(select(PipelineRun).where(PipelineRun.status == "running")))
         .scalars()
@@ -668,83 +876,290 @@ async def _advance_all_running_runs(
     )
 
     for run in running_runs:
+        if run.id in started_now:
+            continue
+        if monotonic() >= deadline:
+            logger.info("schedule.advance_budget_exhausted", run_id=str(run.id))
+            break
         await _advance_run(session, app_state, settings, run)
 
 
 async def _advance_run(
     session: AsyncSession, app_state: State, settings: Settings, run: PipelineRun
 ) -> None:
-    """Đẩy một `pipeline_run` sang bước tiếp theo.
+    """Đẩy MỘT `pipeline_run` một nấc: đối chiếu bước đang chạy, rồi quyết định.
 
-    Gọi sau khi tick đã xử lý các lịch tới hạn. Chỉ đẩy khi:
-    - Run đang ở trạng thái `running`
-    - Bước hiện tại đã hoàn thành (`succeeded` hoặc `failed`)
-    - Còn bước tiếp theo
+    Hai thì, và thứ tự giữa chúng là điều làm chuỗi đi được:
+
+    1. **Đối chiếu** bước đang `running` với nguồn sự thật của nó — hàng
+       `ingest_run` (và Job của nó) cho bước nạp, `loom-query` cho bước SQL.
+       Không có thì này, không gì trên đời chuyển một bước ra khỏi `running`:
+       không có callback nào từ `loom-query`, và pod nạp báo vào `ingest_run`
+       chứ không vào `pipeline_step_run`. Chuỗi đứng im vĩnh viễn.
+    2. **Quyết định** dựa trên chuỗi SAU khi đối chiếu — bước đầu tiên chưa
+       `succeeded` nói tất cả:
+
+       - `failed` → run `failed`, và các bước còn lại NẰM YÊN ở `pending`. Đây
+         là chốt quan trọng nhất của cả hàm: một câu SQL dựng silver chạy trên
+         bronze nạp dở cho ra một bảng SAI mà KHÔNG lỗi nào báo ra — đúng loại
+         hỏng không ai phát hiện, và tệ hơn hẳn một run dừng lại to tiếng.
+       - `running` → chưa tới lượt ai cả, chờ tick sau.
+       - `pending` → khởi động nó.
+       - không còn bước nào chưa `succeeded` → run `succeeded`.
+
+    Quét TUYẾN TÍNH theo `step_index` chứ không tìm "bước cuối đã kết thúc rồi
+    mở bước kế". Cách sau có một lỗ đã có thật trong bản trước: bước 0
+    `succeeded` + bước 1 `running` cho ra "bước kế = bước 1" và khởi động LẠI
+    một bước đang chạy — tức là hàng `ingest_run` thứ hai và một Job thứ hai
+    cho cùng một bước, MỖI TICK. Quét tuyến tính không có hình dạng đó: bước
+    đầu tiên chưa `succeeded` là bước 1, nó đang `running`, và câu trả lời là
+    không làm gì.
+
+    Mỗi tick, mỗi run: NHIỀU NHẤT một lần đối chiếu và NHIỀU NHẤT một lần khởi
+    động bước. Hai việc đó xảy ra trong CÙNG một tick khi lần đối chiếu vừa đóng
+    một bước và bước kế đang `pending` — đó là điều mong muốn (không phải đợi
+    thêm một nhịp cho một chuỗi đã sẵn sàng đi tiếp), và nó vẫn có trần: một run
+    mười bước không thể chạy hết trong một tick, nên nó không ăn hết ngân sách
+    của cả nhịp.
     """
-    # Tìm bước hiện tại (step_index cao nhất đã succeeded/failed)
-    current_step_result = await session.execute(
-        select(PipelineStepRun)
-        .where(
-            PipelineStepRun.pipeline_run_id == run.id,
-            PipelineStepRun.status.in_(["succeeded", "failed"]),
-        )
-        .order_by(PipelineStepRun.step_index.desc())
-        .limit(1)
-    )
-    current_step = current_step_result.scalars().first()
-
-    if current_step is None:
-        # Chưa bước nào hoàn thành — chỉ còn một việc đúng: khởi động bước 0 nếu
-        # nó vẫn `pending`. Mọi hình dạng khác (bước 0 đang `running`) là một
-        # bước đang làm việc, và giục nó là phóng Job thứ hai cho cùng một bước.
-        first_pending = (
-            (
-                await session.execute(
-                    select(PipelineStepRun)
-                    .where(
-                        PipelineStepRun.pipeline_run_id == run.id,
-                        PipelineStepRun.status == "pending",
-                    )
-                    .order_by(PipelineStepRun.step_index)
-                    .limit(1)
-                )
-            )
-            .scalars()
-            .first()
-        )
-
-        if first_pending is not None and first_pending.step_index == 0:
-            await _start_indexed_step(session, app_state, settings, run, first_pending)
-        return
-
-    if current_step.status == "failed":
-        # Dừng chuỗi — tất cả bước còn lại giữ `pending`. Bước sau chạy trên
-        # bronze thiếu dữ liệu sẽ cho ra một bảng silver SAI mà không lỗi nào
-        # báo ra, đúng dạng hỏng không ai phát hiện.
-        run.status = "failed"
-        await session.commit()
-        return
-
-    next_step = (
+    steps = list(
         (
             await session.execute(
-                select(PipelineStepRun).where(
-                    PipelineStepRun.pipeline_run_id == run.id,
-                    PipelineStepRun.step_index == current_step.step_index + 1,
-                )
+                select(PipelineStepRun)
+                .where(PipelineStepRun.pipeline_run_id == run.id)
+                .order_by(PipelineStepRun.step_index)
             )
         )
         .scalars()
-        .first()
+        .all()
     )
-
-    if next_step is None:
-        run.status = "succeeded"
-        run.finished_at = datetime.now(UTC)
-        await session.commit()
+    if not steps:
+        # Một run `running` không có bước nào. `_start_run` đánh `succeeded` ngay
+        # cho một definition rỗng, nên hình dạng này chỉ đến từ hàng ghi thẳng
+        # vào database. Không đối chiếu được gì, và ĐOÁN ở đây (succeeded? failed?)
+        # là bịa ra một kết cục — để nguyên và không làm gì.
         return
 
-    await _start_indexed_step(session, app_state, settings, run, next_step)
+    for step_run in steps:
+        if step_run.status == "running":
+            await _reconcile_step(session, app_state, settings, run, step_run)
+            # Đúng một bước chạy tại một thời điểm trong chuỗi tuyến tính này.
+            break
+
+    for step_run in steps:
+        if step_run.status == "succeeded":
+            continue
+        if step_run.status == "failed":
+            if run.status != "failed":
+                # `_fail_step` (đường thường) đã đánh cả hai; tới được đây nghĩa
+                # là bước hỏng từ một nhịp trước mà run chưa được đóng.
+                run.status = "failed"
+                run.error = run.error or step_run.error
+                run.finished_at = run.finished_at or datetime.now(UTC)
+                await session.commit()
+            return
+        if step_run.status == "running":
+            return
+        await _start_indexed_step(session, app_state, settings, run, step_run)
+        return
+
+    run.status = "succeeded"
+    run.finished_at = datetime.now(UTC)
+    await session.commit()
+
+
+async def _reconcile_step(
+    session: AsyncSession,
+    app_state: State,
+    settings: Settings,
+    run: PipelineRun,
+    step_run: PipelineStepRun,
+) -> None:
+    """Hỏi nguồn sự thật của một bước đang `running` xem nó xong chưa."""
+    if step_run.step_type == "ingest":
+        await _reconcile_ingest_step(session, app_state, settings, run, step_run)
+    else:
+        await _reconcile_sql_step(session, app_state, settings, run, step_run)
+
+
+async def _reconcile_ingest_step(
+    session: AsyncSession,
+    app_state: State,
+    settings: Settings,
+    run: PipelineRun,
+    step_run: PipelineStepRun,
+) -> None:
+    """Đóng một bước nạp theo hàng `ingest_run` của nó — KHÔNG có bộ đối chiếu thứ hai.
+
+    Trạng thái thật nằm ở `ingest_run`, và bước chỉ NỐI vào đó (spec mục 3: một
+    trạng thái ở hai chỗ là hai chỗ để lệch). Câu hỏi "hàng đó còn đường sống
+    không" đã có đúng một câu trả lời trong repo — `reconcile_ingest_run` ở
+    `routers/ingest.py`, cùng hàm mà `GET /api/v1/ingest/{run_id}` gọi. Viết một
+    bản thứ hai ở đây là mở ra chỗ để hai bên trôi khỏi nhau, và trôi ở đây là
+    một pipeline treo hoặc một pipeline báo thành công nó chưa từng có.
+
+    Cổng "không hỏi Kubernetes về một run đã kết thúc" nằm TRONG hàm đó, nên
+    đường này không chép lại nó — xem docstring `reconcile_ingest_run`.
+    """
+    if step_run.ingest_run_id is None:
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            "this ingest step is marked running but no ingest run is attached to it, so there "
+            "is nothing to follow — loom-api was interrupted while starting the step. Nothing "
+            "was ingested; start the pipeline again.",
+        )
+        return
+
+    ingest_run = (
+        await session.execute(select(IngestRun).where(IngestRun.id == step_run.ingest_run_id))
+    ).scalar_one_or_none()
+    if ingest_run is None:
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            f"the ingest run {step_run.ingest_run_id} this step points at no longer exists, so "
+            "how far it got cannot be known. Treat the target table as incomplete and start "
+            "the pipeline again.",
+        )
+        return
+
+    await reconcile_ingest_run(session, app_state, settings, ingest_run)
+
+    if ingest_run.status == "succeeded":
+        await _succeed_step(session, step_run)
+    elif ingest_run.status == "failed":
+        # Lý do THẬT của hàng `ingest_run` (pod tự báo qua `/complete`, hoặc câu
+        # đối chiếu viết ra) đi thẳng lên bước. Dịch lại thành một câu chung
+        # chung ở đây là vứt đúng dòng người vận hành cần đọc.
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            ingest_run.error or "the ingest for this step failed without recording a reason",
+        )
+    # `pending`/`running`: pod còn sống (hoặc Job còn đang khởi động). ĐỂ NGUYÊN
+    # — cùng mặc định mà `failure_from_job` chọn và cùng lý do: để một bước chết
+    # nằm thêm một tick là chậm, đánh hỏng một bước đang sống là giết việc thật.
+
+
+async def _reconcile_sql_step(
+    session: AsyncSession,
+    app_state: State,
+    settings: Settings,
+    run: PipelineRun,
+    step_run: PipelineStepRun,
+) -> None:
+    """Hỏi `loom-query` xem câu SQL của bước này xong chưa.
+
+    POLLING, không callback: `loom-query` trả `202 + query_id` rồi KHÔNG gọi lại
+    (xem docstring `loom_query.routers.query`). Tick nộp ở một nhịp và hỏi ở các
+    nhịp sau — đó chính là lý do spec mục 2 bắt một tick làm hai việc. Tick
+    KHÔNG được đứng chờ câu SQL: một câu quét vài phút sẽ giữ một request và một
+    session của pool 3+2 suốt thời gian đó.
+    """
+    if step_run.query_id is None:
+        # Hình dạng của một tiến trình chết giữa `commit()` và lời gọi `POST` ở
+        # `_start_sql_step`. Không nộp lại: câu SQL CÓ THỂ đã chạy, và chèn hai
+        # lần là làm hỏng dữ liệu bằng một phỏng đoán. Hỏng to tiếng.
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            "this SQL step is marked running but carries no query_id, so there is nothing to "
+            "poll — loom-api was interrupted between marking the step started and submitting "
+            "the SQL. The SQL may or may not have run; check the target table before starting "
+            "the pipeline again.",
+        )
+        return
+
+    try:
+        response = await query_request(
+            app_state, settings, method="GET", path=f"/query/{step_run.query_id}"
+        )
+    except httpx.HTTPError as exc:
+        # `loom-query` không với tới được lúc này. ĐỂ NGUYÊN bước ở `running` và
+        # hỏi lại ở tick sau: một lần restart pod (hoặc một giây mạng xấu) không
+        # phải bằng chứng câu SQL đã hỏng, và đánh hỏng ở đây sẽ giết một câu SQL
+        # đang chạy tốt. Nếu `loom-query` mất hẳn trạng thái thì nhánh 404 dưới
+        # đây đóng bước lại — nên "để nguyên" không phải một đường treo vô hạn.
+        logger.warning(
+            "schedule.query_status_unreachable",
+            pipeline_run_id=str(run.id),
+            step_index=step_run.step_index,
+            query_id=step_run.query_id,
+            reason=str(exc),
+        )
+        return
+
+    if response.status_code == 404:
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            f"loom-query no longer knows query {step_run.query_id} — it keeps query state in "
+            "memory only, so a restart loses every query in flight. Whether the SQL finished "
+            "is unknown; check the target table before starting the pipeline again.",
+        )
+        return
+
+    if response.status_code != 200:
+        logger.warning(
+            "schedule.query_status_unreadable",
+            pipeline_run_id=str(run.id),
+            step_index=step_run.step_index,
+            query_id=step_run.query_id,
+            status_code=response.status_code,
+        )
+        return
+
+    try:
+        body = response.json()
+    except ValueError:
+        logger.warning(
+            "schedule.query_status_not_json",
+            pipeline_run_id=str(run.id),
+            step_index=step_run.step_index,
+            query_id=step_run.query_id,
+        )
+        return
+
+    query_status = body.get("status") if isinstance(body, dict) else None
+    error = body.get("error") if isinstance(body, dict) else None
+
+    if query_status == "succeeded":
+        await _succeed_step(session, step_run)
+    elif query_status == "failed":
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            _clipped(str(error)) if error else "the SQL failed without a reason from loom-query",
+        )
+    elif query_status == "cancelled":
+        # Ai đó gọi `DELETE /query/{id}` lên một query của một pipeline. Không
+        # phải thành công, nên chuỗi phải dừng — bước sau chạy trên một bảng chỉ
+        # được dựng một nửa là đúng cái hỏng không ai thấy.
+        await _fail_step(
+            session,
+            run,
+            step_run,
+            f"query {step_run.query_id} was cancelled before it finished, so this step's table "
+            "may be half-written. Check it before starting the pipeline again.",
+        )
+    elif query_status != "running":
+        # Một trạng thái `loom-query` chưa từng trả về. ĐỂ NGUYÊN và kêu to:
+        # đoán `failed` sẽ giết một bước có thể đang chạy, còn đoán `succeeded`
+        # là báo một thành công không ai xác nhận — hướng tệ hơn hẳn.
+        logger.error(
+            "schedule.query_status_unknown",
+            pipeline_run_id=str(run.id),
+            step_index=step_run.step_index,
+            query_id=step_run.query_id,
+            query_status=str(query_status),
+        )
 
 
 async def _start_indexed_step(
