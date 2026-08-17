@@ -1,0 +1,129 @@
+{{/*
+Cái đồng hồ của nền tảng. KHÔNG có Service và KHÔNG có `ports` đi kèm file này,
+và đó là tính chất chứ không phải một thứ còn thiếu: tiến trình chỉ GỬI request
+(`python -m loom_scheduler.main`, xem `services/loom-scheduler/Dockerfile`) —
+không có gì để ai gọi vào.
+
+Hệ quả thứ hai: KHÔNG có probe HTTP nào. `loom-api`, `loom-query` và `loom-web`
+đều có `/healthz` vì chúng vốn đã phục vụ HTTP; dựng một server chỉ để làm vui
+lòng kubelet ở đây sẽ thêm một cổng, một Service, và một bề mặt tấn công cho
+một tiến trình mà cách hỏng duy nhất của nó là "tiến trình đã chết" — đúng thứ
+mà `restartPolicy: Always` của Deployment đã lo. Cách QUAN SÁT nó là log:
+`tick_ok`/`tick_rejected`/`tick_failed` mỗi nhịp, kèm bốn con số của
+`TickResponse` (xem `loom_scheduler.ticker`).
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "loom.fullname" . }}-scheduler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loom.labels" . | nindent 4 }}
+    app.kubernetes.io/component: scheduler
+spec:
+  {{/*
+  `replicas: 1` là TIẾT KIỆM, KHÔNG phải tính đúng đắn — đừng đọc con số này
+  thành "hai replica sẽ hỏng", vì nó không đúng.
+
+  Ràng buộc `UNIQUE (pipeline_id, scheduled_for)` (migration 0009) làm một tick
+  idempotent: hai replica gọi tick trong cùng một nhịp cron thì lần chèn thứ
+  hai va vào ràng buộc đó và không có run thứ hai nào ra đời. `decide()` cũng
+  chốt `scheduled_for` theo nhịp cron chứ không theo lúc tick chạy, nên hai
+  replica lệch pha nhau vẫn quy về cùng một nhịp.
+
+  Nghĩa là: người sau nâng giá trị này lên 2 KHÔNG phá gì cả. Cái giá phải trả
+  là một pod nữa và gấp đôi số request tick — với một tiến trình chỉ ngủ và
+  POST thì đó là toàn bộ lý do con số hôm nay là 1.
+  */}}
+  replicas: {{ .Values.scheduler.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "loom.name" . }}
+      app.kubernetes.io/component: scheduler
+  template:
+    metadata:
+      labels:
+        {{- include "loom.labels" . | nindent 8 }}
+        app.kubernetes.io/component: scheduler
+    spec:
+      {{/*
+      KHÔNG `serviceAccountName`: pod này dùng ServiceAccount `default` của
+      namespace, thứ không có quyền Kubernetes nào cả — và đó CHÍNH LÀ điều
+      đáng nói. `loom-api` phải có một ServiceAccount + Role riêng (xem
+      `api-rbac.yaml`) vì nó phóng Job; scheduler không phóng gì hết, nên việc
+      nó không cần một dòng RBAC nào là hình chiếu lên cụm của phép canh
+      `services/loom-scheduler/tests/test_no_db_no_k8s.py`.
+      */}}
+      terminationGracePeriodSeconds: {{ .Values.scheduler.terminationGracePeriodSeconds }}
+      {{/*
+      UID GHIM CỨNG, cùng khuôn và cùng bài học với `query-deployment.yaml`.
+      Đã KIỂM THẬT trên chính ảnh này, với `--cap-drop ALL` (không có
+      CAP_DAC_OVERRIDE che giấu lỗi quyền):
+
+          $ docker run --rm --cap-drop ALL loom/scheduler:dev \
+              python -c "import os; print(os.getuid(), os.getgid())"
+          10001 10001
+
+          $ docker inspect loom/scheduler:dev --format '{{ "{{" }}.Config.User{{ "}}" }}'
+          10001
+
+      Và chạy THẬT tiến trình ticker với đủ ba điều kiện mà `securityContext`
+      dưới đây áp vào (`--cap-drop ALL --read-only --security-opt
+      no-new-privileges`): nó khởi động, log `scheduler_started`, backoff qua
+      hai lần `ConnectError`, rồi `docker stop` cho ra `scheduler_stopped` và
+      exit code 0 — tức đường tắt êm ở `main.py` chạy được dưới đúng những ràng
+      buộc này, không chỉ trên máy dev.
+      */}}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: scheduler
+          image: "{{ .Values.scheduler.image }}:{{ .Values.scheduler.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          env:
+            - name: LOOM_SCHEDULER_ENVIRONMENT
+              value: {{ .Values.app.environment | quote }}
+            - name: LOOM_SCHEDULER_LOG_LEVEL
+              value: {{ .Values.app.logLevel | quote }}
+            {{/*
+            GỐC của loom-api, KHÔNG kèm `/internal/schedule` — phần đường dẫn
+            chỉ tồn tại ở `loom_scheduler.ticker.tick_url`, nên một lần đổi
+            route bên loom-api không phải sửa chart. Ghi TƯỜNG MINH thay vì dựa
+            vào mặc định trong `Settings`, cùng lý do đã ghi ở
+            `query-deployment.yaml`: mặc định viết cứng namespace `loom` và tên
+            `loom-api`, còn `loom.fullname` đổi theo `nameOverride`.
+            */}}
+            - name: LOOM_SCHEDULER_API_BASE_URL
+              value: "http://{{ include "loom.fullname" . }}-api.{{ .Release.Namespace }}.svc.cluster.local:8000"
+            - name: LOOM_SCHEDULER_TICK_SECONDS
+              value: {{ .Values.scheduler.tickSeconds | quote }}
+            {{/*
+            Khoá THỨ BA của Secret ứng dụng, không phải `query-shared-secret`
+            hay `ingest-shared-secret` dùng lại: ai cầm bí mật này thì khởi động
+            được scheduled pipeline run — xem `loom_core.internal_auth`. Bên
+            KIỂM là `loom_api.internal_security.require_schedule_secret`, đọc
+            CÙNG khoá này qua `LOOM_SCHEDULE_SHARED_SECRET` trong
+            `api-deployment.yaml`.
+            */}}
+            - name: LOOM_SCHEDULER_SHARED_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loom.appSecretName" . }}
+                  key: schedule-shared-secret
+          {{/*
+          KHÔNG `lifecycle.preStop`: `api`/`query`/`web` ngủ vài giây trước
+          SIGTERM để không rơi request đang bay tới từ Service — pod này không
+          có Service nào và không nhận request nào, nên khoảng ngủ đó chỉ làm
+          mỗi lần rollout chậm thêm mà không tránh được gì. Việc tắt sạch nằm ở
+          phía tiến trình (`loom_scheduler.main`), không ở phía cụm.
+          */}}
+          resources:
+            {{- toYaml .Values.scheduler.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }

@@ -152,6 +152,23 @@ custom_build(
     # sửa mã nguồn thì Tilt build lại ảnh đầy đủ, cùng khuôn `loom/web`.
 )
 
+custom_build(
+    'loom/scheduler',
+    build_and_import('services/loom-scheduler/Dockerfile'),
+    # ĐÚNG MỘT package workspace, khác hẳn bốn của `loom/query` và `loom/task`:
+    # `loom-scheduler` chỉ phụ thuộc `loom-core`, và bản thân `loom-core` không
+    # kéo member nào (xem COPY layer trong `services/loom-scheduler/
+    # Dockerfile`). Danh sách ngắn là HỆ QUẢ của hai tính chất mà
+    # `services/loom-scheduler/tests/test_no_db_no_k8s.py` canh — không
+    # database, không k8s — chứ không phải một danh sách viết thiếu.
+    deps=['services/loom-scheduler', 'packages/core', 'pyproject.toml', 'uv.lock'],
+    ignore=BUILD_IGNORE,
+    skips_local_docker=True,
+    disable_push=True,
+    # Không live_update: cùng lý do `loom/query` — không có `scheduler.devReload`
+    # trong values, nên sửa mã nguồn thì Tilt build lại ảnh đầy đủ.
+)
+
 k8s_yaml(helm(
     'deploy/helm/loom',
     name='loom',
@@ -164,6 +181,11 @@ k8s_resource('loom-web', port_forwards=['8080:8080'], labels=['app'])
 # Không port-forward: loom-query là ClusterIP nội bộ, không phải thứ trình
 # duyệt/`curl` từ host gọi thẳng — xem docstring `query-service.yaml`.
 k8s_resource('loom-query', labels=['app'])
+# Không port-forward, và ở đây thì mạnh hơn cả `loom-query`: pod này không có
+# cổng nào để chuyển tiếp — nó chỉ GỬI request (xem docstring
+# `scheduler-deployment.yaml`). Cách xem nó làm gì là log của resource này:
+# một dòng `tick_ok` mỗi 30 giây, kèm `runs_started`/`runs_skipped`.
+k8s_resource('loom-scheduler', labels=['app'])
 
 # Ảnh nạp (`loom-task`, Giai đoạn 3a) đi bằng `local_resource`, KHÔNG bằng
 # `custom_build`, và lý do là kiến trúc chứ không phải sở thích: `custom_build`

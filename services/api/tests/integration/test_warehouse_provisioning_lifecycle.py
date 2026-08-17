@@ -39,7 +39,7 @@ _NON_LAKEHOUSE_DEFINITIONS: dict[ItemType, dict[str, object]] = {
         "port": 5432,
         "secret_ref": "vault://loom/db#password",
     },
-    ItemType.pipeline: {"schema_version": 1, "nodes": [], "edges": []},
+    ItemType.pipeline: {"schema_version": 1, "steps": []},
     ItemType.sql_script: {"schema_version": 1, "sql": ""},
 }
 

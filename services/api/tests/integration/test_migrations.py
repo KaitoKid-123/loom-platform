@@ -538,3 +538,130 @@ def test_stream_state_allows_only_one_watermark_per_stream(
         " VALUES (gen_random_uuid(), :lh, :cid, 'public.customers', 'updated_at', '1')"
     )
     assert _attempt(conn, other_stream, **base) is None
+
+
+def test_0007_rewrites_old_pipeline_definitions() -> None:
+    """Một hàng pipeline hình dạng CŨ phải đọc được sau migration.
+
+    `PipelineDefinition` đặt `extra="forbid"`, nên hai khoá `nodes`/`edges` còn
+    sót lại làm `parse_definition` ném `ValidationError` — tức 500 ở mọi route
+    đọc item đó.
+
+    Container RIÊNG, dừng ở 0006: `UPDATE` của 0007 chỉ thấy những hàng có mặt
+    lúc nó chạy. Bản trước của test này chèn hàng cũ vào `migrated_pg` — một
+    schema ĐÃ ở head — rồi khẳng định migration đã viết lại nó, nên nó không
+    chạm vào 0007 một lần nào và không thể xanh. Thứ tự "chèn TRƯỚC, nâng SAU"
+    dưới đây chính là điều cần chứng minh.
+    """
+    with PostgresContainer(POSTGRES_IMAGE) as pg:
+        assert run_alembic(pg, "upgrade", "0006").returncode == 0
+        eng = sa.create_engine(sync_url(pg))
+        try:
+            actor_id = uuid.uuid4()
+            ws_id = uuid.uuid4()
+            item_id = uuid.uuid4()
+            with eng.begin() as c:
+                c.execute(
+                    sa.text(
+                        "INSERT INTO app_user (id, tenant_id, subject, email, display_name)"
+                        " VALUES (:id, :tenant, :subject, 'proof@loom.local', 'Proof')"
+                    ),
+                    {
+                        "id": actor_id,
+                        "tenant": DEFAULT_TENANT_ID,
+                        "subject": f"proof-{actor_id}",
+                    },
+                )
+                c.execute(
+                    sa.text(
+                        "INSERT INTO workspace (id, tenant_id, name, display_name,"
+                        " storage_prefix, created_by, updated_by)"
+                        " VALUES (:id, :tenant, 'pipeline-test', 'pipeline-test', 's3://x',"
+                        " :actor, :actor)"
+                    ),
+                    {"id": ws_id, "tenant": DEFAULT_TENANT_ID, "actor": actor_id},
+                )
+                c.execute(
+                    sa.text(
+                        "INSERT INTO item (id, tenant_id, workspace_id, name, type,"
+                        " display_name, definition, definition_hash, created_by, updated_by)"
+                        " VALUES (:id, :tenant, :ws, 'test-old-pipeline', 'pipeline',"
+                        " 'test-old-pipeline',"
+                        ' \'{"schema_version": 1, "nodes": [], "edges": []}\'::jsonb,'
+                        " :hash, :actor, :actor)"
+                    ),
+                    {
+                        "id": item_id,
+                        "tenant": DEFAULT_TENANT_ID,
+                        "ws": ws_id,
+                        "hash": "x" * 64,
+                        "actor": actor_id,
+                    },
+                )
+
+            assert run_alembic(pg, "upgrade", "head").returncode == 0
+
+            with eng.connect() as c:
+                definition = c.execute(
+                    sa.text("SELECT definition FROM item WHERE id = :id"),
+                    {"id": item_id},
+                ).scalar_one()
+
+            assert "steps" in definition, (
+                f"migration phải rewrite định nghĩa CŨ thành `steps`, nhưng nhận được: {definition}"
+            )
+            assert "nodes" not in definition, (
+                f"định nghĩa sau migration không được còn `nodes`, nhưng nhận được: {definition}"
+            )
+            assert "edges" not in definition, (
+                f"định nghĩa sau migration không được còn `edges`, nhưng nhận được: {definition}"
+            )
+        finally:
+            eng.dispose()
+
+
+def test_0007_pipeline_run_and_step_run_tables_exist(
+    engine: sa.Engine,
+) -> None:
+    """Hai bang moi phai ton tai tren schema DA migrate."""
+    with engine.connect() as connection:
+        tables = set(sa.inspect(connection).get_table_names())
+
+    assert "pipeline_run" in tables, "bang pipeline_run khong ton tai"
+    assert "pipeline_step_run" in tables, "bang pipeline_step_run khong ton tai"
+
+    # Kiem tra cac cot quan trong tren bang pipeline_run
+    with engine.connect() as connection:
+        columns = {
+            r[0]
+            for r in connection.execute(
+                sa.text(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_name = 'pipeline_run'"
+                )
+            )
+        }
+    assert "pipeline_id" in columns, "pipeline_run.phai co pipeline_id FK"
+    assert "workspace_id" in columns, "pipeline_run phai co workspace_id"
+    assert "scheduled_for" in columns, "pipeline_run phai co scheduled_for"
+    assert "status" in columns, "pipeline_run phai co status"
+    assert "run_as_user_id" in columns, "pipeline_run phai co run_as_user_id FK toi app_user"
+
+    # Kiem tra cac cot tren bang pipeline_step_run
+    with engine.connect() as connection:
+        columns = {
+            r[0]
+            for r in connection.execute(
+                sa.text(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_name = 'pipeline_step_run'"
+                )
+            )
+        }
+    assert "pipeline_run_id" in columns, "pipeline_step_run.phai co pipeline_run_id FK"
+    assert "step_index" in columns, "pipeline_step_run phai co step_index"
+    assert "step_type" in columns, "pipeline_step_run phai co step_type"
+    assert "status" in columns, "pipeline_step_run phai co status"
+    assert "ingest_run_id" in columns, (
+        "pipeline_step_run phai co ingest_run_id FK toi ingest_run (nap noi bang 3a)"
+    )

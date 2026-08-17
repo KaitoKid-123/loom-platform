@@ -72,6 +72,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import State
 from starlette.responses import Response
 
 from loom_api.deps import PrincipalDep, SessionDep
@@ -98,6 +99,43 @@ async def _lakehouse_workspace_id(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def query_request(
+    app_state: State,
+    settings: Settings,
+    *,
+    method: str,
+    path: str,
+    json_body: dict[str, object] | None = None,
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Một round trip tới `loom-query`, có bí mật chia sẻ đính kèm.
+
+    ĐÚNG MỘT chỗ trong `loom-api` dựng URL của `loom-query` và gắn
+    `QUERY_SHARED_SECRET_HEADER`. Công khai (không còn nằm trong `_forward`) vì
+    từ 3b có một người gọi THỨ HAI không phải một request của trình duyệt: nhịp
+    lịch nộp SQL của một bước pipeline (`routers/internal_schedule.py`). Người
+    gọi đó không có `Request` nào để đưa vào — nó chạy trong vòng lặp của tick,
+    không trong một handler của người dùng — nên tham số là `app_state` +
+    `settings` chứ không phải `Request`.
+
+    Một bản chép ở chỗ gọi thứ hai sẽ là chỗ thứ hai có thể QUÊN header bí mật,
+    và hậu quả không phải một lỗi lộ liễu: `loom-query` trả 401, bước SQL hỏng,
+    và người đọc đi tìm nguyên nhân ở câu SQL.
+
+    Trả về `httpx.Response` THÔ chứ không phải `Response` của Starlette: người
+    gọi thứ hai cần ĐỌC thân phản hồi (lấy `query_id`, đọc `status`), không phải
+    chuyển tiếp nó ra ngoài.
+    """
+    client: httpx.AsyncClient = app_state.query_http
+    return await client.request(
+        method,
+        f"{settings.query_base_url}{path}",
+        params=params,
+        json=json_body,
+        headers={QUERY_SHARED_SECRET_HEADER: settings.query_shared_secret},
+    )
+
+
 async def _forward(
     request: Request,
     *,
@@ -107,13 +145,13 @@ async def _forward(
     params: dict[str, str] | None = None,
 ) -> Response:
     settings: Settings = request.app.state.settings
-    client: httpx.AsyncClient = request.app.state.query_http
-    upstream = await client.request(
-        method,
-        f"{settings.query_base_url}{path}",
+    upstream = await query_request(
+        request.app.state,
+        settings,
+        method=method,
+        path=path,
+        json_body=json_body,
         params=params,
-        json=json_body,
-        headers={QUERY_SHARED_SECRET_HEADER: settings.query_shared_secret},
     )
     return Response(
         content=upstream.content,

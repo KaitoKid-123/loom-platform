@@ -135,8 +135,12 @@ build-query:  ## Build image loom-query
 build-task:  ## Build image loom-task (chạy một lần rồi chết, không phải server)
 	docker build -f services/loom-task/Dockerfile -t loom/task:$(IMAGE_TAG) .
 
+.PHONY: build-scheduler
+build-scheduler:  ## Build image loom-scheduler (ticker, không server)
+	docker build -f services/loom-scheduler/Dockerfile -t loom/scheduler:$(IMAGE_TAG) .
+
 .PHONY: build
-build: build-api build-web build-query build-task  ## Build cả bốn image
+build: build-api build-web build-query build-task build-scheduler  ## Build cả năm image
 
 .PHONY: helm-validate
 helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml
@@ -288,6 +292,8 @@ check-pins:  ## Chặn FROM trong Dockerfile lệch với deploy/versions.env
 		|| { echo "services/loom-query/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
 	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/loom-task/Dockerfile \
 		|| { echo "services/loom-task/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
+	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/loom-scheduler/Dockerfile \
+		|| { echo "services/loom-scheduler/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
 	@echo "Pin khớp: node $(NODE_VERSION), uv $(UV_VERSION)"
 
 .PHONY: bootstrap
@@ -465,7 +471,7 @@ lint-workflows:  ## actionlint + shellcheck cho .github/workflows
 	actionlint -shellcheck "$$(command -v shellcheck)"
 
 .PHONY: smoke
-smoke:  ## Mười bốn phép kiểm chấp nhận qua HTTP (BASE=... để chạy với môi trường khác)
+smoke:  ## Mười lăm phép kiểm chấp nhận qua HTTP (BASE=... để chạy với môi trường khác)
 	@# Phép 14 nạp từ một Postgres NGUỒN thật, nên nó cần host/port/dbname của
 	@# nguồn đó. Ở local nguồn duy nhất cụm với tới được là chính Aiven (không có
 	@# Postgres nào trong cụm — xem `database` ở values.yaml), và địa chỉ của nó

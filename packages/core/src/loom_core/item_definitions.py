@@ -7,10 +7,14 @@ phải đoán bản ghi cũ theo hình dạng.
 import hashlib
 import json
 import re
+import uuid
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from loom_core.cron import next_tick
 
 # Các lớp ký tự dùng chung cho HAI regex dưới đây. Khai một lần vì bản `k8s://`
 # có nhóm bắt (`K8S_SECRET_REF_RE`) phải là đúng nhánh `k8s://` của bản chung —
@@ -85,9 +89,81 @@ class SqlScriptDefinition(_Base):
     visualization: dict[str, Any] | None = None
 
 
+# --- PipelineStep & ScheduleDefinition (Task 2) -----------------------------
+
+
+class IngestStepConfig(BaseModel):
+    """Khối `ingest` bên trong một `PipelineStep`."""
+
+    model_config = ConfigDict(extra="forbid")
+    lakehouse_id: uuid.UUID
+    connection_id: uuid.UUID
+    stream: str = Field(min_length=1, max_length=255)
+    mode: Literal["full", "incremental"]
+
+
+class SqlStepConfig(BaseModel):
+    """Khối `sql` bên trong một `PipelineStep`."""
+
+    model_config = ConfigDict(extra="forbid")
+    lakehouse_id: uuid.UUID
+    sql: str = Field(min_length=1)
+
+
+class PipelineStep(BaseModel):
+    """Một bước trong chuỗi TUYẾN TÍNH. 3b không có rẽ nhánh."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["ingest", "sql"]
+    ingest: IngestStepConfig | None = None
+    sql: SqlStepConfig | None = None
+
+    @model_validator(mode="after")
+    def _config_matches_type(self) -> "PipelineStep":
+        if self.type == "ingest" and self.ingest is None:
+            raise ValueError("bước type='ingest' phải có khối `ingest`")
+        if self.type == "sql" and self.sql is None:
+            raise ValueError("bước type='sql' phải có khối `sql`")
+        if self.type == "ingest" and self.sql is not None:
+            raise ValueError("bước type='ingest' không được mang khối `sql`")
+        if self.type == "sql" and self.ingest is not None:
+            raise ValueError("bước type='sql' không được mang khối `ingest`")
+        return self
+
+
+class ScheduleDefinition(BaseModel):
+    """Định nghĩa lịch cho một pipeline tự động."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    cron: str
+    timezone: str = "UTC"
+    run_as_user_id: uuid.UUID | None = None
+
+    @field_validator("cron")
+    @classmethod
+    def _cron_parses(cls, value: str) -> str:
+        next_tick(value, "UTC", datetime(2026, 1, 1, tzinfo=UTC))
+        return value
+
+    @field_validator("timezone")
+    @classmethod
+    def _timezone_exists(cls, value: str) -> str:
+        next_tick("0 0 * * *", value, datetime(2026, 1, 1, tzinfo=UTC))
+        return value
+
+    @model_validator(mode="after")
+    def _enabled_names_its_principal(self) -> "ScheduleDefinition":
+        if self.enabled and self.run_as_user_id is None:
+            raise ValueError("lịch đã bật phải có run_as_user_id")
+        return self
+
+
 class PipelineDefinition(_Base):
-    nodes: list[dict[str, Any]] = Field(default_factory=list)
-    edges: list[dict[str, Any]] = Field(default_factory=list)
+    """`steps` TUYẾN TÍNH — không còn `nodes`/`edges`."""
+
+    steps: list[PipelineStep] = Field(default_factory=list)
+    schedule: ScheduleDefinition | None = None
 
 
 DEFINITION_BY_TYPE: dict[ItemType, type[_Base]] = {
@@ -99,7 +175,7 @@ DEFINITION_BY_TYPE: dict[ItemType, type[_Base]] = {
 
 DEFAULT_DEFINITION: dict[ItemType, dict[str, Any]] = {
     ItemType.lakehouse: {"schema_version": 1},
-    ItemType.pipeline: {"schema_version": 1, "nodes": [], "edges": []},
+    ItemType.pipeline: {"schema_version": 1, "steps": []},
     ItemType.sql_script: {"schema_version": 1, "sql": ""},
     # connection KHÔNG có mặc định: không đoán được host/secret_ref của ai.
 }
@@ -117,7 +193,7 @@ def canonical_hash(definition: dict[str, Any]) -> str:
     không đổi gì — và lịch sử version đầy bản ghi trùng.
 
     Chuẩn hoá dừng ở thứ tự KHOÁ. Thứ tự phần tử trong list là nội dung thật
-    (`nodes` của một pipeline), nên sắp xếp cả list sẽ làm hai định nghĩa khác
+    (`steps` của một pipeline), nên sắp xếp cả list sẽ làm hai định nghĩa khác
     nhau ra cùng một hash — hỏng theo hướng ngược lại và tệ hơn.
     """
     payload = json.dumps(definition, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

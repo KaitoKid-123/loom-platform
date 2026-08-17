@@ -7,6 +7,14 @@ query:
 web:
   tag: dev
   replicas: 2
+scheduler:
+  tag: dev
+  # KHÔNG nâng lên 2 ở đây dù api/query/web đều là 2. Hai replica không hỏng
+  # (`UNIQUE (pipeline_id, scheduled_for)` giữ tick idempotent — xem
+  # `scheduler-deployment.yaml`), nhưng chúng cũng không mua thêm gì: replica
+  # của api/query/web tồn tại để CHIA TẢI request đến, còn cái đồng hồ không
+  # có tải đến nào để chia.
+  replicas: 1
 task:
   # Không có `replicas`: ảnh này chạy dưới dạng Job một-lần do `loom-api` phóng,
   # không phải một Deployment (xem values.yaml, mục `task`). Chỉ `tag` cần đè —
@@ -27,17 +35,18 @@ oidc:
   redirectUrl: https://loom-dev.internal/api/v1/auth/callback
   # Dev là môi trường triển khai thật — không được kế thừa khoá ký công khai
   # trong values.yaml. `Settings` sẽ từ chối khởi động nếu quên (xem Task 2).
-  # PHẢI có đủ BỐN khoá: `oidc-client-secret`, `session-secret`, (Task 10/11)
-  # `query-shared-secret`, và (Giai đoạn 3a) `ingest-shared-secret` — thiếu
-  # bất kỳ khoá nào cũng làm pod CreateContainerConfigError (secretKeyRef
-  # không tìm thấy khoá), không phải một 401 âm thầm lúc runtime.
+  # PHẢI có đủ NĂM khoá trong Secret `loom-app-secrets`: `oidc-client-secret`,
+  # `session-secret`, `query-shared-secret` (Task 10/11), `ingest-shared-secret`
+  # (Giai đoạn 3a), và `schedule-shared-secret` (Giai đoạn 3b/scheduler). Thiếu
+  # bất kỳ khoá nào cũng làm pod CreateContainerConfigError (secretKeyRef không
+  # tìm thấy khoá), không phải một 401 âm thầm lúc runtime.
   #
-  # `ingest-shared-secret` là khoá MỚI của Giai đoạn 3a và nó phải được thêm
-  # TRƯỚC khi nâng cấp: đặt `oidc.existingSecret` làm `secret.yaml` không
-  # render, nên chart KHÔNG tự tạo khoá này hộ — External Secrets/Vault phải
-  # đồng bộ nó vào, cùng đường với `query-shared-secret`. Nó phải là một giá
-  # trị KHÁC `query-shared-secret`, không phải bản sao: xem
-  # `loom_core.config.Settings.task_shared_secret_key`.
+  # `ingest-shared-secret` và `schedule-shared-secret` là hai khoá MỚI của
+  # Giai đoạn 3. Khi đặt `oidc.existingSecret`, `secret.yaml` không render,
+  # nên chart KHÔNG tự tạo hai khoá này hộ — External Secrets/Vault phải đồng
+  # bộ cả hai vào, cùng đường với `query-shared-secret`. Mỗi khoá phải có giá
+  # trị RIÊNG, không phải bản sao của khoá khác: xem
+  # `loom_core.internal_auth` cho lý do tách ba bí mật.
   existingSecret: loom-app-secrets
 storage:
   # dev/prod KHÔNG chạy MinIO trong cụm — deploy/infra/minio.yaml chỉ dành cho

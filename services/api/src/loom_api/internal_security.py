@@ -39,7 +39,7 @@ import hmac
 from fastapi import HTTPException, Request, status
 
 from loom_core.config import Settings
-from loom_core.internal_auth import INGEST_SHARED_SECRET_HEADER
+from loom_core.internal_auth import INGEST_SHARED_SECRET_HEADER, SCHEDULE_SHARED_SECRET_HEADER
 
 
 async def require_ingest_secret(request: Request) -> None:
@@ -91,3 +91,19 @@ async def require_ingest_secret(request: Request) -> None:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "missing or invalid internal shared secret"
         )
+
+
+async def require_schedule_secret(request: Request) -> None:
+    """401 nếu thiếu header X-Loom-Schedule-Secret từ loom-scheduler.
+
+    Cùng khuôn `require_ingest_secret`: timing-safe comparison, bytes-decoded
+    header với latin-1, và 401 trên byte >127 thay vì 500 TypeError.
+
+    Lý do có ba bí mật tách riêng — xem `loom_core.internal_auth`.
+    """
+    settings: Settings = request.app.state.settings
+    provided = request.headers.get(SCHEDULE_SHARED_SECRET_HEADER)
+    if provided is None or not hmac.compare_digest(
+        provided.encode("latin-1", "replace"), settings.schedule_shared_secret.encode("utf-8")
+    ):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing or invalid schedule secret")

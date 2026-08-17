@@ -32,14 +32,70 @@ query:
   replicas: 1
   preStopSleepSeconds: 5
   terminationGracePeriodSeconds: 30
-  # `resources.limits.memory: 384Mi` là con số từ phép đo Giai đoạn 2a
-  # (`make measure-spill` — DuckDB `memory_limit=256MB`/`threads=2` trong một
-  # cgroup 384Mi thật, xem docstring `loom_query.runner`). ĐỪNG đổi số này mà
-  # không đo lại: nó gắn liền với `_MEMORY_LIMIT`/`_THREADS` ghim cứng trong
-  # `runner.py`, không phải một ước lượng rời.
+  # 384Mi -> 768Mi, và con số mới ĐẾN TỪ ĐO 8
+  # (`docs/measurements/2026-08-17-loom-query-memory.md`), đo trên cgroup THẬT của
+  # pod, không suy ra từ `_MEMORY_LIMIT` của DuckDB.
+  #
+  # Vì sao 384Mi là SAI, không chỉ chật: một câu `SELECT count(*)` TRẦN trên một
+  # bảng bronze 500.000 dòng (bảy cột, `scripts/bench_source.sql`) cần `anon`
+  # **518 MiB**, tổng **533 MiB**. Ở trần 384Mi câu đó không chạy được — đo trên
+  # cụm: `memory.peak` đụng đúng 384,0 MiB và `oom_group_kill` tăng 1 trong vòng
+  # ~2 giây kể từ lúc nộp. Hình dạng NẶNG hơn (gom nhóm, đúng hình dạng bước SQL
+  # của pipeline) cần **623 MiB**. Trần cũ thấp hơn nhu cầu của MỘT câu tầm thường
+  # chừng 150 MiB, nên nó không phải một trần cho đồng thời — nó là một trần chặn
+  # cả K = 1.
+  #
+  # Vì sao 768Mi: đỉnh xấu nhất đo được là 623,5 MiB, nền nghỉ sau vài câu là
+  # ~265 MiB, tức phần TĂNG THÊM của một câu quét là ~367 MiB. 768 phủ
+  # 265 + 367 = 632 MiB với 136 MiB (21%) dư. Ngân sách node vẫn còn: ĐO 7 đo
+  # 2645 Mi ở K = 5 trên ngân sách tự đặt 4096 Mi, nên +384 Mi ở đây thành ~3029 Mi.
+  #
+  # **Trần này KHÔNG phủ hai câu quét ĐỒNG THỜI** (265 + 2×367 ≈ 1000 MiB) và
+  # KHÔNG phủ bảng lớn hơn nhiều so với 500k dòng: đỉnh của đường quét tỉ lệ với
+  # kích thước FILE dữ liệu lớn nhất nhân số cột (xem `Lakehouse.scan` và ĐO 8 mục
+  # về đẩy phép chiếu). Không có trần nào đóng được chỗ đó; thứ đóng được là đẩy
+  # phép chiếu xuống Iceberg, và đó là một task riêng.
+  #
+  # KHÔNG có `GOMEMLIMIT` tương đương ở đây — Python không có giới hạn mềm nào bộ
+  # cấp phát tuân theo, nên phép canh
+  # `services/loom-query/tests/test_memory_ceiling.py` canh quan hệ giữa working
+  # set ĐO ĐƯỢC và trần cứng, chứ không canh một giới hạn mềm.
   resources:
     requests: { cpu: 50m, memory: 128Mi }
-    limits: { memory: 384Mi }
+    limits: { memory: 768Mi }
+
+# Cái đồng hồ (Giai đoạn 3b): ngủ, POST `/internal/schedule/tick`, ghi log.
+# Xem `scheduler-deployment.yaml` — không Service, không port, không probe.
+scheduler:
+  image: loom/scheduler
+  tag: dev
+  # TIẾT KIỆM, không phải tính đúng đắn — `UNIQUE (pipeline_id, scheduled_for)`
+  # làm tick idempotent, nên hai replica vẫn chỉ sinh một run mỗi nhịp cron.
+  # Nâng lên 2 không phá gì cả; nó chỉ tốn thêm một pod. Lý do đầy đủ nằm cạnh
+  # `replicas:` trong `scheduler-deployment.yaml`.
+  replicas: 1
+  # KHÔNG có `preStopSleepSeconds` như api/query/web: pod này không đứng sau
+  # một Service nên không có request đang bay nào để chờ. 30 giây ân hạn là
+  # thừa thãi cho một tiến trình thoát ngay khi nhận SIGTERM
+  # (`loom_scheduler.main`), và giữ nguyên con số của các service khác chỉ để
+  # đồng nhất.
+  terminationGracePeriodSeconds: 30
+  # Nhịp. Con số CHỌN, không phải đo — xem docstring
+  # `loom_scheduler.config.Settings.tick_seconds`: tick dày hơn KHÔNG sinh thêm
+  # run (ràng buộc UNIQUE chốt điều đó), nó chỉ rút ngắn độ trễ giữa lúc một
+  # nhịp cron tới hạn và lúc run được tạo, và độ trễ giữa hai NẤC của một chuỗi
+  # (một tick đẩy chuỗi đi đúng một bước — xem docstring
+  # `loom_api.routers.internal_schedule`). Nhịp cron nhỏ nhất Loom biểu diễn
+  # được là một phút, nên 30s cho mỗi nhịp ít nhất một tick, dư một tick dự
+  # phòng nếu một lần nào đó lỗi.
+  tickSeconds: 30
+  # Nhỏ nhất trong cả chart, và nó xứng đáng: tiến trình này ngủ 30 giây, gửi
+  # một request HTTP, ghi một dòng log. Không DuckDB, không pyarrow, không pool
+  # database — cả cây phụ thuộc của nó là httpx + pydantic + structlog (xem
+  # `services/loom-scheduler/Dockerfile`).
+  resources:
+    requests: { cpu: 10m, memory: 48Mi }
+    limits: { memory: 128Mi }
 
 web:
   image: loom/web
@@ -156,6 +212,12 @@ app:
   # khởi động vì `secretKeyRef` trỏ vào một khoá không tồn tại — hỏng ồn ào và
   # tức thì, đúng như nó nên thế, nhưng chỉ hiểu được nếu đã đọc dòng này.
   ingestSharedSecret: dev-only-do-not-use-in-production
+  # Bí mật chia sẻ RIÊNG cho loom-scheduler (Giai đoạn 3b). Một KHOÁ riêng,
+  # một GIÁ TRỊ riêng — không phải bản sao của hai khoá trên. Ba bí mật ba
+  # quyền tách biệt. ⚠️ dev/prod: External Secrets phải đồng bộ khoá
+  # `schedule-shared-secret` VÀO Secret `loom-app-secrets` cùng với
+  # `ingest-shared-secret` — xem `values-dev.yaml`.
+  scheduleSharedSecret: dev-only-do-not-use-in-production
 
 migration:
   enabled: true

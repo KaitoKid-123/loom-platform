@@ -23,7 +23,7 @@ VALID_RAW: dict[ItemType, dict] = {
         "port": 5432,
         "secret_ref": "vault://loom/db#password",
     },
-    ItemType.pipeline: {"schema_version": 1, "nodes": [], "edges": []},
+    ItemType.pipeline: {"schema_version": 1, "steps": []},
     ItemType.sql_script: {"schema_version": 1, "sql": ""},
 }
 
@@ -211,7 +211,70 @@ def test_canonical_hash_changes_when_content_changes():
 
 
 def test_canonical_hash_distinguishes_list_order():
-    """Thứ tự KHOÁ không có nghĩa, thứ tự PHẦN TỬ thì có: `nodes` của một
+    """Thứ tự KHOÁ không có nghĩa, thứ tự PHẦN TỬ thì có: `steps` của một
     pipeline đổi thứ tự là một thay đổi thật. Một cách chuẩn hoá quá tay
     (sắp xếp cả list) sẽ làm hai pipeline khác nhau ra cùng một hash."""
-    assert canonical_hash({"nodes": [1, 2]}) != canonical_hash({"nodes": [2, 1]})
+    assert canonical_hash({"steps": [1, 2]}) != canonical_hash({"steps": [2, 1]})
+
+
+# --- PipelineStep & ScheduleDefinition (Task 2) --------------------------------
+
+
+def test_a_schedule_that_is_enabled_must_name_who_it_runs_as() -> None:
+    """`run_as_user_id` BẮT BUỘC khi `enabled` — kiểm ở BIÊN, không phải một `if`
+    trong scheduler."""
+    with pytest.raises(ValidationError):
+        parse_definition(
+            ItemType.pipeline,
+            {
+                "schema_version": 1,
+                "steps": [],
+                "schedule": {"enabled": True, "cron": "0 2 * * *", "timezone": "UTC"},
+            },
+        )
+
+
+def test_a_bad_cron_is_refused_when_the_item_is_saved() -> None:
+    with pytest.raises(ValidationError):
+        parse_definition(
+            ItemType.pipeline,
+            {
+                "schema_version": 1,
+                "steps": [],
+                "schedule": {
+                    "enabled": False,
+                    "cron": "khong phai cron",
+                    "timezone": "UTC",
+                },
+            },
+        )
+
+
+def test_a_bad_timezone_is_refused_when_the_item_is_saved() -> None:
+    with pytest.raises(ValidationError):
+        parse_definition(
+            ItemType.pipeline,
+            {
+                "schema_version": 1,
+                "steps": [],
+                "schedule": {
+                    "enabled": False,
+                    "cron": "0 2 * * *",
+                    "timezone": "Mars/Olympus",
+                },
+            },
+        )
+
+
+def test_an_ingest_step_needs_its_ingest_fields() -> None:
+    with pytest.raises(ValidationError):
+        parse_definition(
+            ItemType.pipeline,
+            {"schema_version": 1, "steps": [{"type": "ingest"}]},
+        )
+
+
+def test_a_pipeline_with_no_schedule_is_valid() -> None:
+    """Một pipeline chạy tay là hợp lệ — `schedule` là tuỳ chọn."""
+    parsed = parse_definition(ItemType.pipeline, {"schema_version": 1, "steps": []})
+    assert parsed.schedule is None

@@ -18,6 +18,17 @@ nhiều core). Ba giới hạn còn lại (byte quét, thời gian, số dòng) 
 `Settings` (Task 8); hai giá trị này thì không, vì chúng là cấu hình khởi tạo
 DuckDB đến từ một phép đo, không phải một tham số vận hành.
 
+**`memory_limit` chỉ chi phối phần bộ nhớ CỦA DUCKDB, và phần đó là phần NHỎ.**
+Phép đo Giai đoạn 2a ở trên soi đúng DuckDB và vì thế bỏ sót đường đọc Iceberg
+đứng TRƯỚC nó: `Lakehouse.scan()` dựng bộ đệm Arrow nằm hoàn toàn ngoài
+`memory_limit`, và ĐO 8 (`docs/measurements/2026-08-17-loom-query-memory.md`) đo
+được nó tới 297 MiB cho một bảng 500k dòng — nhiều hơn cả ngân sách 244 MiB của
+DuckDB. Đó là lý do trần container 384Mi KHÔNG đủ cho dù DuckDB tuân thủ hoàn
+hảo con số của nó, và là lý do trần đó thành 768Mi. Hai con số này là một CẶP:
+nâng `memory_limit` mà không nâng trần container là làm DuckDB tin nó được phép
+lấy nhiều hơn chỗ thực sự có, và hạt nhân không đọc `memory_limit`. Phép canh
+`tests/test_memory_ceiling.py` ghim đúng cặp đó.
+
 **Huỷ/timeout đều đi qua CÙNG một cơ chế: `connection.interrupt()`.** Đã kiểm
 bằng thực nghiệm (xem báo cáo Task 9) rằng `asyncio.Task.cancel()` trên một
 task đang `await asyncio.to_thread(...)` KHÔNG dừng được thread OS bên dưới —
@@ -482,6 +493,40 @@ def _run_sync(
         return _to_result(limited, truncated=truncated, row_count=row_count)
     finally:
         connection.close()
+        _release_arrow_memory()
+
+
+def _release_arrow_memory() -> None:
+    """Trả các trang đã giải phóng của pool Arrow LẠI cho hệ điều hành.
+
+    Vì sao cần một lời gọi TƯỜNG MINH, khi Arrow đã tự do bộ đệm của nó: pool mặc
+    định của pyarrow 25 chạy trên **mimalloc**, và mimalloc GIỮ trang đã free lại
+    cho lần cấp sau thay vì `munmap` chúng. Kết quả là một khoảng cách mà đo được
+    mới tin: sau khi quét xong một bảng 500k dòng,
+    `pa.total_allocated_bytes()` đọc **0,0 MiB** — Arrow tin rằng nó không còn giữ
+    gì — trong khi RSS của tiến trình vẫn là **706,7 MiB**. `release_unused()` thu
+    lại 440 MiB trong một lời gọi.
+
+    Đây là cơ chế của cái mà ĐO 7 ghi là "RAM lúc NGHỈ không trở về nền"
+    (117 -> 226 -> 255 MiB qua ba câu liên tiếp) và của con số `anon` 221 MiB mà
+    báo cáo đó gọi là sàn không thu hồi được. Nó KHÔNG phải một sàn: đo trên cụm
+    thật, một pod vừa khởi động lại có `anon` **92,9 MiB**; 221 MiB là phần rác đã
+    tích lại SAU khi pod phục vụ vài câu quét. Cùng cgroup, cùng pod, khác thời
+    điểm — nên "idle" trong báo cáo cũ là "idle sau khi đã chạy", không phải nền.
+
+    **Phép này mua gì và KHÔNG mua gì.** Nó bỏ cái ratchet: mỗi câu bắt đầu lại từ
+    nền thật chứ không từ đỉnh của câu trước, nên hai câu chạy CÁCH NHAU không còn
+    cộng dồn. Nó KHÔNG hạ ĐỈNH của một câu đang chạy — đỉnh đó do đường quét
+    Iceberg giữ (xem `Lakehouse.scan`), và một câu `count(*)` trên 500k dòng vẫn
+    cần ~533 MiB ở đỉnh sau phép này. Nên nó không thay được một trần đủ cao, và
+    nó không làm hai câu ĐỒNG THỜI an toàn.
+
+    Gọi trong `finally` của `_run_sync`, tức trên thread nền của CHÍNH câu vừa
+    xong, sau khi connection DuckDB đã đóng. An toàn khi có câu khác chạy song
+    song: `release_unused()` chỉ trả phần pool KHÔNG còn ai dùng — bộ đệm Arrow
+    của một câu đang sống vẫn đang được cấp, nên nó không nằm trong phần bị trả.
+    """
+    pa.default_memory_pool().release_unused()
 
 
 async def execute(

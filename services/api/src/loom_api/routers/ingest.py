@@ -108,7 +108,7 @@ async def _active_item(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-def _launcher(app_state: State, settings: Settings) -> JobLauncherLike:
+def launcher_for(app_state: State, settings: Settings) -> JobLauncherLike:
     """`JobLauncher` của tiến trình này, dựng LƯỜI ở lần đầu cần tới cụm.
 
     Lười chứ không ở `create_app()`: `JobLauncher.__init__` gọi
@@ -123,6 +123,12 @@ def _launcher(app_state: State, settings: Settings) -> JobLauncherLike:
     "Lần đầu cần tới cụm" là phóng một Job HOẶC đọc trạng thái một Job (Task
     13): cả hai đường đi qua đây, nên cả hai cùng chia một launcher và cùng
     được thay bằng một double ở `app.state.job_launcher`.
+
+    CÔNG KHAI (không còn `_launcher`) từ 3b: nhịp lịch
+    (`routers/internal_schedule.py`) phóng Job nạp cho bước `ingest` của một
+    pipeline, và nó phải đi qua ĐÚNG hàm này. Một bản chép ở đó sẽ là một chỗ
+    thứ hai dựng `JobLauncher` — tức là hai launcher trong một tiến trình, và
+    một double gắn vào `app.state.job_launcher` chỉ thay được một trong hai.
 
     Hai request đồng thời có thể cùng dựng một launcher và một cái ghi đè cái
     kia. Kết quả không phụ thuộc thứ tự, nhưng KHÔNG phải vì `load_*_config`
@@ -151,9 +157,14 @@ def _launcher(app_state: State, settings: Settings) -> JobLauncherLike:
     return launcher
 
 
-def _launch(app_state: State, settings: Settings, run_id: uuid.UUID, secret_name: str) -> None:
-    """Phóng Job cho `run_id`. ĐỒNG BỘ, và chỉ được gọi từ một thread."""
-    _launcher(app_state, settings).launch(
+def launch_ingest_job(
+    app_state: State, settings: Settings, run_id: uuid.UUID, secret_name: str
+) -> None:
+    """Phóng Job cho `run_id`. ĐỒNG BỘ, và chỉ được gọi từ một thread.
+
+    Công khai cùng lý do `launcher_for`: nhịp lịch của 3b gọi lại đúng hàm này.
+    """
+    launcher_for(app_state, settings).launch(
         run_id,
         secret_name,
         (settings.task_shared_secret_name, settings.task_shared_secret_key),
@@ -166,7 +177,62 @@ def _job_status(app_state: State, settings: Settings, run_id: uuid.UUID) -> JobS
     """Trạng thái Job của `run_id`. ĐỒNG BỘ, và chỉ được gọi từ một thread —
     cùng lý do `_launch`: client `kubernetes` dùng urllib3, không có bản async.
     """
-    return _launcher(app_state, settings).status(run_id)
+    return launcher_for(app_state, settings).status(run_id)
+
+
+async def reconcile_ingest_run(
+    session: AsyncSession, app_state: State, settings: Settings, run: IngestRun
+) -> None:
+    """Đối chiếu MỘT hàng `ingest_run` với Job của nó, rồi GHI kết quả xuống.
+
+    ĐÚNG MỘT bộ đối chiếu trong cả repo, và đó là lý do hàm này công khai. Hai
+    đường cần nó — `GET /api/v1/ingest/{run_id}` (người dùng mở màn hình lên
+    xem) và nhịp lịch 3b (`routers/internal_schedule.py`, đẩy bước `ingest` của
+    một pipeline) — và hai bản riêng sẽ TRÔI khỏi nhau. Trôi ở đây không phải
+    một khác biệt thẩm mỹ: một bên rộng tay hơn là một pipeline treo mãi vì bước
+    nạp không bao giờ được đóng, một bên chặt tay hơn là một run báo thành công
+    nó chưa từng có.
+
+    **Điều kiện `TERMINAL_RUN_STATUSES` nằm NGAY ĐÂY, trước lời gọi Kubernetes,
+    và nó là phần quan trọng nhất của hàm.** Một run đã kết thúc thì Job của nó
+    đã bị TTL dọn (`ttl_seconds_after_finished=3600`), nên hỏi thêm sẽ đọc ra
+    `exists=False` và biến một run `succeeded` thành `failed` sau đúng một giờ.
+    Đặt nó bên trong hàm chứ không ở từng chỗ gọi là điều kiện để lời hứa "một
+    bộ đối chiếu" có nghĩa: chỗ gọi thứ hai không có cơ hội quên nó.
+    (`failure_from_job` vẫn KHÔNG mang điều kiện này — xem docstring của nó:
+    nó không được biết gì về hàng `ingest_run`, và cổng phải chặn TRƯỚC round
+    trip tới cụm, thứ hàm này làm.)
+
+    Ghi xuống Postgres chứ không chỉ trả về: cột `status` phải tự nói đúng sự
+    thật cho MỌI người đọc bảng, và một run đã chết không được bắt lần đọc sau
+    hỏi lại Kubernetes.
+    """
+    if run.status in TERMINAL_RUN_STATUSES:
+        return
+
+    job = await asyncio.to_thread(_job_status, app_state, settings, run.id)
+    reason = failure_from_job(job)
+    if reason is None:
+        return
+
+    logger.info(
+        "ingest.reconciled_to_failed",
+        run_id=str(run.id),
+        was=run.status,
+        job_exists=job.exists,
+        job_active=job.active,
+        job_succeeded=job.succeeded,
+        job_failed=job.failed,
+    )
+    run.status = "failed"
+    run.error = reason
+    # `finished_at` đặt Ở ĐÂY vì đây là thời điểm sớm nhất ta BIẾT run đã kết
+    # thúc — thời điểm nó thật sự chết thì không ai ghi lại được (pod đã chết mà
+    # không nói gì; đó là cả lý do đường này tồn tại). Để cột này NULL trên một
+    # run đã đóng thì mọi người đọc phải xử lý một trạng thái cuối không có mốc
+    # kết thúc, đúng thứ `/complete` tránh.
+    run.finished_at = datetime.now(UTC)
+    await session.commit()
 
 
 @router.post(
@@ -269,7 +335,7 @@ async def start_ingest(
     # để vẫn trả 202 mới là điều sai — 202 nghĩa là "đã nhận và đã yêu cầu Job",
     # và nói thế khi chưa yêu cầu được là một lời nói dối mà người dùng chỉ
     # phát hiện ra khi run treo mãi ở `pending`.
-    await asyncio.to_thread(_launch, request.app.state, settings, run.id, secret_name)
+    await asyncio.to_thread(launch_ingest_job, request.app.state, settings, run.id, secret_name)
     return IngestRunAccepted(run_id=run.id)
 
 
@@ -307,17 +373,15 @@ async def get_ingest_run(
     nhận sự tồn tại của một run trong workspace người ta không được thấy.
 
     **CHỈ đối chiếu run CHƯA kết thúc, và điều kiện đó phải chặn TRƯỚC lời gọi
-    Kubernetes.** Một run đã `succeeded`/`failed` thì Job của nó đã bị TTL dọn
-    (`ttl_seconds_after_finished=3600`), nên câu trả lời sẽ là `exists=False` —
-    tức là hỏi thêm không chỉ vô nghĩa mà còn biến một run thành công thành
-    `failed` sau một giờ. Với một run `failed`, nó còn ghi đè `error` do pod tự
-    báo (nguyên nhân thật) bằng một câu chung chung về Job.
-    Đây là phép canh dễ bỏ nhất của cả đường này; `test_a_succeeded_run_is_
-    never_re_examined` khẳng định nó bằng `status_calls == []`.
+    Kubernetes.** Điều kiện đó không còn viết ở đây mà nằm TRONG
+    `reconcile_ingest_run` — lý do ở docstring hàm đó, tóm tắt: từ 3b có một chỗ
+    gọi THỨ HAI (nhịp lịch, `routers/internal_schedule.py`), và một cổng chép ở
+    hai chỗ là một cổng có thể quên ở một chỗ. Tính chất không đổi và vẫn kiểm
+    được từ chính đường này: `test_a_succeeded_run_is_never_re_examined` khẳng
+    định nó bằng `status_calls == []`.
 
-    Ghi trạng thái mới xuống Postgres chứ không chỉ trả về: cột `status` phải tự
-    nói đúng sự thật cho MỌI người đọc bảng (một câu SQL tay, một lần điều tra
-    sự cố), và một run đã chết không được bắt lần đọc sau hỏi lại Kubernetes.
+    Trạng thái mới cũng được GHI xuống Postgres chứ không chỉ trả về, và cũng ở
+    trong hàm đó.
     """
     settings: Settings = request.app.state.settings
 
@@ -328,28 +392,7 @@ async def get_ingest_run(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no ingest run with this id")
     await PermissionService(session, principal).require_item(run.lakehouse_id, Action.item_read)
 
-    if run.status not in TERMINAL_RUN_STATUSES:
-        job = await asyncio.to_thread(_job_status, request.app.state, settings, run.id)
-        reason = failure_from_job(job)
-        if reason is not None:
-            logger.info(
-                "ingest.reconciled_to_failed",
-                run_id=str(run.id),
-                was=run.status,
-                job_exists=job.exists,
-                job_active=job.active,
-                job_succeeded=job.succeeded,
-                job_failed=job.failed,
-            )
-            run.status = "failed"
-            run.error = reason
-            # `finished_at` đặt Ở ĐÂY vì đây là thời điểm sớm nhất ta BIẾT run đã
-            # kết thúc — thời điểm nó thật sự chết thì không ai ghi lại được (pod
-            # đã chết mà không nói gì; đó là cả lý do đường này tồn tại). Để cột
-            # này NULL trên một run đã đóng thì mọi người đọc phải xử lý một
-            # trạng thái cuối không có mốc kết thúc, đúng thứ `/complete` tránh.
-            run.finished_at = datetime.now(UTC)
-            await session.commit()
+    await reconcile_ingest_run(session, request.app.state, settings, run)
 
     return IngestRunStatus(
         run_id=run.id,
