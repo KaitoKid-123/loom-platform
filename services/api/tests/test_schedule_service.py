@@ -2,9 +2,7 @@
 
 from datetime import UTC, datetime
 
-import pytest
-
-from loom_api.schedule_service import Decision, decide
+from loom_api.schedule_service import decide
 
 
 def test_a_pipeline_already_running_is_skipped_with_a_readable_reason() -> None:
