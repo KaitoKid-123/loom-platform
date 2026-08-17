@@ -108,7 +108,7 @@ async def _active_item(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-def _launcher(app_state: State, settings: Settings) -> JobLauncherLike:
+def launcher_for(app_state: State, settings: Settings) -> JobLauncherLike:
     """`JobLauncher` của tiến trình này, dựng LƯỜI ở lần đầu cần tới cụm.
 
     Lười chứ không ở `create_app()`: `JobLauncher.__init__` gọi
@@ -123,6 +123,12 @@ def _launcher(app_state: State, settings: Settings) -> JobLauncherLike:
     "Lần đầu cần tới cụm" là phóng một Job HOẶC đọc trạng thái một Job (Task
     13): cả hai đường đi qua đây, nên cả hai cùng chia một launcher và cùng
     được thay bằng một double ở `app.state.job_launcher`.
+
+    CÔNG KHAI (không còn `_launcher`) từ 3b: nhịp lịch
+    (`routers/internal_schedule.py`) phóng Job nạp cho bước `ingest` của một
+    pipeline, và nó phải đi qua ĐÚNG hàm này. Một bản chép ở đó sẽ là một chỗ
+    thứ hai dựng `JobLauncher` — tức là hai launcher trong một tiến trình, và
+    một double gắn vào `app.state.job_launcher` chỉ thay được một trong hai.
 
     Hai request đồng thời có thể cùng dựng một launcher và một cái ghi đè cái
     kia. Kết quả không phụ thuộc thứ tự, nhưng KHÔNG phải vì `load_*_config`
@@ -151,9 +157,14 @@ def _launcher(app_state: State, settings: Settings) -> JobLauncherLike:
     return launcher
 
 
-def _launch(app_state: State, settings: Settings, run_id: uuid.UUID, secret_name: str) -> None:
-    """Phóng Job cho `run_id`. ĐỒNG BỘ, và chỉ được gọi từ một thread."""
-    _launcher(app_state, settings).launch(
+def launch_ingest_job(
+    app_state: State, settings: Settings, run_id: uuid.UUID, secret_name: str
+) -> None:
+    """Phóng Job cho `run_id`. ĐỒNG BỘ, và chỉ được gọi từ một thread.
+
+    Công khai cùng lý do `launcher_for`: nhịp lịch của 3b gọi lại đúng hàm này.
+    """
+    launcher_for(app_state, settings).launch(
         run_id,
         secret_name,
         (settings.task_shared_secret_name, settings.task_shared_secret_key),
@@ -166,7 +177,7 @@ def _job_status(app_state: State, settings: Settings, run_id: uuid.UUID) -> JobS
     """Trạng thái Job của `run_id`. ĐỒNG BỘ, và chỉ được gọi từ một thread —
     cùng lý do `_launch`: client `kubernetes` dùng urllib3, không có bản async.
     """
-    return _launcher(app_state, settings).status(run_id)
+    return launcher_for(app_state, settings).status(run_id)
 
 
 @router.post(
@@ -269,7 +280,7 @@ async def start_ingest(
     # để vẫn trả 202 mới là điều sai — 202 nghĩa là "đã nhận và đã yêu cầu Job",
     # và nói thế khi chưa yêu cầu được là một lời nói dối mà người dùng chỉ
     # phát hiện ra khi run treo mãi ở `pending`.
-    await asyncio.to_thread(_launch, request.app.state, settings, run.id, secret_name)
+    await asyncio.to_thread(launch_ingest_job, request.app.state, settings, run.id, secret_name)
     return IngestRunAccepted(run_id=run.id)
 
 

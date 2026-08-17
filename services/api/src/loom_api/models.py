@@ -506,48 +506,13 @@ class StreamState(Base):
     )
 
 
-class Pipeline(Base):
-    """Lich chay cho mot pipeline item.
-
-    `next_run_at` la moc nhip tiep theo do cron tinh ra, khong phai luc
-    thuc su chay. Tick endpoint so sanh `next_run_at <= now` de quyet dinh
-    lich nao can xu ly trong tick hien tai.
-    """
-
-    __tablename__ = "pipeline"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("tenant.id"), nullable=False
-    )
-    pipeline_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True),
-        ForeignKey("item.id", ondelete="CASCADE"),
-        nullable=False,
-        unique=True,
-        index=True,
-    )
-    workspace_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True),
-        ForeignKey("workspace.id"),
-        nullable=False,
-    )
-    cron: Mapped[str] = mapped_column(String(64), nullable=False)
-    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
-    # Muc nhip tiep theo do cron tinh ra
-    next_run_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
-    )
-    # Gioi han so run dong thoi cho pipeline nay
-    concurrency_cap: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    created_by: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
-    )
-    updated_by: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False
-    )
+# KHÔNG có model `Pipeline` ở đây, và đó là một quyết định chứ không phải một
+# chỗ bỏ sót. Lịch chạy của một pipeline nằm trong `item.definition`
+# (`PipelineDefinition.schedule`, xem `loom_core.item_definitions`), không nằm
+# trong một bảng riêng: definition đã được đánh version, đã có ETag chống ghi
+# đè, và Giai đoạn 5 (Git export) đã giả định definition là đơn vị xuất/nhập —
+# một bảng bên cạnh không có gì trong ba thứ đó. Bảng `pipeline` mà migration
+# 0008 tạo ra đã bị 0009 bỏ đi vì chính lý do này.
 
 
 class PipelineRun(Base):
