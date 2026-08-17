@@ -10,6 +10,14 @@ query:
 web:
   tag: prod
   replicas: 2
+scheduler:
+  # Chỉ `tag`, cùng lý do với `task` ngay dưới: thiếu dòng này thì prod chạy
+  # cái đồng hồ bằng ảnh `:dev` của values.yaml — đúng loại lỗi im lặng nhất
+  # có thể, vì scheduler không có endpoint nào để ai nhận ra nó đang chạy sai
+  # ảnh.
+  tag: prod
+  # Xem values-dev.yaml: một replica là đủ và nhiều hơn cũng không hỏng.
+  replicas: 1
 task:
   # Xem values-dev.yaml: chỉ `tag`, vì ảnh nạp không phải một Deployment. Không
   # đè `memory` — 512Mi của values.yaml đến từ ĐO 1 và chưa có phép đo nào KHÁC
@@ -28,9 +36,16 @@ oidc:
   issuer: https://loom.internal/dex
   redirectUrl: https://loom.internal/api/v1/auth/callback
   # Production không bao giờ để secret trong values — ESO đồng bộ Secret này.
-  # PHẢI có đủ BỐN khoá, kể cả `ingest-shared-secret` mới của Giai đoạn 3a —
-  # xem comment tương ứng ở values-dev.yaml, gồm cả lý do nó không được là bản
-  # sao của `query-shared-secret`.
+  # PHẢI có đủ NĂM khoá: `oidc-client-secret`, `session-secret`,
+  # `query-shared-secret`, `ingest-shared-secret` (Giai đoạn 3a) và
+  # `schedule-shared-secret` (Giai đoạn 3b) — xem comment tương ứng ở
+  # values-dev.yaml, gồm cả lý do mỗi khoá phải có giá trị RIÊNG chứ không
+  # phải bản sao của khoá khác.
+  #
+  # `schedule-shared-secret` thành BẮT BUỘC từ lúc chart có
+  # `scheduler-deployment.yaml`: pod scheduler đọc nó qua `secretKeyRef`, nên
+  # thiếu khoá là `CreateContainerConfigError` ngay khi khởi động — hỏng ồn ào
+  # và tức thì, không phải một 401 âm thầm mỗi 30 giây.
   existingSecret: loom-app-secrets
 storage:
   # dev/prod KHÔNG chạy MinIO trong cụm — deploy/infra/minio.yaml chỉ dành cho

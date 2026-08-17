@@ -7,6 +7,14 @@ query:
 web:
   tag: dev
   replicas: 2
+scheduler:
+  tag: dev
+  # KHÔNG nâng lên 2 ở đây dù api/query/web đều là 2. Hai replica không hỏng
+  # (`UNIQUE (pipeline_id, scheduled_for)` giữ tick idempotent — xem
+  # `scheduler-deployment.yaml`), nhưng chúng cũng không mua thêm gì: replica
+  # của api/query/web tồn tại để CHIA TẢI request đến, còn cái đồng hồ không
+  # có tải đến nào để chia.
+  replicas: 1
 task:
   # Không có `replicas`: ảnh này chạy dưới dạng Job một-lần do `loom-api` phóng,
   # không phải một Deployment (xem values.yaml, mục `task`). Chỉ `tag` cần đè —

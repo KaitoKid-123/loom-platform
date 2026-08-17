@@ -135,8 +135,12 @@ build-query:  ## Build image loom-query
 build-task:  ## Build image loom-task (chạy một lần rồi chết, không phải server)
 	docker build -f services/loom-task/Dockerfile -t loom/task:$(IMAGE_TAG) .
 
+.PHONY: build-scheduler
+build-scheduler:  ## Build image loom-scheduler (ticker, không server)
+	docker build -f services/loom-scheduler/Dockerfile -t loom/scheduler:$(IMAGE_TAG) .
+
 .PHONY: build
-build: build-api build-web build-query build-task  ## Build cả bốn image
+build: build-api build-web build-query build-task build-scheduler  ## Build cả năm image
 
 .PHONY: helm-validate
 helm-validate:  ## helm lint + kubeconform cho ba môi trường và dex.yaml

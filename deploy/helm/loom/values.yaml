@@ -41,6 +41,39 @@ query:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 384Mi }
 
+# Cái đồng hồ (Giai đoạn 3b): ngủ, POST `/internal/schedule/tick`, ghi log.
+# Xem `scheduler-deployment.yaml` — không Service, không port, không probe.
+scheduler:
+  image: loom/scheduler
+  tag: dev
+  # TIẾT KIỆM, không phải tính đúng đắn — `UNIQUE (pipeline_id, scheduled_for)`
+  # làm tick idempotent, nên hai replica vẫn chỉ sinh một run mỗi nhịp cron.
+  # Nâng lên 2 không phá gì cả; nó chỉ tốn thêm một pod. Lý do đầy đủ nằm cạnh
+  # `replicas:` trong `scheduler-deployment.yaml`.
+  replicas: 1
+  # KHÔNG có `preStopSleepSeconds` như api/query/web: pod này không đứng sau
+  # một Service nên không có request đang bay nào để chờ. 30 giây ân hạn là
+  # thừa thãi cho một tiến trình thoát ngay khi nhận SIGTERM
+  # (`loom_scheduler.main`), và giữ nguyên con số của các service khác chỉ để
+  # đồng nhất.
+  terminationGracePeriodSeconds: 30
+  # Nhịp. Con số CHỌN, không phải đo — xem docstring
+  # `loom_scheduler.config.Settings.tick_seconds`: tick dày hơn KHÔNG sinh thêm
+  # run (ràng buộc UNIQUE chốt điều đó), nó chỉ rút ngắn độ trễ giữa lúc một
+  # nhịp cron tới hạn và lúc run được tạo, và độ trễ giữa hai NẤC của một chuỗi
+  # (một tick đẩy chuỗi đi đúng một bước — xem docstring
+  # `loom_api.routers.internal_schedule`). Nhịp cron nhỏ nhất Loom biểu diễn
+  # được là một phút, nên 30s cho mỗi nhịp ít nhất một tick, dư một tick dự
+  # phòng nếu một lần nào đó lỗi.
+  tickSeconds: 30
+  # Nhỏ nhất trong cả chart, và nó xứng đáng: tiến trình này ngủ 30 giây, gửi
+  # một request HTTP, ghi một dòng log. Không DuckDB, không pyarrow, không pool
+  # database — cả cây phụ thuộc của nó là httpx + pydantic + structlog (xem
+  # `services/loom-scheduler/Dockerfile`).
+  resources:
+    requests: { cpu: 10m, memory: 48Mi }
+    limits: { memory: 128Mi }
+
 web:
   image: loom/web
   tag: dev
