@@ -231,13 +231,42 @@ class Lakehouse:
         self._catalog.load_table(qualified).add_files(list(uris), check_duplicate_files=True)
 
     def scan(self, qualified: str) -> pa.RecordBatchReader:
-        """Trả một reader theo LUỒNG, KHÔNG một bảng đã nạp hết vào RAM.
+        """Trả một reader, KHÔNG một bảng đã nạp hết vào RAM — nhưng đọc kỹ mục
+        thứ hai dưới đây trước khi tin rằng nó rẻ.
 
         Một bảng vài chục GB nạp hết vào RAM trước khi DuckDB thấy dòng đầu là
-        cách chắc chắn bị OOMKill: pod query ở Giai đoạn 2b chỉ có 384 MiB, và
-        đo thật (`packages/icebergkit/tests/test_duckdb_memory.py`) cho thấy
-        biên chỉ khoảng 8 MiB. `to_arrow_batch_reader()` phát từng batch theo
-        yêu cầu của bên đọc, thay vì vật chất hoá toàn bộ bảng trước.
+        cách chắc chắn bị OOMKill, nên `to_arrow_batch_reader()` vẫn đúng hơn
+        `to_arrow()`: đo được trên bảng 500k dòng, `to_arrow()` cần 421 MiB còn
+        reader cần 332 MiB.
+
+        **Nhưng reader này KHÔNG phải một luồng có biên.** Bản trước của docstring
+        này viết rằng nó "phát từng batch theo yêu cầu của bên đọc, thay vì vật
+        chất hoá toàn bộ bảng trước". Câu đó SAI, và ĐO 8
+        (`docs/measurements/2026-08-17-loom-query-memory.md`) đo ra chỗ sai. Đọc
+        `ArrowScan.to_record_batches` của PyIceberg 0.11.1: mỗi `FileScanTask` được
+        bọc trong `list(...)` — tức TRỌN một data file bị vật chất hoá thành một
+        list các `RecordBatch` — và các task được nộp vào `executor.map`, hàm nộp
+        HẾT mọi task ngay lập tức lên một pool rộng `min(32, cpu+4)`. Nên bộ nhớ
+        đỉnh tỉ lệ với **kích thước một DATA FILE**, không phải kích thước một
+        batch:
+
+            160.000 dòng/file  ->  332 MiB đỉnh
+             25.000 dòng/file  ->  269 MiB
+             10.000 dòng/file  ->  169 MiB
+
+        Hệ quả phải nói ra vì nó liên kết hai giai đoạn tưởng như rời nhau: đường
+        NẠP quyết định kích thước file (`ReadTuning.batch_rows=80.000` x
+        `WriteTuning.commit_every_batches=2` = 160.000 dòng/file), nên nó ĐẶT LUÔN
+        đỉnh bộ nhớ của đường ĐỌC.
+
+        **Và không có phép chiếu nào được đẩy xuống.** `.scan()` không nhận
+        `selected_fields`, nên MỌI cột được giải nén kể cả khi câu SQL không hỏi
+        cột nào — một `SELECT count(*)` trên bảng bảy cột ở trên vẫn trả giá cho cả
+        cột `payload` 220 ký tự (74% số byte). Đo được: cùng reader, cùng bảng, chỉ
+        thêm `selected_fields=("id",)` thì đỉnh rơi từ **332 MiB xuống 3,3 MiB**.
+        Đẩy phép chiếu xuống là việc CHƯA làm — nó cần phân tích cột từ câu SQL,
+        thứ `loom_sql` hôm nay không có (chỉ có phụ thuộc mức BẢNG) — và nó là task
+        riêng, xem ĐO 8 mục 5.
         """
         return self._catalog.load_table(qualified).scan().to_arrow_batch_reader()
 

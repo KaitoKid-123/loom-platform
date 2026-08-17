@@ -32,14 +32,37 @@ query:
   replicas: 1
   preStopSleepSeconds: 5
   terminationGracePeriodSeconds: 30
-  # `resources.limits.memory: 384Mi` là con số từ phép đo Giai đoạn 2a
-  # (`make measure-spill` — DuckDB `memory_limit=256MB`/`threads=2` trong một
-  # cgroup 384Mi thật, xem docstring `loom_query.runner`). ĐỪNG đổi số này mà
-  # không đo lại: nó gắn liền với `_MEMORY_LIMIT`/`_THREADS` ghim cứng trong
-  # `runner.py`, không phải một ước lượng rời.
+  # 384Mi -> 768Mi, và con số mới ĐẾN TỪ ĐO 8
+  # (`docs/measurements/2026-08-17-loom-query-memory.md`), đo trên cgroup THẬT của
+  # pod, không suy ra từ `_MEMORY_LIMIT` của DuckDB.
+  #
+  # Vì sao 384Mi là SAI, không chỉ chật: một câu `SELECT count(*)` TRẦN trên một
+  # bảng bronze 500.000 dòng (bảy cột, `scripts/bench_source.sql`) cần `anon`
+  # **518 MiB**, tổng **533 MiB**. Ở trần 384Mi câu đó không chạy được — đo trên
+  # cụm: `memory.peak` đụng đúng 384,0 MiB và `oom_group_kill` tăng 1 trong vòng
+  # ~2 giây kể từ lúc nộp. Hình dạng NẶNG hơn (gom nhóm, đúng hình dạng bước SQL
+  # của pipeline) cần **623 MiB**. Trần cũ thấp hơn nhu cầu của MỘT câu tầm thường
+  # chừng 150 MiB, nên nó không phải một trần cho đồng thời — nó là một trần chặn
+  # cả K = 1.
+  #
+  # Vì sao 768Mi: đỉnh xấu nhất đo được là 623,5 MiB, nền nghỉ sau vài câu là
+  # ~265 MiB, tức phần TĂNG THÊM của một câu quét là ~367 MiB. 768 phủ
+  # 265 + 367 = 632 MiB với 136 MiB (21%) dư. Ngân sách node vẫn còn: ĐO 7 đo
+  # 2645 Mi ở K = 5 trên ngân sách tự đặt 4096 Mi, nên +384 Mi ở đây thành ~3029 Mi.
+  #
+  # **Trần này KHÔNG phủ hai câu quét ĐỒNG THỜI** (265 + 2×367 ≈ 1000 MiB) và
+  # KHÔNG phủ bảng lớn hơn nhiều so với 500k dòng: đỉnh của đường quét tỉ lệ với
+  # kích thước FILE dữ liệu lớn nhất nhân số cột (xem `Lakehouse.scan` và ĐO 8 mục
+  # về đẩy phép chiếu). Không có trần nào đóng được chỗ đó; thứ đóng được là đẩy
+  # phép chiếu xuống Iceberg, và đó là một task riêng.
+  #
+  # KHÔNG có `GOMEMLIMIT` tương đương ở đây — Python không có giới hạn mềm nào bộ
+  # cấp phát tuân theo, nên phép canh
+  # `services/loom-query/tests/test_memory_ceiling.py` canh quan hệ giữa working
+  # set ĐO ĐƯỢC và trần cứng, chứ không canh một giới hạn mềm.
   resources:
     requests: { cpu: 50m, memory: 128Mi }
-    limits: { memory: 384Mi }
+    limits: { memory: 768Mi }
 
 # Cái đồng hồ (Giai đoạn 3b): ngủ, POST `/internal/schedule/tick`, ghi log.
 # Xem `scheduler-deployment.yaml` — không Service, không port, không probe.

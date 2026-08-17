@@ -195,11 +195,21 @@ class Settings(BaseSettings):
     # connection KHÔNG lớn theo K.
     #
     # **Chỗ vỡ là RAM của container `loom-query` (384Mi).** Đọc từ chính cgroup của
-    # pod: `anon` 221 MiB còn nằm lại lúc KHÔNG chạy gì (58% trần, và không
-    # reclaim được), trong khi MỘT bước SQL dựng silver trên một bảng bronze
-    # 150.000 dòng tốn thêm ~105-215 MiB. `221 + 215 = 436 > 384`. `memory.events`
-    # của pod đếm `oom_group_kill 8` — khớp CHÍNH XÁC `restartCount` của nó, tức
-    # mọi lần restart trong ngày đo đều là OOM.
+    # pod: `anon` 221 MiB còn nằm lại lúc KHÔNG chạy gì (58% trần), trong khi MỘT
+    # bước SQL dựng silver trên một bảng bronze 150.000 dòng tốn thêm ~105-215 MiB.
+    # `221 + 215 = 436 > 384`. `memory.events` của pod đếm `oom_group_kill 8` —
+    # khớp CHÍNH XÁC `restartCount` của nó, tức mọi lần restart trong ngày đo đều
+    # là OOM.
+    #
+    # **SỬA của ĐO 8 cho hai chữ trong đoạn trên:** 221 MiB đó KHÔNG phải "lúc
+    # không chạy gì" theo nghĩa nền, và nó KHÔNG phải "không reclaim được". Đo lại
+    # trên cùng cgroup pod: một pod VỪA KHỞI ĐỘNG, chưa phục vụ câu nào, có `anon`
+    # **92,9 MiB**. 221 MiB là phần rác đã tích lại SAU khi pod chạy vài câu quét —
+    # pool PyArrow chạy trên mimalloc, và mimalloc GIỮ trang đã free thay vì trả
+    # lại hệ điều hành (đo được: `pa.total_allocated_bytes()` đọc 0,0 MiB trong khi
+    # RSS là 706,7 MiB). `runner._release_arrow_memory()` thu phần đó về, hạ nền
+    # nghỉ từ ~555 MiB xuống ~265 MiB. Nên "sàn 58%" là một chỗ RÒ đã sửa được,
+    # không phải một chi phí phải thiết kế quanh nó.
     #
     # Số đo cho ranh giới hỏng, và nó NGẪU NHIÊN chứ không phải một bức tường:
     # K = 1 chưa hỏng lần nào; K = 2 có một khối 2/2 run hỏng (`loom-query` bị
@@ -218,11 +228,36 @@ class Settings(BaseSettings):
     # chết — `/api/v1/query` không đi qua `decide()`. Trần chỉ chặn phần đóng góp
     # CỦA SCHEDULER.
     #
-    # **Muốn nâng nó thì phải đo lại CÁI GÌ:** trước hết là RAM của `loom-query`
-    # (vì sao 221 MiB không được trả lại sau một câu, và vì sao `memory_limit=256MB`
-    # của DuckDB cộng phần PyIceberg/PyArrow vượt được trần 384Mi của container),
-    # rồi mới tới trần này. Hai trục còn lại còn nhiều chỗ ở K đã đo: RAM node cao
-    # nhất 2317 Mi trên ngân sách 4096 Mi, và slot Aiven cao nhất 11 trên 20.
+    # **ĐO 8 đã làm đúng phép đo mà đoạn trên đòi, và trần này VẪN là 1 — nhưng lý
+    # do đã khác, và cái khác đó mới là điều đáng đọc.** Trần RAM của `loom-query`
+    # lên 768Mi, `anon` không còn ratchet, và `loom-query` bây giờ CHẠY ĐƯỢC những
+    # câu mà ĐO 7 đo là chết: một `SELECT count(*)` trên bronze 500.000 dòng, và
+    # HAI câu quét đồng thời (K = 2, 3/3 lần). Đo ở 768Mi:
+    #
+    #   K = 1  đỉnh ~623 MiB   chạy được
+    #   K = 2  đỉnh ~731 MiB   chạy được 3/3
+    #   K = 3  đụng đúng 768,0 MiB, `oom_group_kill` +1, cả ba câu mất
+    #
+    # Luật "K lớn nhất không hỏng, trừ một" cho 2 - 1 = **1**. Nên con số không đổi.
+    #
+    # **Nhưng thứ ĐÃ đổi là lỗ mà đoạn "trần này KHÔNG chữa được" ở trên nói tới.**
+    # Ở 384Mi, N = 1 không đóng được lỗi: một câu tương tác cạnh một bước SQL là
+    # K = 2, và K = 2 chết. Ở 768Mi, K = 2 chạy được — nên N = 1 bây giờ THẬT SỰ
+    # đủ, và trần này lần đầu tiên khớp với thứ nó hứa. Cái còn hở là K = 3, và K = 3
+    # đòi HAI câu tương tác cùng lúc — một hình dạng mà không trần đồng thời nào
+    # chặn được, ở bất kỳ giá trị nào.
+    #
+    # **Muốn nâng nó lên 2 thì phải sửa cái gì:** không phải trần RAM (nâng tiếp
+    # KHÔNG mua thêm an toàn — đo được: đỉnh PHÌNH cho vừa trần, 768Mi cho đỉnh 731
+    # MiB còn 896Mi cho đỉnh 870 MiB, vì mimalloc chỉ trả trang khi bị ép). Thứ phải
+    # sửa là NHU CẦU: đẩy phép chiếu xuống Iceberg. Đo được, cùng bảng cùng reader,
+    # thêm `selected_fields=("id",)` hạ đỉnh quét từ 332 MiB xuống 3,3 MiB — xem
+    # `Lakehouse.scan` và ĐO 8 mục 5. Đó là task riêng vì nó cần phân tích cột từ
+    # câu SQL, thứ `loom_sql` chưa có.
+    #
+    # Hai trục còn lại còn nhiều chỗ ở K đã đo: RAM node cao nhất 2317 Mi trên ngân
+    # sách 4096 Mi (cộng +384 Mi của trần mới thành ~2700 Mi), và slot Aiven cao
+    # nhất 11 trên 20.
     #
     # Đếm TOÀN CỤC chứ không theo từng pipeline: theo từng pipeline thì chốt này là
     # hệ quả của chốt "không tự giẫm" ngay trên nó trong `decide()` và không bao giờ
