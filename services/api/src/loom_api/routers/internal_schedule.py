@@ -6,7 +6,8 @@ duoc lap lich. No phai:
 2. Tim cac schedule den han (enabled, next_run_at <= now)
 3. Moi schedule goi decide() (tu Task 5) de quyet dinh start/skip
 4. Tao dung MOT pipeline_run cho moi tick (UNIQUE constraint xu ly truong hop song song)
-5. Tra nhanh — gioi han trong TICK_BUDGET_SECONDS
+5. Day cac pending/running runs sang buoc tiep theo (Task 7)
+6. Tra nhanh — gioi han trong TICK_BUDGET_SECONDS
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_api.deps import SessionDep
 from loom_api.internal_security import require_schedule_secret
-from loom_api.models import Pipeline, PipelineRun
+from loom_api.models import Pipeline, PipelineRun, PipelineStepRun
 from loom_api.schedule_service import decide
 
 router = APIRouter(
@@ -116,12 +117,100 @@ async def _process_tick(session: AsyncSession, tick_time: datetime) -> TickRespo
         else:
             runs_skipped += 1
 
+    # Day cac running runs sang buoc tiep theo
+    await _advance_all_running_runs(session)
+
     await session.commit()
     return TickResponse(
         schedules_processed=schedules_processed,
         runs_started=runs_started,
         runs_skipped=runs_skipped,
     )
+
+
+async def _advance_all_running_runs(session: AsyncSession) -> None:
+    """Day tat ca running pipeline runs sang buoc tiep theo."""
+    running_runs = (
+        await session.execute(
+            select(PipelineRun).where(PipelineRun.status == "running")
+        )
+    ).scalars().all()
+
+    for run in running_runs:
+        await _advance_run(session, run)
+
+
+async def _advance_run(session: AsyncSession, run: PipelineRun) -> None:
+    """Day mot pipeline_run sang buoc tiep theo.
+
+    Goi sau khi tick da xu ly cac lich den han.
+    Chi day khi:
+    - Run dang o trang thai "running"
+    - Buoc hien tai da hoan thanh (success hoac failed)
+    - Con buoc tiep theo
+    """
+    # Tim buoc hien tai (step_index thap nhat chua succeeded/failed)
+    current_step_result = await session.execute(
+        select(PipelineStepRun)
+        .where(
+            PipelineStepRun.pipeline_run_id == run.id,
+            PipelineStepRun.status.in_(["succeeded", "failed"]),
+        )
+        .order_by(PipelineStepRun.step_index.desc())
+        .limit(1)
+    )
+    current_step = current_step_result.scalars().first()
+
+    if current_step is None:
+        # Chua co buoc nao hoan thanh — kiem tra co buoc pending chua?
+        first_pending = (
+            await session.execute(
+                select(PipelineStepRun)
+                .where(
+                    PipelineStepRun.pipeline_run_id == run.id,
+                    PipelineStepRun.status == "pending",
+                )
+                .order_by(PipelineStepRun.step_index)
+                .limit(1)
+            )
+        ).scalars().first()
+
+        if first_pending is not None and first_pending.step_index == 0:
+            # Bat dau tu buoc 0
+            first_pending.status = "running"
+            first_pending.started_at = datetime.now(UTC)
+            await session.commit()
+        return
+
+    if current_step.status == "failed":
+        # Dung chuoi — tat ca buoc con lai giu pending
+        run.status = "failed"
+        await session.commit()
+        return
+
+    # Buoc hien tai da thanh cong — tim buoc tiep theo
+    next_step = (
+        await session.execute(
+            select(PipelineStepRun)
+            .where(
+                PipelineStepRun.pipeline_run_id == run.id,
+                PipelineStepRun.step_index == current_step.step_index + 1,
+            )
+        )
+    ).scalars().first()
+
+    if next_step is None:
+        # Khong con buoc — run hoan thanh
+        run.status = "succeeded"
+        run.finished_at = datetime.now(UTC)
+        await session.commit()
+        return
+
+    # Khoi dong buoc tiep theo
+    next_step.status = "running"
+    next_step.started_at = datetime.now(UTC)
+    # TODO: Goi start_ingest() hoac start_sql() tuy loai step
+    await session.commit()
 
 
 @router.post("/tick")
