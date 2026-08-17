@@ -579,12 +579,8 @@ class PipelineRun(Base):
         PgUUID(as_uuid=True), ForeignKey("workspace.id"), nullable=False
     )
     # MOC NHIP chu khong phai luc chay
-    scheduled_for: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    status: Mapped[str] = mapped_column(
-        String(16), nullable=False, server_default="pending"
-    )
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
     # Ly do skip, neu pipeline duoc lap lich nhung khong co gi de chay
     skip_reason: Mapped[str | None] = mapped_column(Text)
     run_as_user_id: Mapped[uuid.UUID] = mapped_column(
@@ -627,9 +623,7 @@ class PipelineStepRun(Base):
     )
     step_index: Mapped[int] = mapped_column(Integer, nullable=False)
     step_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    status: Mapped[str] = mapped_column(
-        String(16), nullable=False, server_default="pending"
-    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
     # FK toi ingest_run de theo doi trang thai buoc nap — KHONG chep trang
     # thai sang day
     ingest_run_id: Mapped[uuid.UUID | None] = mapped_column(

@@ -2,6 +2,7 @@
 
 Không database, không HTTP — thuần để test được dễ dàng.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

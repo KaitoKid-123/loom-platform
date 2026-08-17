@@ -106,6 +106,4 @@ async def require_schedule_secret(request: Request) -> None:
     if provided is None or not hmac.compare_digest(
         provided.encode("latin-1", "replace"), settings.schedule_shared_secret.encode("utf-8")
     ):
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "missing or invalid schedule secret"
-        )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing or invalid schedule secret")

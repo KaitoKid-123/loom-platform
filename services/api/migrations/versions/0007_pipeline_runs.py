@@ -6,6 +6,7 @@ Create Date: 2026-08-16
 
 Pipeline scheduling: two tables for tracking pipeline runs and their steps.
 """
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -40,9 +41,7 @@ def upgrade() -> None:
         ),
         # `scheduled_for` la MOC NHIP, khong phai luc chay
         sa.Column("scheduled_for", sa.DateTime(timezone=True), nullable=False),
-        sa.Column(
-            "status", sa.String(16), nullable=False, server_default="pending"
-        ),
+        sa.Column("status", sa.String(16), nullable=False, server_default="pending"),
         sa.Column("skip_reason", sa.Text()),
         sa.Column(
             "run_as_user_id",
@@ -78,9 +77,7 @@ def upgrade() -> None:
         ),
         sa.Column("step_index", sa.Integer(), nullable=False),
         sa.Column("step_type", sa.String(16), nullable=False),
-        sa.Column(
-            "status", sa.String(16), nullable=False, server_default="pending"
-        ),
+        sa.Column("status", sa.String(16), nullable=False, server_default="pending"),
         # Buoc nap NOI vao bang 3a, khong chep trang thai sang day
         sa.Column(
             "ingest_run_id",

@@ -7,6 +7,7 @@ Create Date: 2026-08-17
 Pipeline schedule table — stores cron schedule, enabled flag, and next_run_at
 for each pipeline item.
 """
+
 from __future__ import annotations
 
 from collections.abc import Sequence
