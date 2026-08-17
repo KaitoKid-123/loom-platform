@@ -14,6 +14,7 @@ members = [
     "loom-core",
     "loom-iceberg",
     "loom-query",
+    "loom-scheduler",
     "loom-sql",
     "loom-storage",
     "loom-task",
@@ -1259,6 +1260,27 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=18.0" },
     { name = "structlog", specifier = ">=24.4" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
+]
+
+[[package]]
+name = "loom-scheduler"
+version = "0.1.0"
+source = { editable = "services/loom-scheduler" }
+dependencies = [
+    { name = "httpx" },
+    { name = "loom-core" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "structlog" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "loom-core", editable = "packages/core" },
+    { name = "pydantic", specifier = ">=2.10" },
+    { name = "pydantic-settings", specifier = ">=2.7" },
+    { name = "structlog", specifier = ">=24.4" },
 ]
 
 [[package]]

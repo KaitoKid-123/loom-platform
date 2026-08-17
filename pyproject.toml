@@ -41,6 +41,7 @@ src = [
     "services/api/src",
     "services/loom-query/src",
     "services/loom-task/src",
+    "services/loom-scheduler/src",
 ]
 
 [tool.ruff.lint]
@@ -66,6 +67,7 @@ files = [
     "services/api/migrations",
     "services/loom-query/src",
     "services/loom-task/src",
+    "services/loom-scheduler/src",
     "scripts",
 ]
 plugins = ["pydantic.mypy"]

@@ -1,0 +1,31 @@
+[project]
+name = "loom-scheduler"
+version = "0.1.0"
+description = "Cái đồng hồ: POST /internal/schedule/tick mỗi N giây, không làm gì khác"
+requires-python = ">=3.12"
+dependencies = [
+    # CHỈ vì `loom_core.internal_auth` — tên header bí mật chia sẻ, dùng chung
+    # với bên KIỂM (`loom_api.internal_security`) để một lần đổi tên header
+    # không có cơ hội lệch giữa hai đầu. Không có gì khác của `loom-core` được
+    # import ở đây, và `tests/test_no_db_no_k8s.py` canh đúng điều đó ở cấp
+    # MODULE: `loom_core.db` (engine SQLAlchemy) đi qua cùng package này.
+    "loom-core",
+    "httpx>=0.28",
+    "structlog>=24.4",
+    # `Settings` đọc biến môi trường — cùng khuôn `loom_query.config`.
+    # `loom-core` đã kéo cả hai theo, nhưng service NÀY import trực tiếp và một
+    # phụ thuộc bắc cầu không phải một lời hứa (cùng lập luận đã ghi ở
+    # `services/loom-task/pyproject.toml`).
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+]
+
+[tool.uv.sources]
+loom-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom_scheduler"]

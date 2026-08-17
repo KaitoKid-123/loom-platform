@@ -288,6 +288,8 @@ check-pins:  ## Chặn FROM trong Dockerfile lệch với deploy/versions.env
 		|| { echo "services/loom-query/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
 	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/loom-task/Dockerfile \
 		|| { echo "services/loom-task/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
+	@grep -q 'astral-sh/uv:$(UV_VERSION)-' services/loom-scheduler/Dockerfile \
+		|| { echo "services/loom-scheduler/Dockerfile không dùng uv:$(UV_VERSION) — lệch UV_VERSION trong deploy/versions.env"; exit 1; }
 	@echo "Pin khớp: node $(NODE_VERSION), uv $(UV_VERSION)"
 
 .PHONY: bootstrap
