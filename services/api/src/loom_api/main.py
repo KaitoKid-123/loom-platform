@@ -19,6 +19,7 @@ from loom_api.routers import (
     ingest,
     internal,
     internal_ingest,
+    internal_schedule,
     items,
     query,
     roles,
@@ -139,4 +140,8 @@ def create_app(
     # nạp trong cùng namespace chứ không phải `loom-query`. Xem docstring
     # `routers/internal_ingest.py` cho lý do hai router không gộp làm một.
     app.include_router(internal_ingest.router, prefix="/internal/ingest")
+    # Dong duong rieng cho loom-scheduler goi, cung khong co /api/v1 prefix nhu
+    # hai router ben tren. Router nay co mot shared secret o cap router
+    # (require_schedule_secret) vi nguoi goi la mot CronJob trong cung namespace.
+    app.include_router(internal_schedule.router, prefix="/internal/schedule")
     return app
