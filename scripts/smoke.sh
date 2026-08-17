@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mười bốn phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
+# Mười lăm phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
 # kubectl, nên chạy được với bất kỳ môi trường nào:
 #
 #     make smoke                              # local
@@ -47,11 +47,68 @@ SMOKE_SOURCE_STREAM="${SMOKE_SOURCE_STREAM:-public.alembic_version}"
 SMOKE_SOURCE_ROWS="${SMOKE_SOURCE_ROWS:-1}"
 
 JAR="$(mktemp -d)/cookies"
-trap 'rm -rf "$(dirname "$JAR")"' EXIT
+
+# Dọn workspace do smoke tạo — Ở TRONG TRAP, không ở cuối file, và phép 15 là lý
+# do nó phải chuyển vào đây.
+#
+# Trước phép 15, để lệnh dọn ở cuối file là đủ: thứ bị bỏ lại khi ai đó bấm
+# Ctrl-C giữa chừng chỉ là một workspace rác trong Postgres. Phép 15 tạo một
+# pipeline có LỊCH `* * * * *`, tức là một thứ TỰ CHẠY — bỏ lại nó nghĩa là cụm
+# phóng một Job nạp mỗi phút, MÃI MÃI, và không ai nhìn `make smoke` mà đoán được
+# đó là nguồn.
+#
+# Dọn HAI lớp, và lớp thứ nhất không thừa. Xoá mềm một WORKSPACE chỉ đặt
+# `workspace.state`; nó KHÔNG chạm `item.state` của các item bên trong (không có
+# cascade — xem `WorkspaceStore.soft_delete`). Nhịp lịch có lọc `Workspace.state
+# == ACTIVE` nên chỉ xoá workspace là ĐỦ để dừng lịch — nhưng vế đó vừa mới được
+# thêm vào chính vì phép 15 đo được hậu quả của việc thiếu nó (ba pipeline bỏ
+# lại từ ba lần chạy vẫn sinh Job sau khi workspace đã biến mất). Xoá thẳng item
+# pipeline là cái phanh KHÔNG phụ thuộc vào vế đó: nó đặt `item.state`, thứ mọi
+# phiên bản của nhịp lịch đều lọc. Với một thứ tự phóng pod, hai cái phanh rẻ
+# hơn một.
+#
+# Xoá MỀM cả hai nên lịch sử audit còn nguyên — và audit của một lần smoke là
+# bằng chứng nó đã chạy thật. Phép 10 tạo workspace, phép 12 thêm một item
+# lakehouse, phép 14 một item connection, phép 15 một item pipeline; cả bốn
+# thuộc cùng một workspace đã biến mất.
+#
+# `${smoke_ws_id:-}` chứ không `$smoke_ws_id`: trap chạy trên MỌI đường thoát, kể
+# cả một lần thoát trước khi phép 10 kịp khai biến, và `set -u` sẽ biến chính bộ
+# dọn thành lỗi.
+#
+# CÁI KHÔNG ĐƯỢC DỌN, và hãy đọc kỹ trước khi tin rằng nó tự hết: phép 13 tạo
+# bảng Iceberg THẬT (`smoke_ns.ctas_result`), phép 14 một bảng bronze THẬT, phép
+# 15 một bảng silver THẬT, cả ba với file Parquet thật trong MinIO. Xoá mềm
+# workspace KHÔNG chạm tới chúng — nó chỉ đặt một cột `deleted_at` trong
+# Postgres. Warehouse Lakekeeper cũng ở lại (nợ đã ghi ở Giai đoạn 2b), và đo
+# thật ở Giai đoạn 2c cho thấy xoá warehouse qua API quản trị của Lakekeeper
+# CŨNG KHÔNG xoá object dưới S3 — muốn sạch phải purge S3 tường minh. Nên mỗi
+# lần chạy smoke để lại vài bảng một dòng nằm lại vĩnh viễn. Nhỏ, nhưng không có
+# giới hạn trên. Dọn chúng cần một đường DROP TABLE mà API truy vấn KHÔNG có:
+# `loom_sql.deps` chỉ nhận `CREATE [OR REPLACE] TABLE ... AS SELECT` làm câu
+# GHI, còn `DROP TABLE` lọt qua cổng như một câu ĐỌC rồi chết trong DuckDB. Đây
+# là nợ có ý thức chứ không phải sơ suất.
+# SC2317: shellcheck không lần được lời gọi đi qua `trap`, nên nó coi cả thân
+# hàm là mã chết. Tắt đúng một mã, ở đúng một hàm — chứ không tắt cả file.
+# shellcheck disable=SC2317
+cleanup() {
+  # Pipeline TRƯỚC workspace: đây là thứ duy nhất đang tự chạy, nên nó phải dừng
+  # kể cả khi lời gọi xoá workspace ngay dưới trượt.
+  if [ -n "${smoke_pipeline_id:-}" ]; then
+    curl -s -b "$JAR" -o /dev/null -X DELETE --max-time 10 \
+      "$BASE/api/v1/items/$smoke_pipeline_id" || true
+  fi
+  if [ -n "${smoke_ws_id:-}" ]; then
+    curl -s -b "$JAR" -o /dev/null -X DELETE --max-time 10 \
+      "$BASE/api/v1/workspaces/$smoke_ws_id" || true
+  fi
+  rm -rf "$(dirname "$JAR")"
+}
+trap cleanup EXIT
 
 # Số phép kiểm MONG ĐỢI, khẳng định ở cuối file. Không có nó, xoá một phép kiểm
 # vẫn cho "7/7 đạt" và bản báo cáo trông y như trước.
-EXPECTED=14
+EXPECTED=15
 
 pass=0; fail=0; skipped=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; pass=$((pass+1)); }
@@ -145,6 +202,96 @@ wait_for_ingest() {   # $1 = run_id, $2 = file hứng phản hồi
     sleep 0.5
   done
   printf '%s %s' "${status:-không-đọc-được}" "$((SECONDS - started))"
+}
+
+# Chu kỳ gõ nhịp của `loom-scheduler` — `deploy/helm/loom/values.yaml`
+# (`scheduler.tickSeconds`), đọc lại ở đây vì smoke không có đường nào hỏi cụm
+# giá trị thật. Lệch giá trị này chỉ làm TRẦN dưới đây sai, không làm phép kiểm
+# sai: vòng lặp thoát ngay khi run kết thúc.
+SCHEDULER_TICK_S="${SCHEDULER_TICK_S:-30}"
+
+# Trần thời gian chờ MỘT PIPELINE ĐƯỢC LẬP LỊCH đi hết chuỗi `ingest → sql`.
+#
+# Hằng số RIÊNG, và nó KHÔNG phải một con số tròn đoán ra — nó là TỔNG của những
+# quãng chờ có thật, mỗi quãng dẫn từ một chỗ đã đo hoặc đã cấu hình:
+#
+#   60s   một phút cron. Lịch của phép 15 là `* * * * *` và neo của một pipeline
+#         chưa từng chạy là `item.updated_at` (xem `_due_at`), nên nhịp đầu tiên
+#         rơi vào mốc phút KẾ TIẾP sau lúc smoke tạo item — xa nhất là 60s.
+#   30s   một nhịp tick để scheduler NHÌN THẤY mốc đó và tạo hàng `pipeline_run`
+#         + khởi động bước 0.
+#  120s   ngân sách của chính bước nạp — dùng lại `INGEST_TIMEOUT_S`, con số đã
+#         được dẫn từ số đo ở trên (Job 12–14s, đuôi p95 của commit catalog).
+#   30s   một nhịp nữa: bước nạp xong KHÔNG báo cho ai — tick phải hỏi lại mới
+#         biết (xem `_reconcile_ingest_step`), và cùng nhịp đó mới nộp câu SQL.
+#   60s   ngân sách của bước SQL — dùng lại `QUERY_TIMEOUT_S`, đã dẫn từ số đo
+#         CTAS 11,3s cộng đuôi commit catalog.
+#   30s   nhịp cuối: `loom-query` cũng không gọi lại, nên tick phải hỏi lại mới
+#         đóng được run.
+#
+# Tổng 330s. Sàn quan sát được là ~64s (mốc cron rơi ngay, cộng hai nhịp 30s để
+# đi hết hai bước) và điều đó đã đo trên cụm sống; 330 là ~5 lần con số đó, và
+# phần dôi ra nằm đúng ở những chỗ đã biết là có đuôi dày.
+#
+# **Tính bằng công thức chứ không viết cứng, có chủ đích.** File này đã hai lần
+# trả giá cho một trần bịa: phép 13 dùng 3 giây cho một thao tác 11,3 giây (xanh
+# ở một task, đỏ ở task sau mà không dòng mã nào đổi), và phép 12 dùng 15 giây
+# rồi biến một 500 chẩn đoán được thành một `000` mù — ba giả thuyết sai trước
+# khi ai đó nhìn thấy lỗi thật. Một trần quá ngắn không chỉ làm hỏng phép kiểm,
+# nó GIẤU nguyên nhân. Dẫn từ hai hằng số đã đo nghĩa là nâng một trong hai thì
+# trần này tự đi theo, thay vì trôi khỏi nhau trong im lặng.
+PIPELINE_TIMEOUT_S="${PIPELINE_TIMEOUT_S:-$((60 + SCHEDULER_TICK_S + INGEST_TIMEOUT_S \
+  + SCHEDULER_TICK_S + QUERY_TIMEOUT_S + SCHEDULER_TICK_S))}"
+
+# Chờ MỘT pipeline run tới trạng thái CUỐI. In ra "<trạng thái> <số giây> <run_id>".
+#
+# CÙNG hình dạng với `wait_for_query`/`wait_for_ingest` ở trên, và cố ý cùng: in
+# mọi thứ qua stdout để chỗ gọi đọc bằng `read -r ... < <(...)`. KHÔNG dùng
+# `$(...)`: lệnh trong đó chạy ở subshell nên mọi phép gán bên trong biến mất
+# khi nó thoát — một lỗi đã sửa một lần trong chính file này, và bản đầu của
+# `wait_for_query` in ra `sau 0s` mãi mãi vì nó.
+#
+# Khác hai hàm kia ở đúng một chỗ: run CHƯA TỒN TẠI lúc bắt đầu chờ. Không có
+# `run_id` nào để nhận từ một phản hồi 202 — nhịp lịch mới là thứ tạo ra hàng,
+# và nó chưa chạy. Nên vòng lặp có hai thì: hỏi DANH SÁCH cho tới khi có run,
+# rồi hỏi CHI TIẾT run đó cho tới khi nó đóng.
+#
+# `run_id` GHIM lại ở lần đầu nhìn thấy, không hỏi lại danh sách nữa. Cron mỗi
+# phút có thể sinh một run THỨ HAI trong lúc ta còn đang chờ run thứ nhất; đọc
+# lại `items[0]` sẽ nhảy sang nó và bỏ dở thứ đang theo dõi.
+#
+# Danh sách trạng thái cuối là ALLOWLIST (`pipeline_run.status`: `pending`,
+# `running`, `succeeded`, `failed`, `skipped`), không phải "khác running thì
+# thôi" — cùng lý do hai hàm kia ghi: khi curl trượt hoặc Traefik trả một trang
+# HTML 502, `jq` cho chuỗi RỖNG, mà rỗng cũng "khác running". Rỗng nghĩa là CHƯA
+# BIẾT, và chưa biết thì phải hỏi lại.
+#
+# `skipped` LÀ một trạng thái cuối: một nhịp bị bỏ chiếm chỗ của nhịp đó và
+# không bao giờ được thử lại (xem docstring `routers/internal_schedule.py`). Đợi
+# tiếp một run `skipped` là đợi tới hết trần cho một thứ đã kết thúc.
+#
+# `sleep 2` chứ không `sleep 0.5` như hai hàm kia: thứ đang chờ ở đây tính bằng
+# phút và nó chỉ nhúc nhích mỗi 30 giây (một nhịp tick), nên hỏi hai lần một
+# giây chỉ là 600 request cho cùng một câu trả lời.
+wait_for_pipeline_run() {   # $1 = pipeline_id, $2 = file hứng CHI TIẾT run
+  local pipeline="$1" out="$2" started="$SECONDS" status="" run_id=""
+  local listing; listing="$(dirname "$out")/pipeline_run_list.json"
+  while [ $((SECONDS - started)) -lt "$PIPELINE_TIMEOUT_S" ]; do
+    if [ -z "$run_id" ]; then
+      curl -s -b "$JAR" --max-time 10 -o "$listing" \
+        "$BASE/api/v1/pipelines/$pipeline/runs?limit=1"
+      run_id=$(jq -r '.items[0].run_id // empty' < "$listing" 2>/dev/null)
+    fi
+    if [ -n "$run_id" ]; then
+      curl -s -b "$JAR" --max-time 10 -o "$out" "$BASE/api/v1/pipeline-runs/$run_id"
+      status=$(jq -r '.status // empty' < "$out" 2>/dev/null)
+      case "$status" in
+        succeeded|failed|skipped) break ;;
+      esac
+    fi
+    sleep 2
+  done
+  printf '%s %s %s' "${status:-chưa-có-run}" "$((SECONDS - started))" "${run_id:-KHÔNG-CÓ}"
 }
 
 echo "Smoke test: $BASE"
@@ -505,6 +652,13 @@ fi
 #
 #      Dùng CHUNG workspace và lakehouse với phép 10/12. KHÔNG dọn bảng bronze —
 #      cùng món nợ mà phép 13 đã ghi ở khối dọn dẹp bên dưới.
+#
+# `smoke_conn_name`/`smoke_conn_id` khai TRƯỚC khối, không bên trong: phép 15
+# dùng lại đúng connection này (và đúng bảng bronze mà nó nạp vào), nên nó phải
+# đọc được hai biến đó kể cả trên những nhánh mà phép 14 thoát sớm — dưới
+# `set -u`, một biến chưa từng được gán là một lỗi chứ không phải chuỗi rỗng.
+smoke_conn_name=""
+smoke_conn_id=""
 if [ -z "$smoke_lakehouse_id" ]; then
   bad "nạp qua /ingest — Job chạy rồi đọc lại bronze" "không có lakehouse từ phép 12 để nạp vào"
 elif [ -z "$SMOKE_SOURCE_HOST" ] || [ -z "$SMOKE_SOURCE_DB" ]; then
@@ -515,7 +669,7 @@ else
   # xem `loom_task.runner.bronze_table_name`), nên nó phải khớp `ItemCreate.name`
   # (`^[a-z0-9][a-z0-9-]*$`) và KHÔNG được sinh ra hai gạch dưới liền nhau sau khi
   # `-` đổi thành `_` — `$$` là PID nên chỉ gồm chữ số, an toàn với cả hai luật.
-  smoke_conn_name="smoke-src-$$"
+  smoke_conn_name="smoke-src-$$"  # xem khối khai báo ngay trên `if`
   conn_payload=$(jq -nc \
     --arg name "$smoke_conn_name" \
     --arg host "$SMOKE_SOURCE_HOST" \
@@ -594,30 +748,146 @@ else
   fi
 fi
 
-# Dọn: xoá mềm workspace do smoke tạo. Phép 10 tạo một workspace THẬT trên Aiven mỗi
-# lần chạy, nên không dọn thì hai mươi lần chạy để lại hai mươi workspace rác. Phép
-# 12 thêm một item lakehouse vào CÙNG workspace này — xoá mềm workspace kéo theo cả
-# hai (không cascade thật, nhưng cả hai đều thuộc một workspace đã biến mất, đúng
-# cách item sql_script của phép 10 đã luôn được xử lý).
-# Xoá mềm nên lịch sử audit còn nguyên — và audit của một lần smoke là bằng chứng nó
-# đã chạy thật.
+# 15 — PIPELINE ĐƯỢC LẬP LỊCH đi hết chuỗi, không ai bấm nút nào. Đây là phép
+#      kiểm duy nhất chứng minh đường Giai đoạn 3b tồn tại: một `loom-scheduler`
+#      ĐANG GÕ NHỊP -> `POST /internal/schedule/tick` -> nhịp cron tới hạn ->
+#      hàng `pipeline_run` -> bước `ingest` (một Job k8s THẬT) -> đối chiếu ->
+#      bước `sql` (nộp sang `loom-query` dưới danh nghĩa `run_as`) -> đối chiếu
+#      -> run `succeeded` -> bảng silver đọc lại được. Sáu thứ chỉ phép này thấy:
+#      (1) pod scheduler còn sống và bí mật chia sẻ của nó khớp hai đầu — nếu
+#      không, mọi tick 401 và không nhịp nào tới hạn; (2) lịch được ĐỌC TỪ
+#      `item.definition` chứ không từ bảng `pipeline` mà migration 0009 đã bỏ;
+#      (3) `run_as_user_id` còn đủ quyền ghi vào lakehouse; (4) `loom-query`
+#      chấp nhận principal `run_as` mà tick chuyển tới (integration test dùng
+#      một `loom-query` GIẢ nên nó cố ý không chứng minh được điều này — xem
+#      docstring `test_internal_schedule.py`); (5) tick đẩy chuỗi qua HAI bước
+#      chứ không đứng ở bước 0; (6) hai đường đọc mới của Task 12 trả đúng thứ
+#      cần đọc.
 #
-# Phép 14 thêm một item `connection` vào CÙNG workspace đó — cũng biến mất theo nó.
+#      **CHỜ NHỊP CRON THẬT, KHÔNG tự POST tick.** Đây không phải một lựa chọn
+#      về khẩu vị: `/internal/schedule/tick` KHÔNG có đường vào từ ngoài cụm.
+#      Ingress chỉ định tuyến `/api` (tới loom-api) và `/` (tới web) — xem
+#      `deploy/helm/loom/templates/ingress.yaml`, và
+#      `test_internal_route_boundary.py` canh đúng bất biến đó. Smoke chỉ nói
+#      HTTP qua ingress (không `kubectl`, xem đầu file), và nó cũng không có
+#      `X-Loom-Schedule-Secret` — giá trị đó là một k8s Secret. Nên hai cách duy
+#      nhất để tự gọi tick là phá ranh giới ingress hoặc dùng kubectl, và cả hai
+#      đắt hơn hẳn cái giá phải trả: chờ lâu hơn. Đổi lại, phép kiểm bao luôn
+#      chính `loom-scheduler` — thành phần mà không bài test nào khác chạm tới.
 #
-# CÁI KHÔNG ĐƯỢC DỌN, và hãy đọc kỹ trước khi tin rằng nó tự hết: phép 13 tạo bảng
-# Iceberg THẬT (`smoke_ns.ctas_result`), phép 14 thêm một bảng bronze THẬT
-# (`bronze.smoke_src_<pid>__...`), cả hai với file Parquet thật trong MinIO. Xoá mềm
-# workspace KHÔNG chạm tới chúng — nó chỉ đặt một cột `deleted_at` trong Postgres.
-# Warehouse Lakekeeper cũng ở lại (nợ đã ghi ở Giai đoạn 2b), và đo thật ở Giai đoạn
-# 2c cho thấy xoá warehouse qua API quản trị của Lakekeeper CŨNG KHÔNG xoá object
-# dưới S3 — muốn sạch phải purge S3 tường minh.
+#      **`CREATE OR REPLACE TABLE`, và đó là thứ `loom-query` THẬT SỰ nhận.** Đã
+#      tra chứ không đoán: `loom_sql.deps._create_table_info` đọc
+#      `tree.args["replace"]`, `write_target` mang nó theo, và
+#      `Lakehouse.create_from(..., replace=True)` bỏ bảng cũ rồi tạo lại. Ba thứ
+#      KHÔNG dùng được: `DROP TABLE` (lọt cổng như một câu ĐỌC rồi chết trong
+#      DuckDB — không có đường xoá bảng nào ở tầng này), hai câu lệnh cách nhau
+#      bằng `;` (400 ở `loom_sql.validate`), và `CREATE TABLE IF NOT EXISTS` (cú
+#      pháp qua được nhưng `IF NOT EXISTS` bị BỎ QUA, nên nó hỏng y như `CREATE
+#      TABLE` trần). Lịch ở đây là `* * * * *`, nên nhịp thứ hai tới trong lúc
+#      smoke còn chưa dọn xong: với một câu `CREATE TABLE` trần, nhịp đó chết
+#      với `EntityAlreadyExists` — đã thấy thật trên cụm. `OR REPLACE` cũng là
+#      thứ đúng cho một pipeline chạy theo lịch nói chung: một bước dựng silver
+#      phải chạy được mỗi đêm.
 #
-# Nên mỗi lần chạy smoke để lại một bảng một dòng nằm lại vĩnh viễn. Nhỏ, nhưng
-# không có giới hạn trên. Dọn nó cần một đường DROP TABLE mà API truy vấn chưa có
-# (sqlglot chỉ cho SELECT và CTAS), nên đây là nợ có ý thức chứ không phải sơ suất.
-if [ -n "$smoke_ws_id" ]; then
-  curl -s -b "$JAR" -o /dev/null -X DELETE --max-time 10 \
-    "$BASE/api/v1/workspaces/$smoke_ws_id" || true
+#      Dùng LẠI connection và bảng bronze của phép 14, có chủ đích: bước nạp của
+#      pipeline ghi vào ĐÚNG bảng bronze mà phép 14 vừa khẳng định số dòng, nên
+#      khi bảng silver ra đúng số dòng đó thì cả hai bước đều đã thật sự chạy.
+#      Một lakehouse thứ hai chỉ thêm một warehouse rác mỗi lần chạy.
+if [ -z "$smoke_lakehouse_id" ] || [ -z "$smoke_conn_id" ]; then
+  bad "pipeline theo lịch — scheduler chạy hết chuỗi ingest→sql" \
+      "không có lakehouse/connection từ phép 12/14 để dựng pipeline"
+else
+  # `run_as_user_id` là BẮT BUỘC cho một lịch đã bật (`ScheduleDefinition
+  # ._enabled_names_its_principal`), và nó phải là một `app_user.id` THẬT — cột
+  # đó có khoá ngoại. `/api/v1/me` cố ý KHÔNG trả id (nó không chạm database),
+  # nên smoke lấy id của chính mình từ audit: mọi hàng audit trong workspace này
+  # đều do chính tài khoản smoke sinh ra vài giây trước, ở phép 10.
+  smoke_user_id=$(curl -s -b "$JAR" --max-time 10 \
+                  "$BASE/api/v1/workspaces/$smoke_ws_id/audit?limit=1" \
+                  | jq -r '.items[0].actor_user_id // empty')
+  # Dựng lại tên bảng bronze TỪ CÙNG hai mảnh mà pod nạp dùng — cùng quy ước và
+  # cùng lý do đã ghi ở phép 14: lệch một ký tự thì bước SQL hỏng với "table not
+  # found" và phép kiểm đỏ, nên nó không trôi được trong im lặng.
+  pipe_bronze="bronze.${smoke_conn_name//-/_}__${SMOKE_SOURCE_STREAM//./_}"
+  pipe_silver="silver.smoke_pipeline"
+  if [ -z "$smoke_user_id" ]; then
+    bad "pipeline theo lịch — scheduler chạy hết chuỗi ingest→sql" \
+        "không đọc được actor_user_id từ audit của workspace — lịch cần run_as_user_id thật"
+  else
+    pipe_payload=$(jq -nc \
+      --arg name "smoke-pipeline-$$" \
+      --arg lh "$smoke_lakehouse_id" \
+      --arg conn "$smoke_conn_id" \
+      --arg stream "$SMOKE_SOURCE_STREAM" \
+      --arg sql "CREATE OR REPLACE TABLE $pipe_silver AS SELECT * FROM $pipe_bronze" \
+      --arg run_as "$smoke_user_id" \
+      '{type:"pipeline", name:$name, display_name:"Smoke pipeline",
+        definition:{schema_version:1,
+                    steps:[{type:"ingest",
+                            ingest:{lakehouse_id:$lh, connection_id:$conn,
+                                    stream:$stream, mode:"full"}},
+                           {type:"sql",
+                            sql:{lakehouse_id:$lh, sql:$sql}}],
+                    schedule:{enabled:true, cron:"* * * * *", timezone:"UTC",
+                              run_as_user_id:$run_as}}}')
+    # `--max-time 30` cho một lời gọi chỉ ghi Postgres (item `pipeline` KHÔNG
+    # cấp warehouse nào, khác `lakehouse` ở phép 12). Rộng có chủ đích: bài học
+    # của phép 12 là một trần quá chặt biến một 500 ĐỌC ĐƯỢC thành một `000` mù,
+    # và ba giả thuyết sai đi sau nó.
+    pipe_code=$(curl -s -b "$JAR" -o "$tmpdir/pipeline.json" -w '%{http_code}' --max-time 30 \
+                -X POST -H 'Content-Type: application/json' -d "$pipe_payload" \
+                "$BASE/api/v1/workspaces/$smoke_ws_id/items")
+    if [ "$pipe_code" != 201 ]; then
+      bad "pipeline theo lịch — scheduler chạy hết chuỗi ingest→sql" \
+          "tạo item type=pipeline trả $pipe_code: $(cat "$tmpdir/pipeline.json")"
+    else
+      smoke_pipeline_id=$(jq -r '.id' < "$tmpdir/pipeline.json")
+      read -r pipe_status pipe_waited_s pipe_run_id \
+        < <(wait_for_pipeline_run "$smoke_pipeline_id" "$tmpdir/pipeline_run.json")
+      if [ "$pipe_status" != succeeded ]; then
+        # In CẢ chi tiết run: `steps[].error` là thứ duy nhất nói được nó chết ở
+        # bước nào và vì sao — bước nạp chép nguyên văn lý do của hàng
+        # `ingest_run`, bước SQL chép nguyên văn lý do của `loom-query`. In số
+        # giây ĐÃ CHỜ chứ không chỉ trần: hai con số cạnh nhau phân biệt "hết
+        # giờ" với "hỏng ngay lập tức", và đó là khác biệt giữa hai nguyên nhân
+        # hoàn toàn khác nhau.
+        bad "pipeline theo lịch — scheduler chạy hết chuỗi ingest→sql" \
+            "sau ${pipe_waited_s}s (trần ${PIPELINE_TIMEOUT_S}s) run ${pipe_run_id} ở '${pipe_status}': $(cat "$tmpdir/pipeline_run.json" 2>/dev/null)"
+      else
+        sel3_payload=$(jq -nc --arg lh "$smoke_lakehouse_id" --arg t "$pipe_silver" \
+                       '{lakehouse_id:$lh, sql:("SELECT count(*) AS n FROM " + $t)}')
+        sel3_code=$(curl -s -b "$JAR" -o "$tmpdir/silver.json" -w '%{http_code}' --max-time 15 \
+                    -X POST -H 'Content-Type: application/json' -d "$sel3_payload" \
+                    "$BASE/api/v1/query")
+        if [ "$sel3_code" != 202 ]; then
+          bad "pipeline theo lịch — scheduler chạy hết chuỗi ingest→sql" \
+              "SELECT từ $pipe_silver trả $sel3_code (mong 202)"
+        else
+          sel3_query_id=$(jq -r '.query_id' < "$tmpdir/silver.json")
+          read -r sel3_status sel3_waited_s < <(wait_for_query "$sel3_query_id" "$tmpdir/silver_status.json")
+          # HAI khẳng định, không một. Số dòng trong silver chứng minh bước SQL
+          # đã ghi thật; `steps[]` đủ hai bước ĐỀU `succeeded` chứng minh chuỗi
+          # đi hết chứ không nhảy cóc. Chỉ kiểm cái đầu thì một bảng silver còn
+          # sót từ nhịp trước vẫn cho xanh.
+          steps_ok=$(jq -r '[.steps[] | select(.status == "succeeded")] | length' \
+                     < "$tmpdir/pipeline_run.json" 2>/dev/null)
+          if [ "$sel3_status" != succeeded ]; then
+            bad "pipeline theo lịch — scheduler chạy hết chuỗi ingest→sql" \
+                "SELECT lại sau ${sel3_waited_s}s (trần ${QUERY_TIMEOUT_S}s): $(cat "$tmpdir/silver_status.json")"
+          elif ! jq -e --argjson n "$SMOKE_SOURCE_ROWS" '.rows == [[$n]]' \
+                 >/dev/null 2>&1 < "$tmpdir/silver_status.json"; then
+            bad "pipeline theo lịch — scheduler chạy hết chuỗi ingest→sql" \
+                "mong $SMOKE_SOURCE_ROWS dòng trong $pipe_silver, đọc lại: $(cat "$tmpdir/silver_status.json")"
+          elif [ "${steps_ok:-0}" != 2 ]; then
+            bad "pipeline theo lịch — scheduler chạy hết chuỗi ingest→sql" \
+                "run succeeded nhưng chỉ ${steps_ok:-0}/2 bước succeeded: $(cat "$tmpdir/pipeline_run.json")"
+          else
+            ok "pipeline theo lịch — scheduler đẩy ingest→sql hết chuỗi sau ${pipe_waited_s}s, $pipe_silver đúng $SMOKE_SOURCE_ROWS dòng"
+          fi
+        fi
+      fi
+    fi
+  fi
 fi
 
 echo
