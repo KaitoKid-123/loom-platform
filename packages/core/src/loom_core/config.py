@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _INSECURE_DEFAULTS = {
@@ -177,6 +177,73 @@ class Settings(BaseSettings):
     # Mỗi bí mật chỉ mở được MỘT đường, không gộp quyền. Xem
     # `loom_core.internal_auth` cho danh sách đầy đủ và lý do.
     schedule_shared_secret: str = "dev-only-do-not-use-in-production"  # noqa: S105
+
+    # Trần đồng thời TOÀN CỤC của pipeline (spec 3b mục 6, chốt 2) — bao nhiêu
+    # `pipeline_run` được phép ở trạng thái `running` cùng lúc trên cả cụm. Đọc ở
+    # `routers/internal_schedule.py`, dùng bởi `schedule_service.decide()`.
+    #
+    # **1 ĐẾN TỪ ĐO 7**, không phải từ suy đoán:
+    # `docs/measurements/2026-08-17-phase-3b-concurrency.md`. Chỗ này trước đây là
+    # hằng số `CONCURRENCY_CAP = 3` và được ghi thẳng là CHƯA ĐO.
+    #
+    # **RÀNG BUỘC CHẶT NHẤT KHÔNG PHẢI POOL 3+2 CỦA `loom-api`.** Giả thuyết đó đã
+    # bị đo và bị bác: suốt cả phiên đo, SQLAlchemy KHÔNG báo cạn pool một lần nào
+    # (`QueuePool limit ...`: 0 lần), pool cao nhất chỉ giữ 4 trên 5 chỗ, và độ trễ
+    # lấy session (`/api/v1/readyz`) phẳng 235 -> 239 ms giữa K = 1 và K = 2 —
+    # chênh lệch đó nhỏ hơn nhiễu giữa hai lần chạy cùng K = 1. Pipeline không mở
+    # connection Aiven RIÊNG cho mỗi run; tất cả đi qua cùng pool 5 chỗ, nên số
+    # connection KHÔNG lớn theo K.
+    #
+    # **Chỗ vỡ là RAM của container `loom-query` (384Mi).** Đọc từ chính cgroup của
+    # pod: `anon` 221 MiB còn nằm lại lúc KHÔNG chạy gì (58% trần, và không
+    # reclaim được), trong khi MỘT bước SQL dựng silver trên một bảng bronze
+    # 150.000 dòng tốn thêm ~105-215 MiB. `221 + 215 = 436 > 384`. `memory.events`
+    # của pod đếm `oom_group_kill 8` — khớp CHÍNH XÁC `restartCount` của nó, tức
+    # mọi lần restart trong ngày đo đều là OOM.
+    #
+    # Số đo cho ranh giới hỏng, và nó NGẪU NHIÊN chứ không phải một bức tường:
+    # K = 1 chưa hỏng lần nào; K = 2 có một khối 2/2 run hỏng (`loom-query` bị
+    # OOMKill giữa bước SQL) và một khối 2/2 chạy được; ba câu SQL đồng thời
+    # (`probe_query_conc`) chạy được ở lần 1 và bị OOMKill ở lần 2 với ĐÚNG cùng
+    # cấu hình. Một trần phải nằm DƯỚI cái mép đó, không phải trên nó.
+    #
+    # **Vì sao 1 chứ không 0.** Luật của phép đo là "K lớn nhất không hỏng, trừ
+    # một" — K lớn nhất không hỏng là 1, nên phép trừ cho 0, và 0 nghĩa là KHÔNG
+    # lịch nào chạy được nữa. Nên 1 là SÀN, và biên an toàn phải đến từ chỗ khác:
+    # sửa `loom-query`, không phải hạ tiếp trần này.
+    #
+    # **Trần này KHÔNG chữa được `loom-query`, và đừng đọc nó như thế.** Ngay ở
+    # N = 1, một người dùng bấm một câu truy vấn tương tác trong lúc bước SQL của
+    # pipeline đang chạy vẫn tạo ra đúng hình dạng hai-câu-đồng-thời đã đo được là
+    # chết — `/api/v1/query` không đi qua `decide()`. Trần chỉ chặn phần đóng góp
+    # CỦA SCHEDULER.
+    #
+    # **Muốn nâng nó thì phải đo lại CÁI GÌ:** trước hết là RAM của `loom-query`
+    # (vì sao 221 MiB không được trả lại sau một câu, và vì sao `memory_limit=256MB`
+    # của DuckDB cộng phần PyIceberg/PyArrow vượt được trần 384Mi của container),
+    # rồi mới tới trần này. Hai trục còn lại còn nhiều chỗ ở K đã đo: RAM node cao
+    # nhất 2317 Mi trên ngân sách 4096 Mi, và slot Aiven cao nhất 11 trên 20.
+    #
+    # Đếm TOÀN CỤC chứ không theo từng pipeline: theo từng pipeline thì chốt này là
+    # hệ quả của chốt "không tự giẫm" ngay trên nó trong `decide()` và không bao giờ
+    # chặn thêm hàng nào — một cái chốt chết. Bảng `pipeline` cũ (migration 0008)
+    # có cột `concurrency_cap` riêng mỗi pipeline; nó đi cùng bảng khi 0009 bỏ bảng,
+    # và spec chưa bao giờ đòi một trần theo pipeline.
+    #
+    # Là BIẾN MÔI TRƯỜNG (`LOOM_PIPELINE_CONCURRENCY_CAP`) chứ không hằng số trong
+    # mã, cùng lập luận với `ReadTuning.batch_rows` bên `loom_task.config`: con số
+    # này chỉ đúng cho hình dạng bước SQL đã đo, và người vận hành gặp một
+    # `loom-query` to hơn (hoặc một bước SQL nặng hơn) phải sửa được nó mà không
+    # phải build lại ảnh.
+    #
+    # CHƯA được template trong chart — cùng chỗ đứng với `ReadTuning`/`WriteTuning`,
+    # nên mặc định ở đây LÀ giá trị chạy thật của mọi môi trường, và đổi nó ở
+    # dev/prod hôm nay là đặt env var trên deployment. Thêm một khoá `values.yaml`
+    # là việc của lần đầu tiên có người thật sự cần một giá trị khác.
+    #
+    # `gt=0`: 0 nghĩa là không nhịp nào chạy được nữa, và đó không phải một cấu
+    # hình — đó là tắt lịch bằng một con số trông như đã chỉnh.
+    pipeline_concurrency_cap: int = Field(default=1, gt=0)
 
     @field_validator(
         "public_base_url",

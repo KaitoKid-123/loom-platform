@@ -153,22 +153,6 @@ router = APIRouter(tags=["internal"], dependencies=[Depends(require_schedule_sec
 # máy trạng thái nhớ mình đang ở đâu.
 TICK_BUDGET_SECONDS = 20
 
-# Trần đồng thời toàn cục (spec mục 6, chốt 2) — bao nhiêu `pipeline_run` được
-# phép ở trạng thái `running` cùng lúc trên cả cụm.
-#
-# **Con số này CHƯA ĐƯỢC ĐO.** Task 9 đo nó (ràng buộc chặt nhất nhiều khả năng
-# là pool 3+2 của `loom-api`, không phải RAM) và thay hằng số này bằng
-# `Settings.pipeline_concurrency_cap`. Để 3 ở đây là một chỗ giữ chân, không
-# phải một kết luận — dự án này đã trả giá hai lần cho ngưỡng bịa, nên nó được
-# ghi là chưa đo thay vì được trình bày như đã đo.
-#
-# Đếm TOÀN CỤC chứ không theo từng pipeline: theo từng pipeline thì chốt này là
-# hệ quả của chốt "không tự giẫm" ngay phía trên nó trong `decide()` và không
-# bao giờ chặn thêm hàng nào — một cái chốt chết. Bảng `pipeline` cũ có cột
-# `concurrency_cap` riêng cho mỗi pipeline; nó đi cùng bảng, và spec chưa bao
-# giờ đòi một trần theo pipeline.
-CONCURRENCY_CAP = 3
-
 
 class TickResponse(BaseModel):
     schedules_processed: int
@@ -706,7 +690,11 @@ async def _process_due_pipeline(
         has_active_run=active_run is not None,
         active_run_started_at=active_run.started_at if active_run else None,
         concurrent_runs=concurrent_runs,
-        concurrency_cap=CONCURRENCY_CAP,
+        # Trần TOÀN CỤC, đo ở ĐO 7 — vì sao là con số đó, ràng buộc chặt nhất
+        # thật sự là gì (RAM 384Mi của `loom-query`, KHÔNG phải pool 3+2 ở đây),
+        # và phải đo lại cái gì trước khi nâng nó: xem docstring của
+        # `Settings.pipeline_concurrency_cap` ở `loom_core.config`.
+        concurrency_cap=settings.pipeline_concurrency_cap,
     )
 
     # Quyền hỏi SAU khi đã quyết định start: một nhịp bị bỏ vì run trước còn
