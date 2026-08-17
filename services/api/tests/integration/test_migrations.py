@@ -540,56 +540,84 @@ def test_stream_state_allows_only_one_watermark_per_stream(
     assert _attempt(conn, other_stream, **base) is None
 
 
-def test_0007_rewrites_old_pipeline_definitions(
-    conn: sa.Connection, actor: uuid.UUID
-) -> None:
-    """Mot hang pipeline hinh dang CU phai doc duoc sau migration.
+def test_0007_rewrites_old_pipeline_definitions() -> None:
+    """Một hàng pipeline hình dạng CŨ phải đọc được sau migration.
 
-    `PipelineDefinition` dat `extra="forbid"`, nen hai khoa `nodes`/`edges` con
-    sot lai lam `parse_definition` nem `ValidationError` — tuc 500 o moi route
-    doc item do.
+    `PipelineDefinition` đặt `extra="forbid"`, nên hai khoá `nodes`/`edges` còn
+    sót lại làm `parse_definition` ném `ValidationError` — tức 500 ở mọi route
+    đọc item đó.
+
+    Container RIÊNG, dừng ở 0006: `UPDATE` của 0007 chỉ thấy những hàng có mặt
+    lúc nó chạy. Bản trước của test này chèn hàng cũ vào `migrated_pg` — một
+    schema ĐÃ ở head — rồi khẳng định migration đã viết lại nó, nên nó không
+    chạm vào 0007 một lần nào và không thể xanh. Thứ tự "chèn TRƯỚC, nâng SAU"
+    dưới đây chính là điều cần chứng minh.
     """
-    ws = _new_workspace(conn, actor, "pipeline-test")
+    with PostgresContainer(POSTGRES_IMAGE) as pg:
+        assert run_alembic(pg, "upgrade", "0006").returncode == 0
+        eng = sa.create_engine(sync_url(pg))
+        try:
+            actor_id = uuid.uuid4()
+            ws_id = uuid.uuid4()
+            item_id = uuid.uuid4()
+            with eng.begin() as c:
+                c.execute(
+                    sa.text(
+                        "INSERT INTO app_user (id, tenant_id, subject, email, display_name)"
+                        " VALUES (:id, :tenant, :subject, 'proof@loom.local', 'Proof')"
+                    ),
+                    {
+                        "id": actor_id,
+                        "tenant": DEFAULT_TENANT_ID,
+                        "subject": f"proof-{actor_id}",
+                    },
+                )
+                c.execute(
+                    sa.text(
+                        "INSERT INTO workspace (id, tenant_id, name, display_name,"
+                        " storage_prefix, created_by, updated_by)"
+                        " VALUES (:id, :tenant, 'pipeline-test', 'pipeline-test', 's3://x',"
+                        " :actor, :actor)"
+                    ),
+                    {"id": ws_id, "tenant": DEFAULT_TENANT_ID, "actor": actor_id},
+                )
+                c.execute(
+                    sa.text(
+                        "INSERT INTO item (id, tenant_id, workspace_id, name, type,"
+                        " display_name, definition, definition_hash, created_by, updated_by)"
+                        " VALUES (:id, :tenant, :ws, 'test-old-pipeline', 'pipeline',"
+                        " 'test-old-pipeline',"
+                        ' \'{"schema_version": 1, "nodes": [], "edges": []}\'::jsonb,'
+                        " :hash, :actor, :actor)"
+                    ),
+                    {
+                        "id": item_id,
+                        "tenant": DEFAULT_TENANT_ID,
+                        "ws": ws_id,
+                        "hash": "x" * 64,
+                        "actor": actor_id,
+                    },
+                )
 
-    # Chen mot pipeline item voi dinh nghia dinh dang CU TRUOC khi upgrade
-    conn.execute(
-        sa.text(
-            "INSERT INTO item (id, tenant_id, workspace_id, name, type, display_name,"
-            " definition, definition_hash, created_by, updated_by)"
-            " VALUES (:id, :tenant, :ws, 'test-old-pipeline', 'pipeline',"
-            " 'test-old-pipeline',"
-            " '{\"schema_version\": 1, \"nodes\": [], \"edges\": []}'::jsonb,"
-            " :hash, :actor, :actor)"
-        ),
-        {
-            "id": uuid.uuid4(),
-            "tenant": DEFAULT_TENANT_ID,
-            "ws": ws,
-            "hash": "x" * 64,
-            "actor": actor,
-        },
-    )
+            assert run_alembic(pg, "upgrade", "head").returncode == 0
 
-    # Doc lai definition cua pipeline vua chen — phai chua `steps`, khong chua `nodes`/`edges`
-    row = conn.execute(
-        sa.text(
-            "SELECT definition FROM item"
-            " WHERE workspace_id = :ws AND type = 'pipeline' AND name = 'test-old-pipeline'"
-        ),
-        {"ws": ws},
-    ).one_or_none()
+            with eng.connect() as c:
+                definition = c.execute(
+                    sa.text("SELECT definition FROM item WHERE id = :id"),
+                    {"id": item_id},
+                ).scalar_one()
 
-    assert row is not None, "pipeline item khong ton tai sau migration"
-    definition = row[0]
-    assert "steps" in definition, (
-        f"migration phai rewrite dinh nghia CU thanh `steps`, nhung nhan duoc: {definition}"
-    )
-    assert "nodes" not in definition, (
-        f"dinh nghia sau migration khong duoc con `nodes`, nhung nhan duoc: {definition}"
-    )
-    assert "edges" not in definition, (
-        f"dinh nghia sau migration khong duoc con `edges`, nhung nhan duoc: {definition}"
-    )
+            assert "steps" in definition, (
+                f"migration phải rewrite định nghĩa CŨ thành `steps`, nhưng nhận được: {definition}"
+            )
+            assert "nodes" not in definition, (
+                f"định nghĩa sau migration không được còn `nodes`, nhưng nhận được: {definition}"
+            )
+            assert "edges" not in definition, (
+                f"định nghĩa sau migration không được còn `edges`, nhưng nhận được: {definition}"
+            )
+        finally:
+            eng.dispose()
 
 
 def test_0007_pipeline_run_and_step_run_tables_exist(

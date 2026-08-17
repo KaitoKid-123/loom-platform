@@ -211,10 +211,10 @@ def test_canonical_hash_changes_when_content_changes():
 
 
 def test_canonical_hash_distinguishes_list_order():
-    """Thứ tự KHOÁ không có nghĩa, thứ tự PHẦN TỬ thì có: `nodes` của một
+    """Thứ tự KHOÁ không có nghĩa, thứ tự PHẦN TỬ thì có: `steps` của một
     pipeline đổi thứ tự là một thay đổi thật. Một cách chuẩn hoá quá tay
     (sắp xếp cả list) sẽ làm hai pipeline khác nhau ra cùng một hash."""
-    assert canonical_hash({"nodes": [1, 2]}) != canonical_hash({"nodes": [2, 1]})
+    assert canonical_hash({"steps": [1, 2]}) != canonical_hash({"steps": [2, 1]})
 
 
 # --- PipelineStep & ScheduleDefinition (Task 2) --------------------------------

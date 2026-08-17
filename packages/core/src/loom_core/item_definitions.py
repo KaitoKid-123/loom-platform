@@ -193,7 +193,7 @@ def canonical_hash(definition: dict[str, Any]) -> str:
     không đổi gì — và lịch sử version đầy bản ghi trùng.
 
     Chuẩn hoá dừng ở thứ tự KHOÁ. Thứ tự phần tử trong list là nội dung thật
-    (`nodes` của một pipeline), nên sắp xếp cả list sẽ làm hai định nghĩa khác
+    (`steps` của một pipeline), nên sắp xếp cả list sẽ làm hai định nghĩa khác
     nhau ra cùng một hash — hỏng theo hướng ngược lại và tệ hơn.
     """
     payload = json.dumps(definition, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
