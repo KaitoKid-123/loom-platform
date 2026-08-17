@@ -145,6 +145,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "loom.appSecretName" . }}
                   key: ingest-shared-secret
+            # Bí mật chia sẻ RIÊNG cho loom-scheduler (Giai đoạn 3b). Cùng khuôn
+            # `LOOM_INGEST_SHARED_SECRET` ngay trên — khoá riêng, giá trị riêng.
+            - name: LOOM_SCHEDULE_SHARED_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "loom.appSecretName" . }}
+                  key: schedule-shared-secret
           # Cold start đo được 1.8s khi rảnh nhưng tới 35s khi CPU bị tranh chấp
           # (k3d + Dex + Tilt + docker build cùng chạy). Postgres không còn
           # chạy trong cụm (Aiven quản lý) nên không còn góp phần tranh chấp.

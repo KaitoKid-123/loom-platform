@@ -10,6 +10,7 @@ _INSECURE_DEFAULTS = {
     "oidc_client_secret": "loom-dev-secret",
     "query_shared_secret": "dev-only-do-not-use-in-production",
     "ingest_shared_secret": "dev-only-do-not-use-in-production",
+    "schedule_shared_secret": "dev-only-do-not-use-in-production",
     "storage_root_secret_key": "dev-only-do-not-use-in-production",
 }
 
@@ -172,6 +173,10 @@ class Settings(BaseSettings):
     # thì `loom-api` TỪ CHỐI KHỞI ĐỘNG, chứ không chạy với một bí mật ai cũng
     # đoán được.
     ingest_shared_secret: str = "dev-only-do-not-use-in-production"  # noqa: S105
+    # Ba bí mật chia sẻ — MỖI THỨ một bí mật RIÊNG: ingest, query, và schedule.
+    # Mỗi bí mật chỉ mở được MỘT đường, không gộp quyền. Xem
+    # `loom_core.internal_auth` cho danh sách đầy đủ và lý do.
+    schedule_shared_secret: str = "dev-only-do-not-use-in-production"  # noqa: S105
 
     @field_validator(
         "public_base_url",

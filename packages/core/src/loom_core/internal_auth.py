@@ -32,3 +32,13 @@ QUERY_SHARED_SECRET_HEADER = "X-Loom-Query-Secret"  # noqa: S105 — tên header
 # `ingest-shared-secret` tồn tại, xem `loom_core.config.Settings.
 # task_shared_secret_key`) thành một sự tách chỉ có trên giấy.
 INGEST_SHARED_SECRET_HEADER = "X-Loom-Ingest-Secret"  # noqa: S105 — tên header, không phải giá trị
+
+# Ba bí mật chia sẻ — MỖI THỨ một bí mật RIÊNG:
+#
+# LOOM_INGEST_SHARED_SECRET  → ai giữ nó thì khởi động được ingest
+# LOOM_QUERY_SHARED_SECRET   → ai giữ nó thì mạo danh được bất kỳ principal nào (X-Loom-Run-As)
+# LOOM_SCHEDULE_SHARED_SECRET → ai giữ nó thì khởi động được scheduled pipeline runs
+#
+# Dùng chung = gộp quyền ≠ vào một thứ → mất kiểm soát.
+
+SCHEDULE_SHARED_SECRET_HEADER = "X-Loom-Schedule-Secret"  # noqa: S105 — tên header, không phải giá trị bí mật

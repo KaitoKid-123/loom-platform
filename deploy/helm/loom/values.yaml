@@ -156,6 +156,12 @@ app:
   # khởi động vì `secretKeyRef` trỏ vào một khoá không tồn tại — hỏng ồn ào và
   # tức thì, đúng như nó nên thế, nhưng chỉ hiểu được nếu đã đọc dòng này.
   ingestSharedSecret: dev-only-do-not-use-in-production
+  # Bí mật chia sẻ RIÊNG cho loom-scheduler (Giai đoạn 3b). Một KHOÁ riêng,
+  # một GIÁ TRỊ riêng — không phải bản sao của hai khoá trên. Ba bí mật ba
+  # quyền tách biệt. ⚠️ dev/prod: External Secrets phải đồng bộ khoá
+  # `schedule-shared-secret` VÀO Secret `loom-app-secrets` cùng với
+  # `ingest-shared-secret` — xem `values-dev.yaml`.
+  scheduleSharedSecret: dev-only-do-not-use-in-production
 
 migration:
   enabled: true
