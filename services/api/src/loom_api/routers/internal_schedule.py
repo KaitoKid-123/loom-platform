@@ -9,6 +9,7 @@ duoc lap lich. No phai:
 5. Day cac pending/running runs sang buoc tiep theo (Task 7)
 6. Tra nhanh — gioi han trong TICK_BUDGET_SECONDS
 """
+
 from __future__ import annotations
 
 import uuid
@@ -25,11 +26,7 @@ from loom_api.internal_security import require_schedule_secret
 from loom_api.models import Pipeline, PipelineRun, PipelineStepRun
 from loom_api.schedule_service import decide
 
-router = APIRouter(
-    prefix="/internal/schedule",
-    tags=["internal"],
-    dependencies=[Depends(require_schedule_secret)],
-)
+router = APIRouter(tags=["internal"], dependencies=[Depends(require_schedule_secret)])
 
 TICK_BUDGET_SECONDS = 20
 
@@ -74,13 +71,17 @@ async def _process_tick(session: AsyncSession, tick_time: datetime) -> TickRespo
 
         # Kiem tra co run nao dang chay khong
         active_run = (
-            await session.execute(
-                select(PipelineRun).where(
-                    PipelineRun.pipeline_id == schedule.pipeline_id,
-                    PipelineRun.status == "running",
+            (
+                await session.execute(
+                    select(PipelineRun).where(
+                        PipelineRun.pipeline_id == schedule.pipeline_id,
+                        PipelineRun.status == "running",
+                    )
                 )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
         # Quyet dinh start hay skip
         decision = decide(
@@ -106,9 +107,7 @@ async def _process_tick(session: AsyncSession, tick_time: datetime) -> TickRespo
         )
 
         # ON CONFLICT DO NOTHING — neu tick khac da tao roi thi bo qua
-        stmt = stmt.on_conflict_do_nothing(
-            constraint="uq_pipeline_run_pipeline_scheduled_for"
-        )
+        stmt = stmt.on_conflict_do_nothing(constraint="uq_pipeline_run_pipeline_scheduled_for")
 
         await session.execute(stmt)
 
@@ -131,10 +130,10 @@ async def _process_tick(session: AsyncSession, tick_time: datetime) -> TickRespo
 async def _advance_all_running_runs(session: AsyncSession) -> None:
     """Day tat ca running pipeline runs sang buoc tiep theo."""
     running_runs = (
-        await session.execute(
-            select(PipelineRun).where(PipelineRun.status == "running")
-        )
-    ).scalars().all()
+        (await session.execute(select(PipelineRun).where(PipelineRun.status == "running")))
+        .scalars()
+        .all()
+    )
 
     for run in running_runs:
         await _advance_run(session, run)
@@ -164,16 +163,20 @@ async def _advance_run(session: AsyncSession, run: PipelineRun) -> None:
     if current_step is None:
         # Chua co buoc nao hoan thanh — kiem tra co buoc pending chua?
         first_pending = (
-            await session.execute(
-                select(PipelineStepRun)
-                .where(
-                    PipelineStepRun.pipeline_run_id == run.id,
-                    PipelineStepRun.status == "pending",
+            (
+                await session.execute(
+                    select(PipelineStepRun)
+                    .where(
+                        PipelineStepRun.pipeline_run_id == run.id,
+                        PipelineStepRun.status == "pending",
+                    )
+                    .order_by(PipelineStepRun.step_index)
+                    .limit(1)
                 )
-                .order_by(PipelineStepRun.step_index)
-                .limit(1)
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
         if first_pending is not None and first_pending.step_index == 0:
             # Bat dau tu buoc 0
@@ -190,14 +193,17 @@ async def _advance_run(session: AsyncSession, run: PipelineRun) -> None:
 
     # Buoc hien tai da thanh cong — tim buoc tiep theo
     next_step = (
-        await session.execute(
-            select(PipelineStepRun)
-            .where(
-                PipelineStepRun.pipeline_run_id == run.id,
-                PipelineStepRun.step_index == current_step.step_index + 1,
+        (
+            await session.execute(
+                select(PipelineStepRun).where(
+                    PipelineStepRun.pipeline_run_id == run.id,
+                    PipelineStepRun.step_index == current_step.step_index + 1,
+                )
             )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
 
     if next_step is None:
         # Khong con buoc — run hoan thanh
