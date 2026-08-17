@@ -120,6 +120,7 @@ from loom_api.models import (
     PipelineRun,
     PipelineStepRun,
     UserSession,
+    Workspace,
 )
 from loom_api.permissions import PermissionService
 from loom_api.routers.ingest import launch_ingest_job, reconcile_ingest_run
@@ -786,12 +787,32 @@ async def _process_tick(
     """Tìm lịch tới hạn, quyết định start/skip/fail, tạo hàng `pipeline_run`."""
     deadline = monotonic() + TICK_BUDGET_SECONDS
 
+    # `state == ACTIVE` ở CẢ HAI bảng, và vế `Workspace` KHÔNG phải một chi tiết
+    # thẩm mỹ — nó được thêm sau khi `make smoke` phép 15 đo được hậu quả của
+    # việc thiếu nó trên một cụm sống.
+    #
+    # `WorkspaceStore.soft_delete` chỉ đặt `workspace.state = 'deleted'`; nó
+    # KHÔNG chạm tới `item.state` của các item bên trong (không có cascade nào,
+    # có chủ đích — xem docstring của nó). Nên với điều kiện một-bảng trước đây,
+    # xoá một workspace KHÔNG dừng các pipeline trong đó: chúng vẫn tới hạn mỗi
+    # nhịp và vẫn phóng một Job nạp THẬT, mãi mãi, trong một workspace mà không
+    # còn đường nào từ API đi tới để tắt chúng. Đã thấy thật: ba pipeline bỏ lại
+    # từ ba lần chạy smoke vẫn sinh Job sau khi workspace của chúng đã biến mất.
+    #
+    # `visible_items_select` (`permissions.py`) đã lọc đúng hai vế này từ Giai
+    # đoạn 1 và docstring của nó nói rõ vì sao; đường lịch là chỗ DUY NHẤT trong
+    # repo đọc `item` mà chỉ lọc một vế. Nó không đi qua `visible_items_select`
+    # được vì câu đó áp cả cổng quyền của một principal, còn ở đây chưa có
+    # principal nào — quyền được hỏi sau, theo `run_as` của từng lịch.
     pipelines = (
         (
             await session.execute(
-                select(Item).where(
+                select(Item)
+                .join(Workspace, Workspace.id == Item.workspace_id)
+                .where(
                     Item.type == str(ItemType.pipeline),
                     Item.state == ACTIVE,
+                    Workspace.state == ACTIVE,
                 )
             )
         )

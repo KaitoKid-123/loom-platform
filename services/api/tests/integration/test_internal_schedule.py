@@ -48,6 +48,7 @@ from loom_api.models import (
     PipelineRun,
     PipelineStepRun,
     RoleAssignment,
+    Workspace,
 )
 from loom_core.internal_auth import QUERY_SHARED_SECRET_HEADER
 from loom_core.item_definitions import ItemType
@@ -640,6 +641,67 @@ async def test_a_pipeline_without_a_schedule_is_not_started(
 
     assert await _runs_of(session, pipeline_id) == []
     assert launcher.launched == []
+
+
+async def test_a_pipeline_in_a_deleted_workspace_is_not_started(
+    api_world: ApiWorld, session: AsyncSession
+) -> None:
+    """Xoá mềm WORKSPACE phải dừng lịch bên trong nó — kể cả khi hàng `item` vẫn `active`.
+
+    **Đây không phải một trường hợp giả định; nó đã xảy ra trên một cụm sống.**
+    `WorkspaceStore.soft_delete` chỉ đặt `workspace.state = 'deleted'` và CỐ Ý
+    không chạm `item.state` của các item bên trong (không có cascade). Trước bản
+    sửa, `_process_tick` chỉ lọc `Item.state == ACTIVE`, nên một pipeline trong
+    một workspace đã xoá vẫn tới hạn mỗi nhịp và vẫn phóng một Job nạp THẬT —
+    mãi mãi, trong một workspace mà API không còn đường nào đi tới để tắt nó.
+    `make smoke` phép 15 đo được đúng điều đó: ba pipeline bỏ lại từ ba lần chạy
+    vẫn sinh Job sau khi workspace của chúng đã biến mất.
+
+    Neo và cron y hệt phép kiểm "tới hạn" ở trên, nên thứ DUY NHẤT khác biệt là
+    trạng thái của workspace. Chứng minh đỏ bằng cách bỏ vế `Workspace.state ==
+    ACTIVE` khỏi `_process_tick`.
+
+    `launcher.launched == []` là vế quan trọng hơn `_runs_of(...) == []`: cái
+    giá thật của lỗi này không phải một hàng thừa trong Postgres mà là một pod
+    quay số ra một Postgres nguồn và ghi vào Iceberg mỗi phút.
+    """
+    await api_world.grant(("workspace", api_world.ws_a), Role.contributor)
+    launcher = _launcher(api_world)
+
+    lakehouse_id = await _lakehouse(session, api_world)
+    connection_id = await _connection(session, api_world)
+    pipeline_id = await _insert_item(
+        session,
+        api_world,
+        ItemType.pipeline,
+        {
+            "schema_version": 1,
+            "steps": [_ingest_step(lakehouse_id, connection_id)],
+            "schedule": _schedule(api_world.user_id),
+        },
+        updated_at=_minute_floor() - timedelta(hours=2),
+    )
+    # Xoá MỀM đúng như `WorkspaceStore.soft_delete` làm: chỉ cột `state`, và
+    # KHÔNG đụng tới `item.state` — nếu phép kiểm cũng xoá item thì nó chứng
+    # minh một thứ khác hẳn (và một thứ đã đúng từ trước).
+    workspace = (
+        await session.execute(select(Workspace).where(Workspace.id == api_world.ws_a))
+    ).scalar_one()
+    workspace.state = "deleted"
+    await session.commit()
+    try:
+        response = await api_world.client.post("/internal/schedule/tick", headers=TICK_HEADERS)
+        assert response.status_code == 200
+        assert response.json()["schedules_processed"] == 0
+
+        assert await _runs_of(session, pipeline_id) == []
+        assert launcher.launched == []
+    finally:
+        # Trả workspace về `active`: `api_world` xoá hàng của nó lúc teardown và
+        # những phép kiểm sau dùng lại cùng fixture. Trong `finally` để một câu
+        # khẳng định đỏ không kéo theo một lỗi teardown che mất nó.
+        workspace.state = "active"
+        await session.commit()
 
 
 # ------------------------------------------------------------------ quyền run_as
