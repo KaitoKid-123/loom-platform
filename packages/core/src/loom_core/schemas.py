@@ -572,3 +572,85 @@ class LakehouseResolveResponse(BaseModel):
     """
 
     ids: dict[str, uuid.UUID | None]
+
+
+class PipelineStepRunOut(BaseModel):
+    """Một hàng `pipeline_step_run` bên trong `PipelineRunDetail`.
+
+    `status` và `step_type` là `str` chứ KHÔNG `Literal`, cùng lập luận
+    `IngestRunStatus` đã ghi: đây là phản hồi dựng từ DỮ LIỆU ĐÃ LƯU, nên một
+    `Literal` biến một hàng lạ (migration sau thêm loại bước, một hàng sửa tay)
+    thành lỗi validate PHẢN HỒI — tức 500 cho đúng người đang cố tìm hiểu run
+    của họ bị gì.
+
+    `ingest_run_id` và `query_id` là hai CON TRỎ, không phải trạng thái chép
+    sang. Bước nạp NỐI vào hàng `ingest_run` (xem docstring `PipelineStepRun` ở
+    `models.py`: "một trạng thái ở hai chỗ là hai chỗ để lệch"), nên ai muốn số
+    dòng đã ghi thì đi tiếp một bước tới `GET /api/v1/ingest/{run_id}` — đường
+    đó có cổng quyền RIÊNG trên lakehouse, và đó là điều đúng: con trỏ ở đây
+    không phải một cách đi vòng qua nó.
+
+    `started_at` NULL-được, khác `PipelineRunSummary.started_at`: một bước chưa
+    tới lượt chưa có mốc bắt đầu nào, còn hàng `pipeline_run` thì có ngay từ lúc
+    được chèn (`server_default=now()`).
+    """
+
+    step_index: int
+    step_type: str
+    status: str
+    ingest_run_id: uuid.UUID | None = None
+    query_id: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error: str | None = None
+
+
+class PipelineRunSummary(BaseModel):
+    """Một hàng `pipeline_run` KHÔNG kèm bước — phần tử của
+    `GET /api/v1/pipelines/{pipeline_id}/runs`.
+
+    Không kèm bước là một quyết định về hình dạng truy vấn, không phải một chỗ
+    bỏ sót: một trang 50 run mà mỗi run mang cả chuỗi bước là một phản hồi
+    trăm-kilobyte cho một màn hình chỉ vẽ một cột trạng thái. Ai cần bước thì
+    mở đúng một run (`PipelineRunDetail`).
+
+    `scheduled_for` là MỐC NHỊP của scheduler, KHÔNG phải lúc chạy thật —
+    `started_at` mới là lúc hàng được chèn. Hai cột này lệch nhau đúng bằng độ
+    trễ giữa nhịp cron và tick đầu tiên nhìn thấy nó, và Giai đoạn 3c cần cả hai
+    để vẽ được "đêm qua có gì chạy muộn".
+
+    `skip_reason` chỉ khác `None` khi `status == "skipped"`, và nó KHÔNG phải
+    một lỗi: một nhịp bị bỏ vì run trước còn chạy là đúng theo thiết kế (xem
+    `schedule_service.decide`). Gộp nó vào `error` sẽ tô đỏ một thứ bình thường.
+    """
+
+    run_id: uuid.UUID
+    pipeline_id: uuid.UUID
+    scheduled_for: datetime
+    status: str
+    skip_reason: str | None = None
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
+class PipelineRunDetail(PipelineRunSummary):
+    """`GET /api/v1/pipeline-runs/{run_id}` — một run KÈM chuỗi bước của nó.
+
+    Kế thừa `PipelineRunSummary` chứ không chép lại tám trường: hai đường đọc
+    cùng một hàng, nên một trường thêm vào bản tóm tắt mà quên bản chi tiết là
+    một khác biệt không ai định có. Quan hệ "chi tiết = tóm tắt + bước" được
+    viết ra bằng chính kiểu dữ liệu.
+
+    `run_as_user_id` CHỈ có ở đây, không ở bản tóm tắt: nó là câu trả lời cho
+    "run này chạy bằng quyền của ai" — thứ người ta hỏi khi mở MỘT run ra xem vì
+    sao nó hỏng, không phải thứ để quét trong một danh sách. Cùng nguyên tắc
+    `IngestRunStatus` ghi khi bỏ `workspace_id`: mỗi trường thêm vào là một
+    trường phải giữ đúng.
+
+    `steps` sắp theo `step_index` tăng dần — thứ tự CHẠY của chuỗi tuyến tính,
+    và là thứ tự duy nhất có nghĩa để vẽ ra.
+    """
+
+    run_as_user_id: uuid.UUID
+    steps: list[PipelineStepRunOut] = Field(default_factory=list)

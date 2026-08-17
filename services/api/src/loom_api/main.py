@@ -21,6 +21,7 @@ from loom_api.routers import (
     internal_ingest,
     internal_schedule,
     items,
+    pipeline_runs,
     query,
     roles,
     search,
@@ -126,6 +127,7 @@ def create_app(
     app.include_router(items.router, prefix="/api/v1")
     app.include_router(query.router, prefix="/api/v1")
     app.include_router(ingest.router, prefix="/api/v1")
+    app.include_router(pipeline_runs.router, prefix="/api/v1")
     app.include_router(roles.router, prefix="/api/v1")
     app.include_router(search.router, prefix="/api/v1")
     app.include_router(audit.router, prefix="/api/v1")
