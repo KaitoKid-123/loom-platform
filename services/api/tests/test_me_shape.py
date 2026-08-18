@@ -9,9 +9,11 @@ Ba phép canh, ba điều khác nhau:
    tải trang, nên một round trip THÊM ở đây — CỘNG vào chi phí xác thực mà
    `PrincipalDep` đã trả trước khi thân hàm chạy — là một round trip nữa cho MỌI
    trang.
-3. Thân hàm `me` không tự truy cập `.state`/`.user_store`/`.execute`/... — tức
-   không có đường nào trong CHÍNH MÃ của `me` gọi thẳng vào store hay session,
-   kể cả khi không đi qua tham số nào cả.
+3. Thân hàm `me` không có một truy cập THUỘC TÍNH nào mang đúng tên bị cấm
+   trong `BANNED_ATTRS_IN_ME_BODY` (`.state`, `.user_store`, `.execute`, ...).
+   Đây là canh THEO TÊN thuộc tính xuất hiện trong thân hàm — không phải một
+   chứng minh rằng thân hàm không chạm database bằng MỌI cách có thể; xem chú
+   thích tại `BANNED_ATTRS_IN_ME_BODY` để biết rõ nó thấy gì và không thấy gì.
 
 Phép canh (2) đọc CHỮ KÝ HÀM, không đếm câu lệnh SQL — và đó là một quyết định
 có lý do. Fixture `api_world` dựng app bằng `Database(db_engine.url...)`, tức app
@@ -27,10 +29,10 @@ session qua THAM SỐ (kiểu `SessionDep`/`AsyncSession`). `login`, `callback` 
 `request.app.state.user_store.load_session(...)` trong thân hàm sẽ đi lọt qua
 phép canh (2) mà vẫn chạm database thật. Đó là lý do phép canh (3) tồn tại: nó
 đọc AST của THÂN HÀM `me`, không phải chữ ký, và bắt đúng dạng
-`request.app.state...` mà (2) không thấy. (3) vẫn có một khoảng trống thừa
-nhận, không phải phép canh toàn năng: một HÀM PHỤ được `me` gọi mà tự mở
-session/query riêng sẽ đi lọt qua CẢ (3), vì AST này không theo dấu lệnh gọi
-hàm — xem chú thích tại `BANNED_ATTRS_IN_ME_BODY`.
+`request.app.state...` mà (2) không thấy. Nhưng (3) CŨNG có đường lách — hơn
+một, không phải chỉ một — và liệt kê đủ chúng ở đây sẽ trùng lặp với chỗ nó
+thuộc về: xem chú thích tại `BANNED_ATTRS_IN_ME_BODY`, nơi các đường lách được
+nói thẳng, không giả vờ là một danh sách đã đủ.
 """
 
 from __future__ import annotations
@@ -59,10 +61,38 @@ AUTH_ROUTER = Path(__file__).resolve().parents[1] / "src" / "loom_api" / "router
 #     phòng khi `me` nhận một session bằng một con đường khác `SessionDep` (chữ
 #     ký đã bắt riêng `SessionDep`/kiểu `Session` ở phép canh (2)) rồi gọi thẳng
 #     một trong các phương thức này.
-# CÁI GIỚI HẠN THẬT của danh sách này, nói thẳng: nó chỉ đọc AST của thân `me`,
-# KHÔNG theo dấu lệnh gọi hàm. Một hàm phụ (vd. `_load_something()`) được `me`
-# gọi mà bên trong nó tự mở session và query riêng sẽ KHÔNG bị bắt — theo dấu
-# lệnh gọi hàm (interprocedural) nằm ngoài phạm vi phép canh này.
+#
+# Phép canh này THẬT SỰ bắt: một truy cập thuộc tính mà TÊN khớp NGUYÊN VĂN một
+# mục trong danh sách trên, ở bất kỳ đâu trong thân `me` — kể cả qua một biến cục
+# bộ (`store = request.app.state.user_store` vẫn bị bắt, vì cả "state" lẫn
+# "user_store" đều có mặt trong hai lần truy cập thuộc tính đó).
+#
+# Nó KHÔNG phải một đặc tả đầy đủ về mọi cách thân hàm này có thể chạm database.
+# Ba đường sau đều lách qua được — đã kiểm chứng bằng tay (chạy AST thật trên mã
+# giả lập), không phải suy đoán:
+#   1. Gián tiếp qua `getattr`/chuỗi: `getattr(getattr(request.app, "state"),
+#      "user_store")`. "state" và "user_store" khi đó nằm trong một
+#      `ast.Constant` (chuỗi), không phải `ast.Attribute.attr` — đây là hình
+#      dạng cú pháp DUY NHẤT mà `_attribute_accesses_in_body` biết đọc, nên nó
+#      không thấy hai chuỗi này.
+#   2. Một tham số qua `Depends(...)`: `store: UserStore =
+#      Depends(_get_user_store)` với `_get_user_store` đọc
+#      `request.app.state.user_store` bên trong THÂN CỦA NÓ — một hàm khác, không
+#      phải thân `me`. Thân `me` khi đó chỉ còn `store.load_session(...)`, và
+#      "load_session" không nằm trong danh sách cấm. Đây là đường DỄ XẢY RA NHẤT
+#      trong ba đường, và không phải vì ai đó cố tình lách: `Depends(...)` chính
+#      là IDIOM mà `PrincipalDep`/`SessionDep` (`loom_api.deps`) đã dùng trong cả
+#      repo này — một kỹ sư dọn `request.app.state.user_store...` thành một
+#      dependency "cho sạch" sẽ vô tình đi đúng qua lỗ này, không cần ác ý.
+#   3. Một HÀM PHỤ (vd. `_load_something()`) được `me` gọi mà tự mở session/query
+#      riêng bên trong nó — AST này không theo dấu lệnh gọi hàm
+#      (interprocedural), nên thân của hàm phụ không bao giờ được nhìn tới.
+#
+# Nói ngắn: đây là một CÁI SÀN (floor), không phải một CHỨNG MINH. Nó bắt đúng
+# dạng đã thật sự xảy ra trong file này (đường `request.app.state...` của
+# `login`/`callback`/`logout`) và dạng có khả năng lặp lại nhất nếu ai đó dọn mã
+# theo đúng idiom sẵn có của repo (đường 2) — không hơn, và một khúc dò xét kỹ
+# hay chỉ đơn thuần "dọn cho gọn" vẫn có thể đi qua được.
 BANNED_ATTRS_IN_ME_BODY = {
     "state",
     "user_store",
