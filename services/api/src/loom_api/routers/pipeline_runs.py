@@ -1,15 +1,17 @@
-"""HAI đường ĐỌC cho các lần chạy được lập lịch của một pipeline:
+"""BA đường ĐỌC cho các lần chạy được lập lịch của một pipeline:
 
 - `GET /api/v1/pipelines/{pipeline_id}/runs` — danh sách run của MỘT pipeline,
   mới nhất trước, phân trang bằng cursor.
+- `GET /api/v1/pipeline-runs` — danh sách run XUYÊN pipeline, gác bằng
+  `visible_items_select`. Nền của Monitor Hub (Giai đoạn 3c).
 - `GET /api/v1/pipeline-runs/{run_id}` — MỘT run kèm cả chuỗi bước của nó.
 
-Cả hai chỉ ĐỌC. Không có đường nào ở đây tạo, huỷ hay chạy lại một run: nguồn
+Cả ba chỉ ĐỌC. Không có đường nào ở đây tạo, huỷ hay chạy lại một run: nguồn
 duy nhất sinh ra `pipeline_run` là nhịp lịch (`routers/internal_schedule.py`),
 và mở một đường thứ hai là mở một chỗ thứ hai để quyết định "nhịp này có được
 chạy không" — đúng câu hỏi mà `schedule_service.decide` là nơi duy nhất trả lời.
 
-## Vì sao hai đường này tồn tại
+## Vì sao ba đường này tồn tại
 
 Trước chúng, cách DUY NHẤT để biết một pipeline đã chạy ra sao là hỏi thẳng
 Postgres từ trong pod `loom-api`. Điều đó làm hai thứ không làm được: `make
@@ -20,6 +22,9 @@ Giai đoạn 3c không có gì để vẽ.
 Hình dạng vì thế nhắm vào cả hai người dùng đó: một DANH SÁCH để quét trạng thái
 (một dòng một run, không kèm bước — xem `PipelineRunSummary`), và một CHI TIẾT
 để mở đúng một run ra xem nó chết ở bước nào.
+
+Đường XUYÊN pipeline đến sau, ở 3c, cho một câu hỏi mà hai đường trên không trả
+lời được — xem docstring `list_all_pipeline_runs`.
 
 ## Cổng quyền: `item.read` trên chính ITEM PIPELINE, và không gì khác
 
@@ -46,8 +51,16 @@ lý do:
 Quy tắc thật sự đang theo là quy tắc của `get_ingest_run` (Giai đoạn 3a): **lấy
 id tài nguyên TỪ HÀNG ĐÃ LƯU, không bao giờ từ client, rồi hỏi
 `PermissionService.require_item`.** Ở đó cột đó là `ingest_run.lakehouse_id`; ở
-đây là `pipeline_run.pipeline_id`. Cùng một luật, cùng một `PermissionService` —
-không có bộ kiểm quyền thứ hai nào trong file này.
+đây là `pipeline_run.pipeline_id`. Cùng một luật, cùng một `PermissionService`.
+
+Hai HÌNH THỨC gác, không hai bộ QUY TẮC — và chỗ khác biệt này đáng nói rõ, vì
+đọc nhanh sẽ tưởng là mâu thuẫn. Hai đường hỏi về một id cụ thể gọi
+`require_item` cho đúng hàng đó; đường danh sách xuyên pipeline không có id nào
+để hỏi (nó phải LỌC, và hỏi từng hàng một là N+1 lượt truy vấn cho mỗi trang),
+nên nó gác bằng biểu thức `visible_items_select`. Cả hai dựng trên CÙNG
+`_chain_conditions` và CÙNG `_roles_allowing(Action.item_read)` trong
+`permissions.py` — nên không có quy tắc quyền nào được viết trong file này, và
+không có chỗ nào ở đây để hai đường trôi khỏi nhau.
 
 `item.read` chứ không `item.update`: xem trạng thái là ĐỌC, và đòi `contributor`
 sẽ khoá mất trường hợp bình thường nhất (một người được chia sẻ ở mức xem muốn
@@ -72,15 +85,17 @@ không nói được vì sao thì không đáng gọi là đường đọc.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, HTTPException, Query, status
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_api.deps import PrincipalDep, SessionDep
 from loom_api.models import Item, PipelineRun, PipelineStepRun
 from loom_api.pagination import Page, decode_cursor, encode_cursor
-from loom_api.permissions import PermissionService
+from loom_api.permissions import PermissionService, visible_items_select
 from loom_core.item_definitions import ItemType
 from loom_core.roles import Action
 from loom_core.schemas import (
@@ -94,6 +109,49 @@ from loom_core.schemas import (
 router = APIRouter(tags=["pipeline-runs"])
 
 _MAX_LIMIT = 200
+
+# Trạng thái hợp lệ ở ĐẦU VÀO. `Literal` ở đây, `str` ở đầu ra — và hai điều đó không
+# mâu thuẫn: đầu ra dựng từ dữ liệu ĐÃ LƯU nên `Literal` biến một hàng lạ thành 500
+# (xem docstring `PipelineStepRunOut`), còn đầu vào đến từ CLIENT nên `Literal` biến một
+# giá trị gõ sai thành 422 kèm danh sách giá trị hợp lệ — thay vì một trang RỖNG mà
+# người dùng không phân biệt được với "không có run nào hỏng". Cùng lập luận
+# `ItemCreate.type` đã ghi.
+RunStatusFilter = Literal["pending", "running", "succeeded", "failed", "skipped"]
+
+
+def visible_pipeline_runs_select(principal: Principal) -> Select[tuple[PipelineRun]]:
+    """`select(PipelineRun)` đã giới hạn vào các pipeline người gọi ĐƯỢC ĐỌC.
+
+    Nền là `visible_items_select` — biểu thức DUY NHẤT trong repo trả lời "principal
+    này thấy item nào". Nó JOIN `Workspace` và lọc `state == ACTIVE` ở CẢ HAI bảng,
+    rồi mở chuỗi tổ tiên item → workspace → domain → tenant. Một `WHERE` viết tay ở
+    đây sẽ là bộ lọc THỨ HAI cho cùng một câu hỏi, và hai bộ lọc cho một câu hỏi là
+    hai chỗ để lệch: 3b đã lọc `Item.state` mà quên `Workspace.state`, nên workspace
+    đã xoá mềm vẫn phóng Job mãi mãi.
+
+    Là một hàm có TÊN chứ không viết thẳng trong handler, cùng lý do
+    `search_items_select` tồn tại: test đối chiếu gọi ĐÚNG hàm này. Một test dựng lại
+    biểu thức bằng tay chỉ chứng minh rằng bản dựng lại đó đúng.
+
+    Lọc `type` bằng một `.where()` NỐI VÀO, không phải một select mới — bộ lọc chỉ thu
+    hẹp, không bao giờ mở rộng quyền.
+
+    `JOIN` vào một subquery chứ không `pipeline_id.in_(...)`: hai cách cho cùng một
+    tập hàng, và `JOIN` nhân hàng nếu bên phải có id trùng — ở đây nó KHÔNG, vì
+    `item.id` là khoá chính và điều kiện quyền bên trong là một `EXISTS` tương quan
+    (không phải một `JOIN role_assignment`, thứ sẽ cho một hàng mỗi quyền khớp).
+    Canh bằng `test_a_run_appears_once_when_two_grants_both_match_it`, nên đổi
+    `EXISTS` đó thành `JOIN` sẽ đỏ ở đây chứ không âm thầm đếm sai trên Hub.
+
+    Bất đối xứng, nói ra chứ không giấu: `visible_items_select` lọc `state == ACTIVE`,
+    nên đường này KHÔNG trả run của pipeline đã xoá mềm, trong khi
+    `GET /pipelines/{id}/runs` thì có. Đó là đánh đổi có ý — Hub là màn hình quét cái
+    đang chạy, và một pipeline đã xoá không còn trong tập đó; ai cần lịch sử của nó vẫn
+    đi được đường theo-id. Test đối chiếu phải khẳng định đúng bất đối xứng này, không
+    khẳng định đẳng thức.
+    """
+    visible = visible_items_select(principal).where(Item.type == str(ItemType.pipeline)).subquery()
+    return select(PipelineRun).join(visible, visible.c.id == PipelineRun.pipeline_id)
 
 
 def _summary(run: PipelineRun) -> PipelineRunSummary:
@@ -173,6 +231,107 @@ async def list_pipeline_runs(
     filters = {"pipeline_id": str(pipeline_id)}
 
     stmt = select(PipelineRun).where(PipelineRun.pipeline_id == pipeline_id)
+    if cursor:
+        after_ts, after_id = decode_cursor(cursor, filters)
+        stmt = stmt.where(
+            (PipelineRun.scheduled_for < after_ts)
+            | ((PipelineRun.scheduled_for == after_ts) & (PipelineRun.id < after_id))
+        )
+
+    capped = min(limit, _MAX_LIMIT)
+    # limit+1 để biết còn trang sau mà không cần COUNT — xem `Page.build`.
+    stmt = stmt.order_by(PipelineRun.scheduled_for.desc(), PipelineRun.id.desc()).limit(capped + 1)
+    rows = (await session.execute(stmt)).scalars().all()
+    page = Page.build(
+        rows, capped, cursor_of=lambda run: encode_cursor(run.scheduled_for, run.id, filters)
+    )
+    return PageOut(items=[_summary(run) for run in page.items], next_cursor=page.next_cursor)
+
+
+@router.get("/pipeline-runs", response_model=PageOut)
+async def list_all_pipeline_runs(
+    # `run_status` + `alias="status"`: hợp đồng HTTP vẫn là `?status=`, nhưng tên tham
+    # số Python KHÔNG được là `status` — module này `from fastapi import ... status` và
+    # dùng `status.HTTP_404_NOT_FOUND` ở hai handler khác. Một tham số tên `status` che
+    # mất module đó trong phạm vi hàm, và người thêm một 404 vào đây sau này sẽ nhận
+    # `AttributeError: 'str' object has no attribute 'HTTP_404_NOT_FOUND'` — một lỗi
+    # không nói gì về nguyên nhân thật.
+    #
+    # `Annotated[...]` chứ không `= Query(default=None, ...)` như `search.py` viết, và
+    # khác biệt đó KHÔNG phải sở thích: ruff miễn B008 ("gọi hàm trong giá trị mặc
+    # định") cho tham số FastAPI, nhưng phép miễn đó không nhận ra chú thích là một
+    # BÍ DANH kiểu — `RunStatusFilter | None = Query(...)` bị B008 chặn trong khi
+    # `q: str = Query(...)` ở `search.py` thì không. Dạng `Annotated` không đặt lời gọi
+    # nào vào chỗ mặc định nên nó không phụ thuộc phép miễn đó, và nó cũng là dạng
+    # `roles.py` đang dùng (`RevokeQuery`).
+    run_status: Annotated[RunStatusFilter | None, Query(alias="status")] = None,
+    workspace_id: uuid.UUID | None = None,
+    since: datetime | None = None,
+    cursor: str | None = None,
+    limit: int = 50,
+    principal: Principal = PrincipalDep,
+    session: AsyncSession = SessionDep,
+) -> PageOut:
+    """Run của MỌI pipeline người gọi được đọc — nền của Monitor Hub (Giai đoạn 3c).
+
+    Vì sao nó tồn tại bên cạnh `GET /pipelines/{id}/runs`: hai câu hỏi khác nhau và
+    không thay nhau được. Người soạn pipeline hỏi "pipeline của tôi chạy ra sao";
+    người trực hỏi "có gì hỏng đêm qua". Bắt người trực đi qua mười hai trang pipeline
+    để trả lời câu thứ hai là không trả lời được.
+
+    Cổng quyền: `visible_pipeline_runs_select`, xem docstring của nó. KHÔNG có phép
+    kiểm quyền thứ hai trong handler này.
+
+    KHÔNG kèm `display_name` của pipeline hay tên workspace. Hub cần tên để vẽ, nhưng
+    lấy chúng ở đây là JOIN thêm và sinh một kiểu phản hồi THỨ HAI cho cùng một hàng.
+    Giao diện đã có `useItems`/`useWorkspaces` trong cache và giải tên ở client.
+
+    Sắp và phân trang trên `(scheduled_for, id)` giảm dần — cùng khoá và cùng lý do mà
+    `list_pipeline_runs` ghi: `scheduled_for` là MỐC NHỊP (thứ tự người ta nghĩ về các
+    lần chạy) và nó ổn định, còn `started_at` là lúc tick nhìn thấy nhịp nên một tick
+    chậm làm hai run đảo chỗ. Cặp chứ không một cột: `UNIQUE (pipeline_id,
+    scheduled_for)` chỉ duy nhất TRONG một pipeline, và ở đây nhiều pipeline nằm cùng
+    một danh sách — nên `scheduled_for` một mình còn ÍT duy nhất hơn ở đường kia.
+    """
+    stmt = visible_pipeline_runs_select(principal)
+
+    if since is not None:
+        # Chuẩn hoá về UTC TRƯỚC khi làm gì khác, và đây là một lỗi ĐÃ ĐO chứ không
+        # phải đề phòng lý thuyết. `?since=2026-08-18` (hay bất kỳ mốc thiếu offset)
+        # được Pydantic nhận thành một `datetime` NAIVE, và một datetime naive đưa vào
+        # phép so với cột `timestamptz` cho kết quả SAI mà không báo gì: đo trên chính
+        # bộ test này, cùng một mốc và `SHOW TimeZone` = UTC, bản naive khớp 2 hàng còn
+        # bản có offset khớp 1 — asyncpg dịch mốc naive theo giờ ĐỊA PHƯƠNG của máy
+        # chạy API. Nghĩa là trên một máy UTC nó trông đúng, và chỉ lệch khi triển khai
+        # ở nơi có offset khác 0; đúng loại sai lặng lẽ mà một trang rỗng-nhưng-hợp-lệ
+        # không phân biệt được với "đêm qua không có gì chạy".
+        #
+        # Coi naive là UTC chứ không trả 422: mọi mốc trong API này đều là UTC
+        # (`scheduled_for` trả ra kèm `Z`), nên đó là điều người gọi muốn nói, và nó
+        # giữ `?since=2026-08-18` dùng được cho người gõ URL bằng tay.
+        #
+        # TRƯỚC `filters` chứ không sau: dấu vết cursor phải tính trên giá trị ĐÃ chuẩn
+        # hoá, nếu không thì `since=...T00:00:00` và `since=...T00:00:00Z` — cùng một
+        # bộ lọc — sinh hai dấu vết khác nhau và cursor của bên này bị bên kia từ chối.
+        since = since.replace(tzinfo=UTC) if since.tzinfo is None else since.astimezone(UTC)
+
+    # Bộ lọc đi vào dấu vết cursor: một cursor lấy ở `status=failed` dán sang
+    # `status=running` phải là 400, không phải trang thứ hai của một tập KHÁC.
+    filters: dict[str, object] = {
+        "status": run_status,
+        "workspace_id": str(workspace_id) if workspace_id else None,
+        "since": since.isoformat() if since else None,
+    }
+
+    if run_status is not None:
+        stmt = stmt.where(PipelineRun.status == run_status)
+    if workspace_id is not None:
+        # Lọc THÊM, không thay: `visible_pipeline_runs_select` đã quyết định tập được
+        # phép thấy, và một tham số lọc không bao giờ được mở rộng nó.
+        stmt = stmt.where(PipelineRun.workspace_id == workspace_id)
+    if since is not None:
+        stmt = stmt.where(PipelineRun.scheduled_for >= since)
+
     if cursor:
         after_ts, after_id = decode_cursor(cursor, filters)
         stmt = stmt.where(
