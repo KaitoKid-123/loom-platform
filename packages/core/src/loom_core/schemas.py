@@ -614,8 +614,14 @@ class PipelineStepRunOut(BaseModel):
 
 
 class PipelineRunSummary(BaseModel):
-    """Một hàng `pipeline_run` KHÔNG kèm bước — phần tử của
-    `GET /api/v1/pipelines/{pipeline_id}/runs`.
+    """Một hàng `pipeline_run` KHÔNG kèm bước — phần tử của HAI đường danh sách:
+    `GET /api/v1/pipelines/{pipeline_id}/runs` (một pipeline) và
+    `GET /api/v1/pipeline-runs` (xuyên pipeline, nền của Monitor Hub).
+
+    Một kiểu cho cả hai là có chủ đích: cùng một hàng `pipeline_run` thì cùng một
+    hình dạng, và sinh kiểu thứ hai chỉ vì có đường thứ hai là hai chỗ để lệch. Vì
+    thế nó KHÔNG mang `display_name` của pipeline hay tên workspace — đường xuyên
+    pipeline cần tên để vẽ nhưng giải chúng ở client (xem `list_all_pipeline_runs`).
 
     Không kèm bước là một quyết định về hình dạng truy vấn, không phải một chỗ
     bỏ sót: một trang 50 run mà mỗi run mang cả chuỗi bước là một phản hồi

@@ -560,17 +560,19 @@ async def test_a_run_appears_once_when_two_grants_both_match_it(
 async def test_the_since_filter_reads_a_mark_without_an_offset_as_utc(
     api_world: ApiWorld,
 ) -> None:
-    """`?since=` THIẾU offset phải cắt đúng như bản có `Z` — không lệch theo giờ máy.
+    """`?since=` THIẾU offset phải cắt đúng như bản có `Z` — cả một VÒNG HTTP đầy đủ.
 
     Pydantic nhận một mốc thiếu offset thành `datetime` NAIVE, và một datetime naive
-    đưa vào phép so với cột `timestamptz` bị asyncpg dịch theo giờ ĐỊA PHƯƠNG của máy
-    chạy API. Kết quả là một tập hàng SAI, trả về 200 và không có gì báo lỗi.
+    đưa vào phép so với cột `timestamptz` bị asyncpg dịch theo giờ ĐỊA PHƯƠNG của tiến
+    trình API. Kết quả là một tập hàng SAI, trả về 200 và không có gì báo lỗi.
 
-    Phép canh này chỉ ĐỎ được trên máy có offset khác 0 (nó đỏ trên máy đã viết nó,
-    `Asia/Ho_Chi_Minh`, +07: mốc naive trượt về 7 giờ trước nên run cũ lọt vào). Trên
-    một CI chạy giờ UTC thì không có gì lệch để mà thấy — nói ra ở đây chứ không để
-    người đọc sau tưởng nó canh được ở mọi nơi. Nó vẫn đáng tồn tại vì hợp đồng
-    "không offset nghĩa là UTC" là thứ duy nhất làm hai dạng dưới đây tương đương.
+    Việc canh HỢP ĐỒNG "không offset nghĩa là UTC" nằm ở `_since_utc`, và phép canh của
+    nó là `test_pipeline_run_filters.py` — unit, đỏ trên MỌI máy. Phần phép canh NÀY
+    thêm vào là thứ unit test không với tới: rằng chuỗi query → Pydantic → `_since_utc`
+    → asyncpg → Postgres thực sự nối đúng, và rằng handler gọi `_since_utc` chứ không
+    bỏ quên nó. Nếu ai xoá lời gọi đó, dòng dưới đây đỏ ở đúng máy có offset khác 0
+    (máy đã viết nó là `Asia/Ho_Chi_Minh`, +07) — nên nó là phép canh về đường DÂY, còn
+    phép canh về công thức thì không phụ thuộc múi giờ.
     """
     await api_world.grant(("workspace", api_world.ws_a), Role.viewer)
     pipeline_id = await _pipeline(api_world, workspace_id=api_world.ws_a)
@@ -592,3 +594,51 @@ async def test_the_since_filter_reads_a_mark_without_an_offset_as_utc(
     )
     assert explicit.status_code == 200, explicit.text
     assert explicit.json()["items"] == naive.json()["items"]
+
+
+async def test_a_limit_below_one_is_a_422_not_a_500(api_world: ApiWorld) -> None:
+    """`?limit=0` và `?limit=-1` là 422, và TỪNG là 500 ở cả hai đường danh sách.
+
+    Cơ chế: `Page.build` nhận `limit <= 0`, thấy `len(rows) > limit`, cắt `rows[:limit]`
+    thành rỗng rồi đọc `kept[-1]` → `IndexError` → 500. Cần ÍT NHẤT một hàng mới dựng
+    lại được, nên phép canh dựng một run trước; không có nó thì `rows` rỗng, nhánh
+    `has_more` không chạy, và một trang rỗng che mất lỗi.
+
+    422 chứ không lặng lẽ nâng lên 1: `?limit=0` không có ý định nào đọc được, và trả
+    một hàng cho người hỏi không hàng nào là trả lời một câu hỏi khác. TRẦN thì vẫn cắt
+    im lặng (`_MAX_LIMIT`) — xem lý do ở `RunPageLimit`.
+
+    Cả hai đường một lượt: sàn khai ở MỘT chỗ, nên một phép canh chỉ chạm đường mới sẽ
+    xanh y nguyên khi ai đó chỉ gỡ nó khỏi một trong hai chữ ký.
+    """
+    await api_world.grant(("workspace", api_world.ws_a), Role.viewer)
+    pipeline_id = await _pipeline(api_world, workspace_id=api_world.ws_a)
+    await _run(api_world, pipeline_id, scheduled_for=_minute(-1))
+
+    for limit in (0, -1):
+        hub = await api_world.client.get(f"/api/v1/pipeline-runs?limit={limit}")
+        assert hub.status_code == 422, f"limit={limit} trên Hub: {hub.status_code} {hub.text}"
+        by_pipeline = await api_world.client.get(
+            f"/api/v1/pipelines/{pipeline_id}/runs?limit={limit}"
+        )
+        assert by_pipeline.status_code == 422, (
+            f"limit={limit} trên đường một-pipeline: {by_pipeline.status_code} {by_pipeline.text}"
+        )
+
+
+async def test_a_limit_above_the_cap_is_capped_and_still_answers(api_world: ApiWorld) -> None:
+    """`?limit=5000` vẫn là 200 và bị cắt xuống `_MAX_LIMIT`, KHÔNG thành 422.
+
+    Đây là vế còn lại của bất đối xứng ở `RunPageLimit`, và nó đáng một phép canh riêng
+    vì cách sửa sàn dễ nhất — `Query(ge=1, le=_MAX_LIMIT)` — sẽ lặng lẽ biến trần thành
+    422 và phá hợp đồng mà `GET /pipelines/{id}/runs` đã phát hành.
+    """
+    await api_world.grant(("workspace", api_world.ws_a), Role.viewer)
+    pipeline_id = await _pipeline(api_world, workspace_id=api_world.ws_a)
+    await _run(api_world, pipeline_id, scheduled_for=_minute(-1))
+
+    hub = await api_world.client.get("/api/v1/pipeline-runs?limit=5000")
+    assert hub.status_code == 200, hub.text
+    assert len(hub.json()["items"]) == 1
+    by_pipeline = await api_world.client.get(f"/api/v1/pipelines/{pipeline_id}/runs?limit=5000")
+    assert by_pipeline.status_code == 200, by_pipeline.text

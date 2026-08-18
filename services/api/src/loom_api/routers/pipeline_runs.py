@@ -53,14 +53,29 @@ id tài nguyên TỪ HÀNG ĐÃ LƯU, không bao giờ từ client, rồi hỏi
 `PermissionService.require_item`.** Ở đó cột đó là `ingest_run.lakehouse_id`; ở
 đây là `pipeline_run.pipeline_id`. Cùng một luật, cùng một `PermissionService`.
 
-Hai HÌNH THỨC gác, không hai bộ QUY TẮC — và chỗ khác biệt này đáng nói rõ, vì
-đọc nhanh sẽ tưởng là mâu thuẫn. Hai đường hỏi về một id cụ thể gọi
-`require_item` cho đúng hàng đó; đường danh sách xuyên pipeline không có id nào
-để hỏi (nó phải LỌC, và hỏi từng hàng một là N+1 lượt truy vấn cho mỗi trang),
-nên nó gác bằng biểu thức `visible_items_select`. Cả hai dựng trên CÙNG
-`_chain_conditions` và CÙNG `_roles_allowing(Action.item_read)` trong
-`permissions.py` — nên không có quy tắc quyền nào được viết trong file này, và
-không có chỗ nào ở đây để hai đường trôi khỏi nhau.
+Hai HÌNH THỨC gác, và chúng KHÔNG tính cùng một công thức — chỗ này đáng nói
+chính xác, vì một câu "cùng một nguồn quy tắc" cho gọn sẽ mạnh hơn code chịu
+được. Hai đường hỏi về một id cụ thể gọi `require_item` cho đúng hàng đó; đường
+danh sách xuyên pipeline không có id nào để hỏi (nó phải LỌC, và hỏi từng hàng
+một là N+1 lượt truy vấn cho mỗi trang), nên nó gác bằng biểu thức
+`visible_items_select`.
+
+Cái THỰC SỰ dùng chung là chuỗi tổ tiên `_chain_conditions` (cả hai truyền đúng
+một bộ cột) và, ở dưới một tầng nữa, `loom_core.roles.ACTION_MATRIX` qua
+`allows()`. KHÔNG phải `_roles_allowing` — chỉ `visible_items_select` gọi hàm
+đó; `require_item` đi đường khác: nó gom MỌI assignment khớp, lấy `max_role()`,
+rồi hỏi `allows(role, action)` trong `_enforce`.
+
+Nên hai câu hỏi khác nhau, và đây là bất đối xứng cần biết: SQL hỏi "có BẤT KỲ
+assignment nào cho `item_read` không", `require_item` hỏi "vai trò CAO NHẤT có
+cho `item_read` không". Chúng trùng nhau hôm nay chỉ vì cả bốn vai trò đều mang
+`item_read` (`roles.py`) — tức là trùng một cách TÌNH CỜ, đúng thứ mà docstring
+của `_roles_allowing` đã cảnh báo. Ai thêm một vai trò cao mà thiếu `item_read`,
+hoặc thu hẹp `item_read` lại, sẽ làm hai đường bất đồng HỢP LỆ. Tiền đề đó không
+bỏ mặc cho người đọc tin: `test_the_differential_test_rests_on_role_monotonicity`
+khẳng định nó ngay tại chỗ dùng, và
+`test_the_cross_pipeline_list_agrees_with_the_per_item_check` đo hiệu hai tập
+trên 25 thế giới ngẫu nhiên.
 
 `item.read` chứ không `item.update`: xem trạng thái là ĐỌC, và đòi `contributor`
 sẽ khoá mất trường hợp bình thường nhất (một người được chia sẻ ở mức xem muốn
@@ -117,6 +132,51 @@ _MAX_LIMIT = 200
 # người dùng không phân biệt được với "không có run nào hỏng". Cùng lập luận
 # `ItemCreate.type` đã ghi.
 RunStatusFilter = Literal["pending", "running", "succeeded", "failed", "skipped"]
+
+# Sàn của `limit`, khai bằng `Query(ge=...)` nên FastAPI trả 422 kèm lý do. MỘT chỗ cho
+# CẢ HAI đường danh sách — trước khi có nó, `?limit=0` và `?limit=-1` là 500 ở cả hai:
+# `Page.build` nhận `limit <= 0`, thấy `len(rows) > limit`, cắt `rows[:limit]` thành rỗng
+# rồi đọc `kept[-1]` → `IndexError`.
+#
+# Sàn thì 422, TRẦN thì cắt im lặng (`_MAX_LIMIT` bên dưới) — bất đối xứng có lý do, chứ
+# không phải quên. `?limit=5000` có một ý định đọc được ("nhiều nhất có thể") và trần là
+# chính sách bảo vệ server, nên cắt xuống 200 vẫn trả lời đúng câu người ta hỏi; đổi nó
+# thành 422 còn phá hợp đồng mà `GET /pipelines/{id}/runs` đã phát hành. `?limit=0` thì
+# KHÔNG có ý định nào đọc được, và lặng lẽ sửa nó thành 1 là trả một câu trả lời cho một
+# câu hỏi khác. Không có gì đang dựa vào hành vi cũ vì hành vi cũ là một 500.
+RunPageLimit = Annotated[int, Query(ge=1)]
+
+
+def _since_utc(since: datetime) -> datetime:
+    """Mốc `?since=` của client, chuẩn hoá về UTC có offset.
+
+    Một hàm có TÊN chứ không hai dòng trong handler, và lý do là ĐO ĐƯỢC: lỗi mà nó
+    chữa chỉ hiện ra trên máy có offset khác 0, nên một phép canh đi qua HTTP thì mù
+    đúng ở nơi nó chạy (CI chạy giờ UTC). Tách ra thì `test_pipeline_run_filters.py`
+    gọi trực tiếp và khẳng định được INSTANT trả về — đỏ trên MỌI máy, không cần Docker,
+    không cần đổi `TZ` của tiến trình. Cùng lý do `search_items_select` và
+    `visible_pipeline_runs_select` là hàm có tên: test phải gọi được đúng thứ chạy thật.
+
+    Vì sao cần chuẩn hoá: `?since=2026-08-18` (hay bất kỳ mốc thiếu offset) được Pydantic
+    nhận thành `datetime` NAIVE, và một datetime naive đưa vào phép so với cột
+    `timestamptz` cho kết quả SAI mà không báo gì — đo trên bộ test tích hợp, cùng một
+    mốc và `SHOW TimeZone` = UTC: bản naive khớp 2 hàng, bản có offset khớp 1. asyncpg
+    dịch mốc naive theo giờ ĐỊA PHƯƠNG của tiến trình API. Trên máy UTC nó trông đúng và
+    chỉ lệch khi triển khai ở nơi khác, nên đây là loại sai lặng lẽ mà một trang
+    rỗng-nhưng-hợp-lệ không phân biệt được với "đêm qua không có gì chạy".
+
+    Coi naive là UTC chứ không trả 422: mọi mốc trong API này đều là UTC
+    (`scheduled_for` trả ra kèm `Z`), nên đó là điều người gọi muốn nói, và nó giữ
+    `?since=2026-08-18` dùng được cho người gõ URL bằng tay.
+
+    `utcoffset() is None` chứ không `tzinfo is None`, và đó là dạng repo này đã lập luận
+    ở `loom_core/cursor.py`: một `tzinfo` hợp lệ được phép trả `None` cho offset (nó là
+    lớp trừu tượng, không phải một cờ), và khi đó Python vẫn xếp `datetime` là naive —
+    `utcoffset()` mới là thuộc tính quyết định `astimezone()` có nổ hay không. Qua
+    Pydantic thì hôm nay không tới được nhánh đó; viết đúng dạng để đừng ai "sửa" ngược
+    lại, và để nếu có tới thì nó là một mốc UTC chứ không phải một 500.
+    """
+    return since.replace(tzinfo=UTC) if since.utcoffset() is None else since.astimezone(UTC)
 
 
 def visible_pipeline_runs_select(principal: Principal) -> Select[tuple[PipelineRun]]:
@@ -184,7 +244,7 @@ def _step_out(step: PipelineStepRun) -> PipelineStepRunOut:
 async def list_pipeline_runs(
     pipeline_id: uuid.UUID,
     cursor: str | None = None,
-    limit: int = 50,
+    limit: RunPageLimit = 50,
     principal: Principal = PrincipalDep,
     session: AsyncSession = SessionDep,
 ) -> PageOut:
@@ -268,7 +328,7 @@ async def list_all_pipeline_runs(
     workspace_id: uuid.UUID | None = None,
     since: datetime | None = None,
     cursor: str | None = None,
-    limit: int = 50,
+    limit: RunPageLimit = 50,
     principal: Principal = PrincipalDep,
     session: AsyncSession = SessionDep,
 ) -> PageOut:
@@ -296,24 +356,10 @@ async def list_all_pipeline_runs(
     stmt = visible_pipeline_runs_select(principal)
 
     if since is not None:
-        # Chuẩn hoá về UTC TRƯỚC khi làm gì khác, và đây là một lỗi ĐÃ ĐO chứ không
-        # phải đề phòng lý thuyết. `?since=2026-08-18` (hay bất kỳ mốc thiếu offset)
-        # được Pydantic nhận thành một `datetime` NAIVE, và một datetime naive đưa vào
-        # phép so với cột `timestamptz` cho kết quả SAI mà không báo gì: đo trên chính
-        # bộ test này, cùng một mốc và `SHOW TimeZone` = UTC, bản naive khớp 2 hàng còn
-        # bản có offset khớp 1 — asyncpg dịch mốc naive theo giờ ĐỊA PHƯƠNG của máy
-        # chạy API. Nghĩa là trên một máy UTC nó trông đúng, và chỉ lệch khi triển khai
-        # ở nơi có offset khác 0; đúng loại sai lặng lẽ mà một trang rỗng-nhưng-hợp-lệ
-        # không phân biệt được với "đêm qua không có gì chạy".
-        #
-        # Coi naive là UTC chứ không trả 422: mọi mốc trong API này đều là UTC
-        # (`scheduled_for` trả ra kèm `Z`), nên đó là điều người gọi muốn nói, và nó
-        # giữ `?since=2026-08-18` dùng được cho người gõ URL bằng tay.
-        #
         # TRƯỚC `filters` chứ không sau: dấu vết cursor phải tính trên giá trị ĐÃ chuẩn
         # hoá, nếu không thì `since=...T00:00:00` và `since=...T00:00:00Z` — cùng một
         # bộ lọc — sinh hai dấu vết khác nhau và cursor của bên này bị bên kia từ chối.
-        since = since.replace(tzinfo=UTC) if since.tzinfo is None else since.astimezone(UTC)
+        since = _since_utc(since)
 
     # Bộ lọc đi vào dấu vết cursor: một cursor lấy ở `status=failed` dán sang
     # `status=running` phải là 400, không phải trang thứ hai của một tập KHÁC.
