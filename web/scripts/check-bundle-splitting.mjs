@@ -30,6 +30,14 @@
  *   3. KÍCH THƯỚC — chunk entry phải dưới một ngưỡng generous (đủ chỗ cho ứng dụng lớn
  *      thêm nhiều, nhưng Monaco rò vào sẽ vượt ngưỡng đó gần SÁU LẦN, không phải xém).
  *
+ * Giai đoạn 3c thêm một phép canh THỨ HAI vào file này, KHÔNG liên quan tới ba lớp Monaco ở
+ * trên: danh sách dependency runtime cho phép (`ALLOWED_DEPENDENCIES` / `checkDependencies`
+ * bên dưới), giữ cam kết "0 gói mới" của 3c hiện ra thành lỗi rõ ràng khi có ai thêm một
+ * gói mà không sửa danh sách này. Nó nằm chung file với ba lớp Monaco vì cả hai đều là phép
+ * canh build-time mà `make bundle-check` chạy và CI chỉ nối MỘT hook tới — không phải vì
+ * chúng kiểm cùng một thứ. (Nếu một file kiểm hai mối lo không liên quan là điều đáng ngại,
+ * đó là việc cần bàn riêng, không phải lý do để tài liệu này nói sai file làm gì.)
+ *
  * Chạy: `node scripts/check-bundle-splitting.mjs` SAU `npm run build` — hoặc `make
  * bundle-check`, đích mà `make web-test` gọi để CI chạy được.
  */
@@ -55,10 +63,61 @@ const EXPECTED_LAZY_MODULE = 'src/components/Editor/SqlEditor.tsx'
 // SÁU LẦN ngưỡng này, không phải xém mức.
 const MAX_ENTRY_BYTES = 700 * 1024
 
+// Bảy dependency runtime, và con số này CẦN một lý do để đổi.
+//
+// Giai đoạn 3c dựng Pipeline Designer và Monitor Hub mà không thêm gói nào: trình soạn là
+// một danh sách (không cần thư viện đồ thị), sơ đồ là `div` + một SVG (không cần React
+// Flow), dải trạng thái là `div` (không cần thư viện chart). Danh sách CỐ ĐỊNH chứ không
+// phải một số đếm: một số đếm cho phép đổi gói này bằng gói khác mà phép canh không thấy.
+//
+// Khi một giai đoạn sau thêm dependency thật, người thêm phải sửa danh sách này — và đó
+// chính là điểm của phép canh. Nó không cấm; nó bắt việc thêm phải là một quyết định
+// hiện ra trong diff.
+const ALLOWED_DEPENDENCIES = [
+  '@fontsource-variable/ibm-plex-sans',
+  '@fontsource/ibm-plex-mono',
+  '@tanstack/react-query',
+  'monaco-editor',
+  'react',
+  'react-dom',
+  'react-router',
+]
+
 let failed = false
 function fail(message) {
   console.error(`✗ bundle-check: ${message}`)
   failed = true
+}
+
+// Đặt SAU `fail` (giống `readManifest`/`findEntry` bên dưới) — không đặt trước như bản đầu,
+// vì hàm này gọi `fail`, và nếu lỡ có ai gọi `checkDependencies()` ở top-level thay vì bên
+// trong `main()`, đặt trước `let failed = false` sẽ ném `ReferenceError: Cannot access
+// 'failed' before initialization` thay vì thông báo `✗ bundle-check:` sạch sẽ — một phép
+// canh crash thay vì nói rõ vấn đề thì tệ hơn không có phép canh.
+function checkDependencies() {
+  const pkgPath = join(WEB_ROOT, 'package.json')
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
+  const actual = Object.keys(pkg.dependencies ?? {}).sort()
+  const expected = [...ALLOWED_DEPENDENCIES].sort()
+
+  const added = actual.filter((name) => !expected.includes(name))
+  const removed = expected.filter((name) => !actual.includes(name))
+
+  if (added.length > 0) {
+    fail(
+      `dependency runtime MỚI trong web/package.json: ${added.join(', ')}. ` +
+        `Giai đoạn 3c cam kết 0 gói mới. Nếu việc thêm là có chủ đích, thêm tên vào ` +
+        `ALLOWED_DEPENDENCIES ở scripts/check-bundle-splitting.mjs kèm lý do.`,
+    )
+  }
+  if (removed.length > 0) {
+    fail(
+      `dependency đã BIẾN MẤT khỏi web/package.json: ${removed.join(', ')}. ` +
+        `Nếu việc bỏ là có chủ đích, xoá tên khỏi ALLOWED_DEPENDENCIES; nếu không — gói bị ` +
+        `hạ xuống devDependencies hay bị bỏ nhầm — thì khôi phục nó trong dependencies, vì ` +
+        `chính việc bỏ đó mới là lỗi.`,
+    )
+  }
 }
 
 function readManifest() {
@@ -81,6 +140,10 @@ function findEntry(manifest) {
 }
 
 function main() {
+  // Chạy TRƯỚC phần đọc manifest: phép canh này không cần bản build, nên nó vẫn nói được
+  // điều gì đó khi `npm run build` hỏng.
+  checkDependencies()
+
   const manifest = readManifest()
   if (!manifest) return
 
@@ -130,6 +193,9 @@ function main() {
     return
   }
 
+  console.log(
+    `✓ bundle-check: ${ALLOWED_DEPENDENCIES.length} dependency runtime, đúng danh sách cho phép.`,
+  )
   console.log(
     `✓ bundle-check: chunk entry (${entry.file}, ${(entryBytes / 1024).toFixed(1)}KB) không ` +
       `chứa Monaco — "${EXPECTED_LAZY_MODULE}" chỉ tới qua dynamicImports.`,
