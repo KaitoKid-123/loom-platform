@@ -23,14 +23,21 @@ Ba điều test này phải nói rõ, vì thiếu bất kỳ điều nào là n�
    bên kia `EXISTS(role IN roles_allowing(action))`. Chúng chỉ trùng nhau khi
    `ACTION_MATRIX` là chuỗi lồng nghiêm ngặt. Tiền đề đó được khẳng định ngay
    trong file này, tại chỗ dùng nó.
+
+4. **Mọi biểu thức lọc BỌC `visible_items_select` đều thuộc về đây**, không chỉ
+   `search`. `visible_pipeline_runs_select` (Monitor Hub, Giai đoạn 3c) là cái thứ
+   hai, và nó cần đối chiếu vì lý do y hệt: đường dẫn `GET /api/v1/pipeline-runs`
+   không mang `workspace_id` nào, nên không có gì nhắc người viết phải lọc quyền.
 """
 
 import itertools
 import random
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_api.models import (
@@ -40,6 +47,7 @@ from loom_api.models import (
     AppUser,
     Domain,
     Item,
+    PipelineRun,
     RoleAssignment,
     Workspace,
 )
@@ -51,7 +59,9 @@ from loom_api.permissions import (
     visible_items_select,
     visible_workspaces_select,
 )
+from loom_api.routers.pipeline_runs import visible_pipeline_runs_select
 from loom_api.routers.search import search_items_select
+from loom_core.item_definitions import ItemType
 from loom_core.roles import ACTION_MATRIX, Action, Role
 from loom_core.schemas import Principal
 
@@ -96,9 +106,19 @@ class World:
         }
 
 
-async def _build_world(session: AsyncSession, rng: random.Random) -> World:
+async def _build_world(
+    session: AsyncSession, rng: random.Random, *, item_type: str = "sql_script"
+) -> World:
     """Hai domain, bốn workspace sống + một đã xoá mềm, mười ba item, và một nắm
-    assignment rải ở cả bốn cấp scope cho cả user lẫn group."""
+    assignment rải ở cả bốn cấp scope cho cả user lẫn group.
+
+    `item_type` chỉ đổi cột `type` của item, KHÔNG đổi hình dạng quyền nào — không
+    biểu thức nào ở đây lọc theo `type`. Nó tồn tại cho phép đối chiếu của
+    `visible_pipeline_runs_select`, thứ lọc `type == pipeline`: một thế giới toàn
+    `sql_script` sẽ cho vế trái RỖNG, và một vế trái rỗng thoả mọi quan hệ tập con
+    mà không canh được gì. Mặc định giữ nguyên giá trị cũ nên các phép đối chiếu
+    khác không đổi tiền đề.
+    """
     actor = uuid.uuid4()
     subject_user = uuid.uuid4()
     for uid, tag in ((actor, "a"), (subject_user, "s")):
@@ -160,7 +180,7 @@ async def _build_world(session: AsyncSession, rng: random.Random) -> World:
                 id=it,
                 tenant_id=DEFAULT_TENANT_ID,
                 workspace_id=workspace_id,
-                type="sql_script",
+                type=item_type,
                 name=f"i{index}-{it.hex[:12]}",
                 display_name=f"I{index}",
                 definition={"schema_version": 1, "sql": ""},
@@ -506,6 +526,134 @@ async def test_search_agrees_with_the_per_item_check(db_session: AsyncSession, s
     # một bản bỏ bộ lọc đó, vì `& listable` đã trừ chúng khỏi vế phải.
     assert world.shared_deleted_item not in via_search
     assert world.item_in_dead_workspace not in via_search
+
+
+async def _one_run_per_item(session: AsyncSession, world: World) -> dict[uuid.UUID, uuid.UUID]:
+    """ĐÚNG MỘT `pipeline_run` cho mỗi item trong thế giới.
+
+    Một-đổi-một là tiền đề của ĐẲNG THỨC trong phép đối chiếu bên dưới: nhờ nó, tập
+    `pipeline_id` mà truy vấn run trả về CHÍNH LÀ tập item mà biểu thức cho phép thấy,
+    nên hai vế nói về cùng một loại vật. Nhiều run trên một item cũng cho cùng tập id,
+    nhưng khi đó một biểu thức nhân hàng sẽ lẫn với dữ liệu và câu khẳng định "mỗi run
+    đúng một lần" mất nghĩa.
+    """
+    runs: dict[uuid.UUID, uuid.UUID] = {}
+    for offset, item_id in enumerate(world.items):
+        run_id = uuid.uuid4()
+        runs[item_id] = run_id
+        moment = datetime(2026, 8, 18, 3, 0, tzinfo=UTC) + timedelta(minutes=offset)
+        session.add(
+            PipelineRun(
+                id=run_id,
+                pipeline_id=item_id,
+                workspace_id=world.workspace_of[item_id],
+                scheduled_for=moment,
+                status="failed",
+                run_as_user_id=world.principal.user_id,
+                started_at=moment,
+                finished_at=moment,
+                error="host=source-db.internal table=payroll",
+            )
+        )
+    await session.flush()
+    return runs
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+async def test_the_cross_pipeline_list_agrees_with_the_per_item_check(
+    db_session: AsyncSession, seed: int
+) -> None:
+    """`visible_pipeline_runs_select` phải thấy ĐÚNG những pipeline mà `require_item` cho đọc.
+
+    Vì sao phép canh này ở đây chứ không chỉ ở `test_pipeline_runs_api.py`: các phép canh
+    kia đi qua ROUTER, nên chúng chứng minh endpoint không rò rỉ ở vài hình dạng đã dựng
+    tay. Chúng không so được hai ĐƯỜNG ĐÁNH GIÁ với nhau. Một chỗ lệch giữa biểu thức lọc
+    và `require_item` — một nhánh tổ tiên thiếu, một vế `state` rơi — vẫn cho hai câu trả
+    lời tự-nhất-quán qua HTTP; chỉ hiệu hai tập trên một thế giới ngẫu nhiên mới thấy.
+    Đây cũng là lý do `search` có mặt trong file này (spec mục 6), và Hub rò rỉ đúng cùng
+    một kiểu: đường dẫn không mang `workspace_id` nên không có gì nhắc phải lọc quyền.
+
+    Gọi ĐÚNG `visible_pipeline_runs_select` mà router dùng, không dựng lại biểu thức: một
+    test tự ghép `visible_items_select` với một join sang `pipeline_run` chỉ chứng minh
+    rằng bản ghép trong test là đúng, và sẽ vẫn xanh sau khi ai đó sửa router thành
+    `select(Item)`.
+
+    **ĐẲNG THỨC, và ba tiền đề làm nó đúng chứ không chỉ tiện:**
+
+    1. Mọi item trong thế giới này mang `type = pipeline` (`item_type=` ở `_build_world`)
+       và có ĐÚNG MỘT run, nên bộ lọc `type` không âm thầm bỏ hàng nào và không có item
+       nào vắng mặt chỉ vì chưa từng chạy. Khẳng định TRƯỚC đẳng thức, và đọc từ
+       database — xem khối đầu tiên của thân hàm về việc vì sao cả hai điều đó cần thiết.
+    2. Vế phải trừ `listable`: biểu thức lọc `state == ACTIVE` ở CẢ item và workspace,
+       còn `require_item` cố ý KHÔNG lọc `state` (mục 2 ở docstring module).
+    3. `max(roles)+allows` và `EXISTS(role ∈ roles_allowing)` chỉ trùng khi `ACTION_MATRIX`
+       là chuỗi lồng — mục 3 ở docstring module, và
+       `test_the_differential_test_rests_on_role_monotonicity` khẳng định nó. Đẳng thức ở
+       đây THỪA HƯỞNG tiền đề đó; nó không tự chứng minh được.
+
+    Đây là chỗ bất đối xứng any-vs-max sẽ nổ ra trước tiên nếu ai thêm một vai trò cao mà
+    thiếu `item_read` — và nổ ra ở một phép đo có tên, kèm hiệu hai tập, chứ không ở một
+    trang Hub thiếu vài dòng mà không ai đếm.
+    """
+    rng = _rng(seed)
+    world = await _build_world(db_session, rng, item_type=str(ItemType.pipeline))
+    runs = await _one_run_per_item(db_session, world)
+    perms = PermissionService(db_session, world.principal)
+
+    # Tiền đề (1) TRƯỚC đẳng thức, và thứ tự này là chủ đích: một tiền đề sai phải nói
+    # "thế giới của bạn sai", không phải "cổng quyền của bạn sai". Đặt sau thì đẳng thức
+    # nổ trước với một thông báo về phân quyền (`Hub bỏ sót: [...]`) cho một nguyên nhân
+    # chẳng liên quan gì tới phân quyền, và hai dòng này không bao giờ chạy tới.
+    #
+    # Cả hai đọc từ DATABASE chứ không từ `runs`: `runs` là dict khoá theo item nên
+    # `len(runs) == len(world.items)` đúng bất kể `_one_run_per_item` chèn mấy hàng mỗi
+    # item — nó không canh được gì. `COUNT(*)` thì canh được.
+    pipeline_items = set(
+        (await db_session.execute(select(Item.id).where(Item.type == "pipeline"))).scalars().all()
+    )
+    assert pipeline_items == set(world.items), (
+        "thế giới phải TOÀN item kiểu pipeline — nếu không, bộ lọc `type` âm thầm bỏ hàng "
+        "và đẳng thức dưới đây thoái hoá thành quan hệ tập con"
+    )
+    run_count = (
+        await db_session.execute(select(func.count()).select_from(PipelineRun))
+    ).scalar_one()
+    assert run_count == len(world.items), (
+        f"phải ĐÚNG MỘT run mỗi item: {run_count} run cho {len(world.items)} item — "
+        "nhiều run trên một item làm câu khẳng định 'mỗi run đúng một lần' mất nghĩa"
+    )
+    assert len(runs) == len(world.items), "và mỗi item phải có đúng một run được ghi nhận"
+
+    via_check = await _readable_items(perms, world)
+    listable = world.listable()
+    rows = (await db_session.execute(visible_pipeline_runs_select(world.principal))).scalars().all()
+    via_runs = {row.pipeline_id for row in rows}
+
+    assert via_runs == via_check & listable, (
+        f"seed={seed} danh sách run xuyên pipeline KHÔNG khớp phép kiểm từng item\n"
+        f"  chỉ Hub thấy : {sorted(via_runs - (via_check & listable))}\n"
+        f"  Hub bỏ sót   : {sorted((via_check & listable) - via_runs)}\n"
+        f"  nhóm principal: {world.principal.groups}"
+    )
+
+    # MỖI run đúng MỘT lần. `visible_pipeline_runs_select` JOIN vào một subquery, nên một
+    # ngày nào đó điều kiện quyền bên trong đổi từ `EXISTS` tương quan sang
+    # `JOIN role_assignment` là mỗi quyền khớp thành một bản sao — và ở thế giới này có
+    # những item mang HAI vai trò ở hai tầng scope (hình dạng (2) ở `_build_world`), đúng
+    # chỗ phép nhân hàng đó xuất hiện. Đếm ở đây bắt được nó; câu khẳng định tập ở trên
+    # thì không, vì `set()` xoá mất bản sao.
+    ids = [row.id for row in rows]
+    assert len(ids) == len(set(ids)), f"seed={seed}: có run ra nhiều lần: {sorted(ids)}"
+
+    # phủ: `visible_pipeline_runs_select` bọc `visible_items_select`, nên nó phải thừa
+    # hưởng CẢ HAI vế `state`. Không có bốn dòng này thì đẳng thức trên xanh kể cả với một
+    # bản bỏ hai vế đó, vì `& listable` đã trừ chúng khỏi vế phải.
+    assert world.shared_deleted_item in via_check, "item đã xoá mềm vẫn phải đọc được theo id"
+    assert world.shared_deleted_item not in via_runs, "…nhưng run của nó không nằm trong Hub"
+    assert world.item_in_dead_workspace in via_check
+    assert world.item_in_dead_workspace not in via_runs, (
+        "workspace đã xoá thì run của item bên trong phải ẩn theo"
+    )
 
 
 def test_the_differential_test_rests_on_role_monotonicity() -> None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mười lăm phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
+# Mười sáu phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
 # kubectl, nên chạy được với bất kỳ môi trường nào:
 #
 #     make smoke                              # local
@@ -108,7 +108,7 @@ trap cleanup EXIT
 
 # Số phép kiểm MONG ĐỢI, khẳng định ở cuối file. Không có nó, xoá một phép kiểm
 # vẫn cho "7/7 đạt" và bản báo cáo trông y như trước.
-EXPECTED=15
+EXPECTED=16
 
 pass=0; fail=0; skipped=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; pass=$((pass+1)); }
@@ -798,13 +798,19 @@ if [ -z "$smoke_lakehouse_id" ] || [ -z "$smoke_conn_id" ]; then
       "không có lakehouse/connection từ phép 12/14 để dựng pipeline"
 else
   # `run_as_user_id` là BẮT BUỘC cho một lịch đã bật (`ScheduleDefinition
-  # ._enabled_names_its_principal`), và nó phải là một `app_user.id` THẬT — cột
-  # đó có khoá ngoại. `/api/v1/me` cố ý KHÔNG trả id (nó không chạm database),
-  # nên smoke lấy id của chính mình từ audit: mọi hàng audit trong workspace này
-  # đều do chính tài khoản smoke sinh ra vài giây trước, ở phép 10.
+  # ._enabled_names_its_principal`), và nó là uuid hàng `app_user` — KHÁC
+  # `subject` của IdP. `/api/v1/me` trả đúng uuid đó (trường `user_id`, thêm ở
+  # Task 2 của giai đoạn này).
+  #
+  # Trước đó, chỗ này phải suy id của mình ra từ `actor_user_id` của hàng audit
+  # mới nhất trong workspace — hàng đó do chính tài khoản smoke sinh ra vài
+  # giây trước, ở phép 10. Suy được trong một script, nhưng không phải một
+  # cách làm được trong UI — và đó chính là lý do `/me` mọc thêm trường
+  # `user_id`. Cho nên đi qua `/me` ở đây không chỉ đổi cách lấy id: nó biến
+  # smoke thành phép xác nhận rằng khoảng trống đó thật sự đã đóng. Nếu `/me`
+  # thôi trả `user_id`, dòng dưới rỗng và nhánh `if` ngay sau báo đỏ.
   smoke_user_id=$(curl -s -b "$JAR" --max-time 10 \
-                  "$BASE/api/v1/workspaces/$smoke_ws_id/audit?limit=1" \
-                  | jq -r '.items[0].actor_user_id // empty')
+                  "$BASE/api/v1/me" | jq -r '.user_id // empty')
   # Dựng lại tên bảng bronze TỪ CÙNG hai mảnh mà pod nạp dùng — cùng quy ước và
   # cùng lý do đã ghi ở phép 14: lệch một ký tự thì bước SQL hỏng với "table not
   # found" và phép kiểm đỏ, nên nó không trôi được trong im lặng.
@@ -812,7 +818,7 @@ else
   pipe_silver="silver.smoke_pipeline"
   if [ -z "$smoke_user_id" ]; then
     bad "pipeline theo lịch — scheduler chạy hết chuỗi ingest→sql" \
-        "không đọc được actor_user_id từ audit của workspace — lịch cần run_as_user_id thật"
+        "không đọc được user_id từ /api/v1/me — lịch cần run_as_user_id thật"
   else
     pipe_payload=$(jq -nc \
       --arg name "smoke-pipeline-$$" \
@@ -887,6 +893,49 @@ else
         fi
       fi
     fi
+  fi
+fi
+
+# 16 — endpoint audit TRẢ LỜI được qua ingress thật. Đây KHÔNG phải một khẳng
+#      định về ngữ nghĩa của nó — RBAC, lọc theo resource_id, cô lập giữa hai
+#      workspace, tất cả đã có `test_audit_api.py` khẳng định rồi, và khẳng
+#      định TỐT hơn phép này có thể làm. Nhưng bộ test đó chạy qua test client,
+#      không qua ingress của một cụm đang sống.
+#
+#      Trước khi phép 15 đổi sang đọc `user_id` từ `/api/v1/me`, nó TÌNH CỜ là
+#      lời gọi HTTP duy nhất trong file này chạm `GET
+#      /workspaces/{id}/audit` — sửa đường vòng đó xong thì route audit không
+#      còn một phép kiểm sống nào trong file này nữa. Phép này tồn tại CHỈ để
+#      lấp đúng chỗ trống đó: chứng minh route trả lời qua ingress thật, không
+#      hơn.
+#
+#      Dùng CHUNG workspace với phép 10 — phép đó tạo một item, và
+#      `ItemStore.create` ghi audit trong CÙNG transaction (xem
+#      `test_create_writes_one_audit_row_carrying_the_request_id` ở
+#      `test_audit.py`), nên tới đây workspace này chắc chắn có ít nhất một
+#      hàng audit mà không cần dựng thêm gì.
+#
+#      Khẳng định CẢ status 200 LẪN có ít nhất một hàng LẪN trường
+#      `actor_user_id` của hàng đó không rỗng — đúng trường mà đường vòng cũ
+#      từng đọc, và trường nhiều khả năng nhất lặng lẽ null nếu tầng ghi actor
+#      hỏng. Chỉ kiểm mã 200 thì `{"items": []}` cũng qua được mãi mãi.
+if [ -z "$smoke_ws_id" ]; then
+  bad "audit trả lời qua ingress — có hàng, actor_user_id không rỗng" \
+      "bỏ qua được — phép 10 không có workspace để dùng"
+else
+  audit_code=$(curl -s -b "$JAR" -o "$tmpdir/audit.json" -w '%{http_code}' --max-time 10 \
+               "$BASE/api/v1/workspaces/$smoke_ws_id/audit?limit=1")
+  if [ "$audit_code" != 200 ]; then
+    bad "audit trả lời qua ingress — có hàng, actor_user_id không rỗng" \
+        "GET .../audit trả $audit_code (mong 200)"
+  elif ! jq -e '(.items // []) | length > 0' >/dev/null 2>&1 < "$tmpdir/audit.json"; then
+    bad "audit trả lời qua ingress — có hàng, actor_user_id không rỗng" \
+        "audit trả: $(cat "$tmpdir/audit.json")"
+  elif ! jq -e '(.items[0].actor_user_id // "") != ""' >/dev/null 2>&1 < "$tmpdir/audit.json"; then
+    bad "audit trả lời qua ingress — có hàng, actor_user_id không rỗng" \
+        "actor_user_id rỗng ở hàng mới nhất: $(cat "$tmpdir/audit.json")"
+  else
+    ok "audit trả lời qua ingress — có hàng, actor_user_id không rỗng"
   fi
 fi
 

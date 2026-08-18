@@ -118,11 +118,19 @@ async def me(principal: Principal = PrincipalDep) -> CurrentUser:
     # Không còn đọc cookie ở đây: xem loom_api.deps. Handler nào cũng tự đọc
     # cookie thì chỉ cần một handler quên là có một endpoint công khai.
     #
-    # KHÔNG chạm database, và giữ đúng như thế. Đã thử đặt `tenant_role` vào đây và đó là
-    # sai chỗ: `/me` gọi mỗi lần tải trang, nên nó thành một round trip nữa cho một câu
-    # hỏi mà endpoint danh sách workspace trả lời được miễn phí — nó đã chạm database rồi
-    # và giao diện đã gọi nó ở đúng trang cần biết. Xem `WorkspaceListOut.tenant_role`.
+    # THÂN HÀM này không tự phát thêm truy vấn nào — không phải "endpoint này không chạm
+    # database" nói chung: `PrincipalDep` (qua `store.load_session`, một SELECT JOIN thật)
+    # đã chạm database TRƯỚC KHI thân hàm chạy, và đó là chi phí xác thực mọi endpoint sau
+    # `PrincipalDep` đều trả, không riêng `/me`. Điều giữ đúng ở đây là KHÔNG CỘNG THÊM một
+    # round trip nào vào chi phí đó. Đã thử đặt `tenant_role` vào đây và đó là sai chỗ:
+    # `/me` gọi mỗi lần tải trang, nên thêm một round trip ở đây là một round trip nữa cho
+    # một câu hỏi mà endpoint danh sách workspace trả lời được miễn phí — nó đã chạm
+    # database rồi và giao diện đã gọi nó ở đúng trang cần biết. Xem `WorkspaceListOut.tenant_role`.
     return CurrentUser(
+        # Từ `Principal`, tức từ BỘ NHỚ — `PrincipalDep` đã dựng nó xong trước khi thân
+        # hàm này chạy. Nên trường này KHÔNG THÊM round trip nào: nó chép một giá trị đã
+        # có sẵn, không phát thêm truy vấn nào ngoài cái `PrincipalDep` đã trả trước đó.
+        user_id=principal.user_id,
         subject=principal.subject,
         email=principal.email,
         display_name=principal.display_name,

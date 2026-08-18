@@ -228,10 +228,19 @@ async def test_me_requires_session(app_client: AsyncClient) -> None:
     assert response.status_code == 401
 
 
-async def test_me_returns_current_user_after_login(app_client: AsyncClient) -> None:
+async def test_me_returns_current_user_after_login(
+    app_client: AsyncClient, store: FakeUserStore
+) -> None:
     login = await app_client.get("/api/v1/auth/login")
     state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
     await app_client.get(f"/api/v1/auth/callback?code=c&state={state}")
+
+    # user_id là uuid NGẪU NHIÊN do FakeUserStore.upsert_user_and_create_session sinh ra
+    # lúc tạo phiên — không phải literal đoán trước được, nên đọc lại từ store thay vì
+    # gõ cứng, rồi vẫn so sánh CẢ đối tượng bên dưới.
+    session_id = app_client.cookies.get("loom_session")
+    assert session_id is not None
+    user_id = store.sessions[session_id].user_id
 
     response = await app_client.get("/api/v1/me")
     assert response.status_code == 200
@@ -240,6 +249,7 @@ async def test_me_returns_current_user_after_login(app_client: AsyncClient) -> N
     # `groups` đã sắp xếp trong khi token phát ra theo thứ tự khác — chứng minh
     # chuẩn hoá thật sự xảy ra trên đường này, không phải trùng hợp.
     assert response.json() == {
+        "user_id": str(user_id),
         "subject": "CgRsb25n",
         "email": "long@loom.local",
         "display_name": "Long",
