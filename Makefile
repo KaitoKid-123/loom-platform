@@ -471,7 +471,7 @@ lint-workflows:  ## actionlint + shellcheck cho .github/workflows
 	actionlint -shellcheck "$$(command -v shellcheck)"
 
 .PHONY: smoke
-smoke:  ## Mười lăm phép kiểm chấp nhận qua HTTP (BASE=... để chạy với môi trường khác)
+smoke:  ## Mười sáu phép kiểm chấp nhận qua HTTP (BASE=... để chạy với môi trường khác)
 	@# Phép 14 nạp từ một Postgres NGUỒN thật, nên nó cần host/port/dbname của
 	@# nguồn đó. Ở local nguồn duy nhất cụm với tới được là chính Aiven (không có
 	@# Postgres nào trong cụm — xem `database` ở values.yaml), và địa chỉ của nó

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mười lăm phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
+# Mười sáu phép kiểm chấp nhận, chạy qua HTTP đúng như người dùng thật — không dùng
 # kubectl, nên chạy được với bất kỳ môi trường nào:
 #
 #     make smoke                              # local
@@ -108,7 +108,7 @@ trap cleanup EXIT
 
 # Số phép kiểm MONG ĐỢI, khẳng định ở cuối file. Không có nó, xoá một phép kiểm
 # vẫn cho "7/7 đạt" và bản báo cáo trông y như trước.
-EXPECTED=15
+EXPECTED=16
 
 pass=0; fail=0; skipped=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; pass=$((pass+1)); }
@@ -893,6 +893,49 @@ else
         fi
       fi
     fi
+  fi
+fi
+
+# 16 — endpoint audit TRẢ LỜI được qua ingress thật. Đây KHÔNG phải một khẳng
+#      định về ngữ nghĩa của nó — RBAC, lọc theo resource_id, cô lập giữa hai
+#      workspace, tất cả đã có `test_audit_api.py` khẳng định rồi, và khẳng
+#      định TỐT hơn phép này có thể làm. Nhưng bộ test đó chạy qua test client,
+#      không qua ingress của một cụm đang sống.
+#
+#      Trước khi phép 15 đổi sang đọc `user_id` từ `/api/v1/me`, nó TÌNH CỜ là
+#      lời gọi HTTP duy nhất trong file này chạm `GET
+#      /workspaces/{id}/audit` — sửa đường vòng đó xong thì route audit không
+#      còn một phép kiểm sống nào trong file này nữa. Phép này tồn tại CHỈ để
+#      lấp đúng chỗ trống đó: chứng minh route trả lời qua ingress thật, không
+#      hơn.
+#
+#      Dùng CHUNG workspace với phép 10 — phép đó tạo một item, và
+#      `ItemStore.create` ghi audit trong CÙNG transaction (xem
+#      `test_create_writes_one_audit_row_carrying_the_request_id` ở
+#      `test_audit.py`), nên tới đây workspace này chắc chắn có ít nhất một
+#      hàng audit mà không cần dựng thêm gì.
+#
+#      Khẳng định CẢ status 200 LẪN có ít nhất một hàng LẪN trường
+#      `actor_user_id` của hàng đó không rỗng — đúng trường mà đường vòng cũ
+#      từng đọc, và trường nhiều khả năng nhất lặng lẽ null nếu tầng ghi actor
+#      hỏng. Chỉ kiểm mã 200 thì `{"items": []}` cũng qua được mãi mãi.
+if [ -z "$smoke_ws_id" ]; then
+  bad "audit trả lời qua ingress — có hàng, actor_user_id không rỗng" \
+      "bỏ qua được — phép 10 không có workspace để dùng"
+else
+  audit_code=$(curl -s -b "$JAR" -o "$tmpdir/audit.json" -w '%{http_code}' --max-time 10 \
+               "$BASE/api/v1/workspaces/$smoke_ws_id/audit?limit=1")
+  if [ "$audit_code" != 200 ]; then
+    bad "audit trả lời qua ingress — có hàng, actor_user_id không rỗng" \
+        "GET .../audit trả $audit_code (mong 200)"
+  elif ! jq -e '(.items // []) | length > 0' >/dev/null 2>&1 < "$tmpdir/audit.json"; then
+    bad "audit trả lời qua ingress — có hàng, actor_user_id không rỗng" \
+        "audit trả: $(cat "$tmpdir/audit.json")"
+  elif ! jq -e '(.items[0].actor_user_id // "") != ""' >/dev/null 2>&1 < "$tmpdir/audit.json"; then
+    bad "audit trả lời qua ingress — có hàng, actor_user_id không rỗng" \
+        "actor_user_id rỗng ở hàng mới nhất: $(cat "$tmpdir/audit.json")"
+  else
+    ok "audit trả lời qua ingress — có hàng, actor_user_id không rỗng"
   fi
 fi
 
