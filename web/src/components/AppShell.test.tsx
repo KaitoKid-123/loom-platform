@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { AppShell } from './AppShell'
 
 const user = {
+  user_id: '11111111-1111-4111-8111-111111111111',
   subject: 'CgRsb25n',
   email: 'long@loom.local',
   display_name: 'Long',

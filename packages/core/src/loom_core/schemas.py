@@ -64,6 +64,14 @@ class Principal(BaseModel):
 
 
 class CurrentUser(BaseModel):
+    # `user_id` chứ không chỉ `subject`: `subject` là id của IdP, còn mọi thứ trong
+    # database trỏ tới hàng `app_user` bằng uuid này. Giao diện cần đúng uuid đó để
+    # đặt `ScheduleDefinition.run_as_user_id` — một lịch đã bật BẮT BUỘC có nó
+    # (`_enabled_names_its_principal`), nên thiếu trường này là giao diện không bật
+    # được lịch. Trước khi có nó, `scripts/smoke.sh` phải suy id của mình ra từ
+    # `actor_user_id` của một hàng audit — làm được trong script, không phải một cách
+    # làm được trong UI.
+    user_id: uuid.UUID
     subject: str
     email: str
     display_name: str

@@ -2,6 +2,9 @@ import type { ReactNode } from 'react'
 import { NavLink } from 'react-router'
 
 export interface CurrentUser {
+  // `user_id` là uuid hàng `app_user`, KHÁC `subject` (id của IdP). Panel lịch cần đúng
+  // uuid này cho `run_as_user_id` — xem `SchedulePanel.tsx`.
+  user_id: string
   subject: string
   email: string
   display_name: string

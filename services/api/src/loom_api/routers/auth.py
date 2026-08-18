@@ -123,6 +123,10 @@ async def me(principal: Principal = PrincipalDep) -> CurrentUser:
     # hỏi mà endpoint danh sách workspace trả lời được miễn phí — nó đã chạm database rồi
     # và giao diện đã gọi nó ở đúng trang cần biết. Xem `WorkspaceListOut.tenant_role`.
     return CurrentUser(
+        # Từ `Principal`, tức từ BỘ NHỚ — `PrincipalDep` đã dựng nó từ phiên trước khi
+        # handler chạy. Nên trường này KHÔNG phá bất biến "không chạm database" ở trên;
+        # nó chép một giá trị đã có sẵn.
+        user_id=principal.user_id,
         subject=principal.subject,
         email=principal.email,
         display_name=principal.display_name,
