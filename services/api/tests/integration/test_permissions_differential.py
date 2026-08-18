@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_api.models import (
@@ -582,7 +582,8 @@ async def test_the_cross_pipeline_list_agrees_with_the_per_item_check(
 
     1. Mọi item trong thế giới này mang `type = pipeline` (`item_type=` ở `_build_world`)
        và có ĐÚNG MỘT run, nên bộ lọc `type` không âm thầm bỏ hàng nào và không có item
-       nào vắng mặt chỉ vì chưa từng chạy. Hai dòng khẳng định tiền đề này ở dưới.
+       nào vắng mặt chỉ vì chưa từng chạy. Khẳng định TRƯỚC đẳng thức, và đọc từ
+       database — xem khối đầu tiên của thân hàm về việc vì sao cả hai điều đó cần thiết.
     2. Vế phải trừ `listable`: biểu thức lọc `state == ACTIVE` ở CẢ item và workspace,
        còn `require_item` cố ý KHÔNG lọc `state` (mục 2 ở docstring module).
     3. `max(roles)+allows` và `EXISTS(role ∈ roles_allowing)` chỉ trùng khi `ACTION_MATRIX`
@@ -599,6 +600,30 @@ async def test_the_cross_pipeline_list_agrees_with_the_per_item_check(
     runs = await _one_run_per_item(db_session, world)
     perms = PermissionService(db_session, world.principal)
 
+    # Tiền đề (1) TRƯỚC đẳng thức, và thứ tự này là chủ đích: một tiền đề sai phải nói
+    # "thế giới của bạn sai", không phải "cổng quyền của bạn sai". Đặt sau thì đẳng thức
+    # nổ trước với một thông báo về phân quyền (`Hub bỏ sót: [...]`) cho một nguyên nhân
+    # chẳng liên quan gì tới phân quyền, và hai dòng này không bao giờ chạy tới.
+    #
+    # Cả hai đọc từ DATABASE chứ không từ `runs`: `runs` là dict khoá theo item nên
+    # `len(runs) == len(world.items)` đúng bất kể `_one_run_per_item` chèn mấy hàng mỗi
+    # item — nó không canh được gì. `COUNT(*)` thì canh được.
+    pipeline_items = set(
+        (await db_session.execute(select(Item.id).where(Item.type == "pipeline"))).scalars().all()
+    )
+    assert pipeline_items == set(world.items), (
+        "thế giới phải TOÀN item kiểu pipeline — nếu không, bộ lọc `type` âm thầm bỏ hàng "
+        "và đẳng thức dưới đây thoái hoá thành quan hệ tập con"
+    )
+    run_count = (
+        await db_session.execute(select(func.count()).select_from(PipelineRun))
+    ).scalar_one()
+    assert run_count == len(world.items), (
+        f"phải ĐÚNG MỘT run mỗi item: {run_count} run cho {len(world.items)} item — "
+        "nhiều run trên một item làm câu khẳng định 'mỗi run đúng một lần' mất nghĩa"
+    )
+    assert len(runs) == len(world.items), "và mỗi item phải có đúng một run được ghi nhận"
+
     via_check = await _readable_items(perms, world)
     listable = world.listable()
     rows = (await db_session.execute(visible_pipeline_runs_select(world.principal))).scalars().all()
@@ -610,14 +635,6 @@ async def test_the_cross_pipeline_list_agrees_with_the_per_item_check(
         f"  Hub bỏ sót   : {sorted((via_check & listable) - via_runs)}\n"
         f"  nhóm principal: {world.principal.groups}"
     )
-
-    # Tiền đề (1), đọc từ DỮ LIỆU THẬT chứ không tin vào lời gọi ở trên: một-đổi-một giữa
-    # item và run. Nếu `_build_world` sau này sinh item kiểu khác, đẳng thức trên thoái
-    # hoá thành một quan hệ tập con — thứ mà một biểu thức trả RỖNG cũng thoả — và dòng
-    # này đỏ TRƯỚC, kèm lý do thật.
-    assert len(runs) == len(world.items)
-    all_runs = (await db_session.execute(select(Item.id).where(Item.type == "pipeline"))).scalars()
-    assert set(all_runs) == set(world.items), "thế giới phải toàn item kiểu pipeline"
 
     # MỖI run đúng MỘT lần. `visible_pipeline_runs_select` JOIN vào một subquery, nên một
     # ngày nào đó điều kiện quyền bên trong đổi từ `EXISTS` tương quan sang

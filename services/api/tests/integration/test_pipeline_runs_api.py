@@ -626,12 +626,23 @@ async def test_a_limit_below_one_is_a_422_not_a_500(api_world: ApiWorld) -> None
         )
 
 
-async def test_a_limit_above_the_cap_is_capped_and_still_answers(api_world: ApiWorld) -> None:
-    """`?limit=5000` vẫn là 200 và bị cắt xuống `_MAX_LIMIT`, KHÔNG thành 422.
+async def test_a_limit_above_the_cap_still_answers_instead_of_refusing(
+    api_world: ApiWorld,
+) -> None:
+    """`?limit=5000` vẫn là 200, KHÔNG thành 422.
 
-    Đây là vế còn lại của bất đối xứng ở `RunPageLimit`, và nó đáng một phép canh riêng
-    vì cách sửa sàn dễ nhất — `Query(ge=1, le=_MAX_LIMIT)` — sẽ lặng lẽ biến trần thành
-    422 và phá hợp đồng mà `GET /pipelines/{id}/runs` đã phát hành.
+    Đây là vế còn lại của bất đối xứng ở `RunPageLimit`: cách sửa sàn dễ nhất —
+    `Query(ge=1, le=_MAX_LIMIT)` — sẽ lặng lẽ biến trần thành 422 và phá hợp đồng mà
+    `GET /pipelines/{id}/runs` đã phát hành. Phép canh này khoá đúng điều đó lại.
+
+    Nó KHÔNG canh phép cắt. Thế giới ở đây có một hàng, nên `min(limit, _MAX_LIMIT)` và
+    `limit` cho cùng một phản hồi — đã đo: thay `capped = min(limit, _MAX_LIMIT)` bằng
+    `capped = limit` ở cả hai handler thì hai phép canh về `limit` vẫn XANH. Nói ra chứ
+    không để cái tên hàm hứa hộ.
+
+    Và không test nào trong repo canh con số 200, trên đường này hay đường nào khác:
+    muốn thấy phép cắt phải dựng 201 hàng, và đó là một phép canh đắt cho một tính chất
+    rẻ. Ghi lại ở đây để lần sau ai đó đổi `_MAX_LIMIT` thì biết bộ test không thấy.
     """
     await api_world.grant(("workspace", api_world.ws_a), Role.viewer)
     pipeline_id = await _pipeline(api_world, workspace_id=api_world.ws_a)
@@ -639,6 +650,9 @@ async def test_a_limit_above_the_cap_is_capped_and_still_answers(api_world: ApiW
 
     hub = await api_world.client.get("/api/v1/pipeline-runs?limit=5000")
     assert hub.status_code == 200, hub.text
+    # Một hàng, và trang không có `next_cursor`: một `limit` lớn phải TRẢ LỜI, không
+    # phải từ chối. Số 1 ở đây là số hàng thế giới có, không phải một phép đo về trần.
     assert len(hub.json()["items"]) == 1
+    assert hub.json()["next_cursor"] is None
     by_pipeline = await api_world.client.get(f"/api/v1/pipelines/{pipeline_id}/runs?limit=5000")
     assert by_pipeline.status_code == 200, by_pipeline.text

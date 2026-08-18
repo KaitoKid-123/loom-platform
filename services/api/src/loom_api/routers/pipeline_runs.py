@@ -66,16 +66,27 @@ một bộ cột) và, ở dưới một tầng nữa, `loom_core.roles.ACTION_M
 đó; `require_item` đi đường khác: nó gom MỌI assignment khớp, lấy `max_role()`,
 rồi hỏi `allows(role, action)` trong `_enforce`.
 
-Nên hai câu hỏi khác nhau, và đây là bất đối xứng cần biết: SQL hỏi "có BẤT KỲ
-assignment nào cho `item_read` không", `require_item` hỏi "vai trò CAO NHẤT có
-cho `item_read` không". Chúng trùng nhau hôm nay chỉ vì cả bốn vai trò đều mang
-`item_read` (`roles.py`) — tức là trùng một cách TÌNH CỜ, đúng thứ mà docstring
-của `_roles_allowing` đã cảnh báo. Ai thêm một vai trò cao mà thiếu `item_read`,
-hoặc thu hẹp `item_read` lại, sẽ làm hai đường bất đồng HỢP LỆ. Tiền đề đó không
-bỏ mặc cho người đọc tin: `test_the_differential_test_rests_on_role_monotonicity`
-khẳng định nó ngay tại chỗ dùng, và
-`test_the_cross_pipeline_list_agrees_with_the_per_item_check` đo hiệu hai tập
-trên 25 thế giới ngẫu nhiên.
+Nên hai câu hỏi khác nhau về HÌNH THỨC: SQL hỏi "có BẤT KỲ assignment nào mang
+một vai trò cho `item_read` không", `require_item` hỏi "vai trò CAO NHẤT có cho
+`item_read` không". ANY và MAX cho cùng một câu trả lời khi và chỉ khi tập vai
+trò cho phép hành động đó ĐÓNG LÊN TRÊN theo thứ tự `Role` — tức `ACTION_MATRIX`
+là một chuỗi lồng. Chứng minh một dòng: nếu tập đóng lên trên thì có một vai trò
+khớp nghĩa là vai trò lớn nhất cũng khớp (vì nó ≥ vai trò đó), và chiều ngược lại
+là hiển nhiên vì MAX chính là một phần tử.
+
+Điều đó làm rõ thay đổi nào PHÁ và thay đổi nào không, và chỗ này đáng viết đúng
+vì đoán sai nó dẫn tới đúng một kết luận nguy hiểm — rằng đẳng thức trong test
+đối chiếu nên nới thành bao hàm. **Thu hẹp `item_read` không phá.** Đã đo: bỏ
+`item_read` khỏi `viewer` mà giữ ở contributor trở lên (3/4 vai trò, chuỗi lồng
+còn nguyên) thì cả 102 phép đối chiếu vẫn XANH và đẳng thức vẫn đúng nguyên.
+Thứ phá là một thay đổi KHÔNG ĐƠN ĐIỆU: một vai trò CAO thiếu quyền mà một vai
+trò THẤP có. Cũng đã đo: bỏ `item_read` khỏi riêng `admin` làm
+`test_the_differential_test_rests_on_role_monotonicity` đỏ và 25/25 seed của
+`test_the_cross_pipeline_list_agrees_with_the_per_item_check` đỏ theo.
+
+Nên thứ tự đọc khi phép đối chiếu đỏ là: xem test đơn điệu trước. Nếu nó cũng đỏ
+thì `ACTION_MATRIX` vừa mất tính lồng và đó là chỗ phải sửa — không phải nới
+đẳng thức thành bao hàm, thứ mà một biểu thức trả RỖNG cũng thoả.
 
 `item.read` chứ không `item.update`: xem trạng thái là ĐỌC, và đòi `contributor`
 sẽ khoá mất trường hợp bình thường nhất (một người được chia sẻ ở mức xem muốn
@@ -144,6 +155,18 @@ RunStatusFilter = Literal["pending", "running", "succeeded", "failed", "skipped"
 # thành 422 còn phá hợp đồng mà `GET /pipelines/{id}/runs` đã phát hành. `?limit=0` thì
 # KHÔNG có ý định nào đọc được, và lặng lẽ sửa nó thành 1 là trả một câu trả lời cho một
 # câu hỏi khác. Không có gì đang dựa vào hành vi cũ vì hành vi cũ là một 500.
+#
+# Nói rõ phần CHƯA được canh: `ge=1` có test (xem `test_a_limit_below_one_is_a_422_...`),
+# còn con số 200 thì KHÔNG — không test nào trong repo dựng đủ 201 hàng để thấy phép cắt
+# xảy ra, trên đường này hay đường nào khác. Đổi `_MAX_LIMIT` hay bỏ hẳn `min(...)` là
+# một thay đổi bộ test hiện tại không thấy.
+#
+# Và sàn này chỉ là của HAI đường trong file này — `RunPageLimit` là riêng của router. Bốn
+# đường khác vẫn tới `Page.build` với `limit < 1` nên vẫn 500 ở `?limit=-1`:
+# `routers/items.py` (hai đường danh sách), `routers/audit.py`, `routers/workspaces.py`.
+# Chỗ chữa chung là chính `Page.build`, không phải chép `RunPageLimit` sang bốn chỗ; để
+# ngoài phạm vi task này CỐ Ý, nhưng ghi ra đây để người đọc bản sửa này biết nó là cục bộ
+# và biết phần còn lại ở đâu.
 RunPageLimit = Annotated[int, Query(ge=1)]
 
 
@@ -207,8 +230,13 @@ def visible_pipeline_runs_select(principal: Principal) -> Select[tuple[PipelineR
     nên đường này KHÔNG trả run của pipeline đã xoá mềm, trong khi
     `GET /pipelines/{id}/runs` thì có. Đó là đánh đổi có ý — Hub là màn hình quét cái
     đang chạy, và một pipeline đã xoá không còn trong tập đó; ai cần lịch sử của nó vẫn
-    đi được đường theo-id. Test đối chiếu phải khẳng định đúng bất đối xứng này, không
-    khẳng định đẳng thức.
+    đi được đường theo-id.
+
+    Test đối chiếu diễn tả bất đối xứng đó bằng cách TRỪ đúng số hạng `state` ở vế phải
+    (`via_check & listable`), rồi khẳng định ĐẲNG THỨC — chứ không nới thành bao hàm.
+    Trừ tường minh là cách nói ra bất đối xứng; bao hàm là cách bỏ qua nó, và một biểu
+    thức trả RỖNG cũng thoả bao hàm. Xem
+    `test_the_cross_pipeline_list_agrees_with_the_per_item_check`.
     """
     visible = visible_items_select(principal).where(Item.type == str(ItemType.pipeline)).subquery()
     return select(PipelineRun).join(visible, visible.c.id == PipelineRun.pipeline_id)
