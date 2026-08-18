@@ -798,13 +798,19 @@ if [ -z "$smoke_lakehouse_id" ] || [ -z "$smoke_conn_id" ]; then
       "không có lakehouse/connection từ phép 12/14 để dựng pipeline"
 else
   # `run_as_user_id` là BẮT BUỘC cho một lịch đã bật (`ScheduleDefinition
-  # ._enabled_names_its_principal`), và nó phải là một `app_user.id` THẬT — cột
-  # đó có khoá ngoại. `/api/v1/me` cố ý KHÔNG trả id (nó không chạm database),
-  # nên smoke lấy id của chính mình từ audit: mọi hàng audit trong workspace này
-  # đều do chính tài khoản smoke sinh ra vài giây trước, ở phép 10.
+  # ._enabled_names_its_principal`), và nó là uuid hàng `app_user` — KHÁC
+  # `subject` của IdP. `/api/v1/me` trả đúng uuid đó (trường `user_id`, thêm ở
+  # Task 2 của giai đoạn này).
+  #
+  # Trước đó, chỗ này phải suy id của mình ra từ `actor_user_id` của hàng audit
+  # mới nhất trong workspace — hàng đó do chính tài khoản smoke sinh ra vài
+  # giây trước, ở phép 10. Suy được trong một script, nhưng không phải một
+  # cách làm được trong UI — và đó chính là lý do `/me` mọc thêm trường
+  # `user_id`. Cho nên đi qua `/me` ở đây không chỉ đổi cách lấy id: nó biến
+  # smoke thành phép xác nhận rằng khoảng trống đó thật sự đã đóng. Nếu `/me`
+  # thôi trả `user_id`, dòng dưới rỗng và nhánh `if` ngay sau báo đỏ.
   smoke_user_id=$(curl -s -b "$JAR" --max-time 10 \
-                  "$BASE/api/v1/workspaces/$smoke_ws_id/audit?limit=1" \
-                  | jq -r '.items[0].actor_user_id // empty')
+                  "$BASE/api/v1/me" | jq -r '.user_id // empty')
   # Dựng lại tên bảng bronze TỪ CÙNG hai mảnh mà pod nạp dùng — cùng quy ước và
   # cùng lý do đã ghi ở phép 14: lệch một ký tự thì bước SQL hỏng với "table not
   # found" và phép kiểm đỏ, nên nó không trôi được trong im lặng.
@@ -812,7 +818,7 @@ else
   pipe_silver="silver.smoke_pipeline"
   if [ -z "$smoke_user_id" ]; then
     bad "pipeline theo lịch — scheduler chạy hết chuỗi ingest→sql" \
-        "không đọc được actor_user_id từ audit của workspace — lịch cần run_as_user_id thật"
+        "không đọc được user_id từ /api/v1/me — lịch cần run_as_user_id thật"
   else
     pipe_payload=$(jq -nc \
       --arg name "smoke-pipeline-$$" \
