@@ -108,3 +108,102 @@ export function describeStep(step: PipelineStepView): string {
   // nên nó phải tự trả lời được cho mọi đầu vào nó khai nhận.
   return step.type
 }
+
+/**
+ * Một hàng `pipeline_step_run` như `PipelineRunDetail.steps` trả về (xem
+ * `PipelineStepRunOut` ở `packages/core/src/loom_core/schemas.py`).
+ *
+ * `status` và `step_type` là `string` chứ không phải union đóng — khớp lựa chọn của
+ * server (`str`, không `Literal`) trên CHÍNH hai trường này: đây là phản hồi dựng từ
+ * DỮ LIỆU ĐÃ LƯU, và một union đóng ở phía đọc chỉ đổi chỗ hỏng (từ "hàng lạ hiển thị
+ * được" thành "hàng lạ vỡ kiểu"), không đổi được sự thật là có thể có hàng lạ.
+ *
+ * `ingest_run_id`, `query_id`, `started_at`, `finished_at` đánh dấu `?:` dù server LUÔN
+ * gửi bốn khoá này (kể cả khi giá trị là `null` — không có `exclude_unset`/`exclude_none`
+ * nào trên đường `GET /pipeline-runs/{run_id}`, xem `_step_out` ở
+ * `services/api/src/loom_api/routers/pipeline_runs.py`). Đánh dấu optional ở đây vẫn
+ * ĐÚNG cho module này: `mergeStepStatus`/`diagramNodes` không đọc bốn trường đó, nên
+ * bắt mọi nơi dựng `StepRunView` — kể cả test — phải điền bốn trường không dùng tới là
+ * phí, không phải an toàn hơn. Một module SAU đọc tới chúng (vd. mở link
+ * `GET /ingest/{run_id}` từ `ingest_run_id`) nên viết lại kiểu chặt hơn ở NGAY module
+ * đó thay vì siết ở đây cho một thứ nó chưa cần.
+ */
+export interface StepRunView {
+  step_index: number
+  step_type: string
+  status: string
+  error: string | null
+  ingest_run_id?: string | null
+  query_id?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+}
+
+export interface MergedStep {
+  index: number
+  step: PipelineStepView
+  /** `null` khi run này không có hàng nào cho `index` — không phải khi nó chưa chạy. */
+  run: StepRunView | null
+  /** `'none'` nghĩa là KHÔNG BIẾT, khác hẳn `'pending'` (biết là chưa tới lượt). */
+  status: string
+}
+
+export interface DiagramNode {
+  index: number
+  type: 'ingest' | 'sql'
+  label: string
+  status: string
+}
+
+/**
+ * Ghép chuỗi bước hiện tại với các hàng step-run — **theo `step_index`, KHÔNG theo vị
+ * trí mảng**.
+ *
+ * Vì sao điều này quan trọng: một run là một sự kiện đã xảy ra trên định nghĩa lúc ĐÓ,
+ * còn `steps` là định nghĩa BÂY GIỜ. Người dùng sửa pipeline sau khi run chạy là chuyện
+ * bình thường, nên hai mảng có thể khác độ dài và `step_index` có thể không liên tục.
+ * Ghép theo vị trí trong trường hợp đó gán trạng thái của một bước cho một bước KHÁC —
+ * không lỗi, không cảnh báo, chỉ nói sai bước nào đã hỏng. Đó là kiểu sai tệ nhất ở
+ * đúng màn hình mà người ta mở ra để tìm hiểu vì sao run hỏng.
+ *
+ * Một `step_index` trỏ ra ngoài chuỗi hiện tại bị BỎ QUA thay vì đẻ thêm node: sơ đồ vẽ
+ * định nghĩa hiện tại, và một node không có bước tương ứng thì không sửa được, không
+ * xoá được, không có nghĩa gì.
+ */
+export function mergeStepStatus(
+  steps: PipelineStepView[],
+  stepRuns: StepRunView[],
+): MergedStep[] {
+  const byIndex = new Map<number, StepRunView>()
+  for (const run of stepRuns) {
+    if (typeof run.step_index === 'number') byIndex.set(run.step_index, run)
+  }
+  return steps.map((step, index) => {
+    const run = byIndex.get(index) ?? null
+    return { index, step, run, status: run?.status ?? 'none' }
+  })
+}
+
+/**
+ * Node của sơ đồ — DẪN XUẤT từ `steps`, không bao giờ lưu.
+ *
+ * `stepRuns` không truyền thì mọi node mang `status: 'none'`. Đó là cách trang pipeline
+ * dùng nó (vẽ HÌNH DẠNG), còn chi tiết run truyền vào để vẽ hình dạng CỘNG trạng thái.
+ * Một hàm cho hai chỗ là lý do phương án C của spec rẻ hơn nó trông.
+ *
+ * `label` của bước nạp lấy nguyên `stream` (vd. `public.orders`), KHÔNG cắt bớt: cắt ở
+ * đây là cắt trước khi biết node rộng bao nhiêu pixel, tức đoán mù. Nơi biết bề rộng
+ * thật là `PipelineDiagram` — cắt bằng CSS (`text-overflow: ellipsis`) ở đó, kèm
+ * `title` mang tên đầy đủ, là việc của module đó, không phải của module thuần này.
+ */
+export function diagramNodes(
+  steps: PipelineStepView[],
+  stepRuns: StepRunView[] = [],
+): DiagramNode[] {
+  return mergeStepStatus(steps, stepRuns).map(({ index, step, status }) => ({
+    index,
+    type: step.type,
+    label: step.type === 'ingest' ? (step.ingest?.stream ?? 'Ingest') : 'SQL',
+    status,
+  }))
+}

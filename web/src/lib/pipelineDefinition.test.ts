@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { describeStep, parseSteps } from './pipelineDefinition'
+import { describeStep, diagramNodes, mergeStepStatus, parseSteps } from './pipelineDefinition'
+import type { PipelineStepView, StepRunView } from './pipelineDefinition'
 
 describe('parseSteps', () => {
   it('đọc một chuỗi bước hợp lệ theo đúng thứ tự', () => {
@@ -104,5 +105,77 @@ describe('describeStep', () => {
     })
     expect(text).not.toContain('\n')
     expect(text).toContain('select a, b from t')
+  })
+})
+
+const INGEST: PipelineStepView = {
+  type: 'ingest',
+  ingest: {
+    lakehouse_id: 'lh-1',
+    connection_id: 'conn-1',
+    stream: 'public.orders',
+    mode: 'incremental',
+  },
+}
+const SQL: PipelineStepView = {
+  type: 'sql',
+  sql: { lakehouse_id: 'lh-1', sql: 'select 1' },
+}
+
+describe('diagramNodes', () => {
+  it('một node cho mỗi bước, theo thứ tự, không trạng thái khi không có run', () => {
+    const nodes = diagramNodes([INGEST, SQL])
+    expect(nodes.map((n) => n.type)).toEqual(['ingest', 'sql'])
+    expect(nodes.map((n) => n.status)).toEqual(['none', 'none'])
+    expect(nodes[0].index).toBe(0)
+    expect(nodes[1].index).toBe(1)
+  })
+
+  it('mang trạng thái vào khi có stepRuns', () => {
+    const stepRuns: StepRunView[] = [
+      { step_index: 0, step_type: 'ingest', status: 'succeeded', error: null },
+      { step_index: 1, step_type: 'sql', status: 'failed', error: 'boom' },
+    ]
+    const nodes = diagramNodes([INGEST, SQL], stepRuns)
+    expect(nodes.map((n) => n.status)).toEqual(['succeeded', 'failed'])
+  })
+
+  it('mảng bước rỗng cho ra mảng node rỗng', () => {
+    expect(diagramNodes([])).toEqual([])
+  })
+})
+
+describe('mergeStepStatus', () => {
+  it('ghép theo step_index, KHÔNG theo vị trí mảng', () => {
+    // `step_index` không liên tục: run này chạy trên một definition CŨ có ba bước, và
+    // bước ở giữa đã bị xoá khỏi definition hiện tại. Ghép theo VỊ TRÍ sẽ gán trạng
+    // thái của step_index 2 cho bước ở vị trí 1 — tức nói sai bước nào đã hỏng, đúng
+    // lúc người ta đang tìm hiểu vì sao run hỏng.
+    const stepRuns: StepRunView[] = [
+      { step_index: 0, step_type: 'ingest', status: 'succeeded', error: null },
+      { step_index: 2, step_type: 'sql', status: 'failed', error: 'boom' },
+    ]
+    const merged = mergeStepStatus([INGEST, SQL, SQL], stepRuns)
+
+    expect(merged.map((m) => m.status)).toEqual(['succeeded', 'none', 'failed'])
+    expect(merged[1].run).toBeNull()
+    expect(merged[2].run?.error).toBe('boom')
+  })
+
+  it('bỏ qua một stepRun trỏ ra ngoài chuỗi bước hiện tại', () => {
+    // Run của một definition có NHIỀU bước hơn bản hiện tại. Không được ném, và không
+    // được đẻ ra một node thứ ba mà definition không có.
+    const stepRuns: StepRunView[] = [
+      { step_index: 0, step_type: 'ingest', status: 'succeeded', error: null },
+      { step_index: 7, step_type: 'sql', status: 'failed', error: 'boom' },
+    ]
+    const merged = mergeStepStatus([INGEST], stepRuns)
+    expect(merged).toHaveLength(1)
+    expect(merged[0].status).toBe('succeeded')
+  })
+
+  it('không stepRuns thì mọi bước là none', () => {
+    const merged = mergeStepStatus([INGEST, SQL], [])
+    expect(merged.map((m) => m.status)).toEqual(['none', 'none'])
   })
 })
